@@ -1,5 +1,38 @@
 from OpenGL.GL import *
 from OpenGL.GLU import *
+from .enums import Body34Joint, Body18Joint
+
+def _person_to_dict(person):
+    """Normalize a person entry to a dict with 'skeleton' being a list of joint dicts.
+    Accepts either a dataclass `Person` (with .skeleton list of Joint objects) or a dict
+    (already serialized). Returns a dict view without modifying the original.
+    """
+    # If it's already a dict-like object
+    if isinstance(person, dict):
+        return person
+
+    # Dataclass-style: has attribute 'skeleton'
+    if hasattr(person, 'skeleton'):
+        sk = []
+        for j in person.skeleton:
+            # joint may be dataclass with .pos attribute or a dict
+            if hasattr(j, 'pos'):
+                sk.append({
+                    'i': getattr(j, 'i', None),
+                    'pos': getattr(j, 'pos'),
+                    'ori': getattr(j, 'ori', None) if hasattr(j, 'ori') else None,
+                    'conf': getattr(j, 'conf', 0.0)
+                })
+            else:
+                sk.append(j)
+        return {'skeleton': sk, 'id': getattr(person, 'id', None), 'confidence': getattr(person, 'confidence', None)}
+
+    # Fallback: try to treat as mapping
+    try:
+        return dict(person)
+    except Exception:
+        return {'skeleton': []}
+
 
 class SkeletonVisualizer3D:
     """
@@ -17,8 +50,11 @@ class SkeletonVisualizer3D:
         glColor3f(*color)
         glPointSize(6.0)
         glBegin(GL_POINTS)
-        for joint in person.skeleton:
-            pos = joint.pos if hasattr(joint, 'pos') else joint["pos"]
+        p = _person_to_dict(person)
+        for joint in p.get('skeleton', []):
+            pos = joint['pos'] if isinstance(joint, dict) else getattr(joint, 'pos', None)
+            if pos is None:
+                continue
             glVertex3f(pos["x"], pos["y"], pos["z"])
         glEnd()
 
@@ -28,3 +64,245 @@ class SkeletonVisualizer3D:
         """
         for person in people:
             self.draw_person(person, color=color)
+
+    def draw_skeleton_with_bones(self, people_data, joint_color=(0.2, 0.8, 1.0), bone_color=(0.8, 0.2, 0.2)):
+        """
+        Draws skeleton with bone connections for BODY_34 model.
+        :param people_data: List of people data (serialized format)
+        :param joint_color: RGB tuple for joint points
+        :param bone_color: RGB tuple for bone lines
+        """
+        for p in people_data:
+            p = _person_to_dict(p)
+            skeleton = p.get("skeleton", [])
+            
+            # Draw skeleton bones (lines between joints) for BODY_34
+            glColor3f(*bone_color)
+            glLineWidth(2.0)
+            glBegin(GL_LINES)
+            
+            # BODY_34 bone connections using enum values for clarity
+            J = Body34Joint  # Shorthand for readability
+            bones = [
+                # Spine
+                (J.PELVIS.value, J.NAVAL_SPINE.value),
+                (J.NAVAL_SPINE.value, J.CHEST_SPINE.value),
+                (J.CHEST_SPINE.value, J.NECK.value),
+                (J.NECK.value, J.HEAD.value),
+                
+                # Left arm
+                (J.NECK.value, J.LEFT_CLAVICLE.value),
+                (J.LEFT_CLAVICLE.value, J.LEFT_SHOULDER.value),
+                (J.LEFT_SHOULDER.value, J.LEFT_ELBOW.value),
+                (J.LEFT_ELBOW.value, J.LEFT_WRIST.value),
+                (J.LEFT_WRIST.value, J.LEFT_HAND.value),
+                (J.LEFT_HAND.value, J.LEFT_HANDTIP.value),
+                (J.LEFT_HAND.value, J.LEFT_THUMB.value),
+                
+                # Right arm  
+                (J.NECK.value, J.RIGHT_CLAVICLE.value),
+                (J.RIGHT_CLAVICLE.value, J.RIGHT_SHOULDER.value),
+                (J.RIGHT_SHOULDER.value, J.RIGHT_ELBOW.value),
+                (J.RIGHT_ELBOW.value, J.RIGHT_WRIST.value),
+                (J.RIGHT_WRIST.value, J.RIGHT_HAND.value),
+                (J.RIGHT_HAND.value, J.RIGHT_HANDTIP.value),
+                (J.RIGHT_HAND.value, J.RIGHT_THUMB.value),
+                
+                # Left leg
+                (J.PELVIS.value, J.LEFT_HIP.value),
+                (J.LEFT_HIP.value, J.LEFT_KNEE.value),
+                (J.LEFT_KNEE.value, J.LEFT_ANKLE.value),
+                (J.LEFT_ANKLE.value, J.LEFT_FOOT.value),
+                (J.LEFT_ANKLE.value, J.LEFT_HEEL.value),
+                
+                # Right leg
+                (J.PELVIS.value, J.RIGHT_HIP.value),
+                (J.RIGHT_HIP.value, J.RIGHT_KNEE.value),
+                (J.RIGHT_KNEE.value, J.RIGHT_ANKLE.value),
+                (J.RIGHT_ANKLE.value, J.RIGHT_FOOT.value),
+                (J.RIGHT_ANKLE.value, J.RIGHT_HEEL.value),
+                
+                # Face
+                (J.HEAD.value, J.NOSE.value),
+                (J.HEAD.value, J.LEFT_EYE.value),
+                (J.HEAD.value, J.RIGHT_EYE.value),
+                (J.LEFT_EYE.value, J.LEFT_EAR.value),
+                (J.RIGHT_EYE.value, J.RIGHT_EAR.value),
+            ]
+            
+            for bone in bones:
+                if bone[0] < len(skeleton) and bone[1] < len(skeleton):
+                    j1 = skeleton[bone[0]]["pos"]
+                    j2 = skeleton[bone[1]]["pos"]
+                    glVertex3f(j1["x"], j1["y"], j1["z"])
+                    glVertex3f(j2["x"], j2["y"], j2["z"])
+            
+            glEnd()
+            
+            # Draw joint points on top of bones
+            glColor3f(*joint_color)
+            glPointSize(8.0)
+            glBegin(GL_POINTS)
+            for j in skeleton:
+                pos = j['pos'] if isinstance(j, dict) else getattr(j, 'pos', None)
+                if pos is None:
+                    continue
+                glVertex3f(pos["x"], pos["y"], pos["z"])
+            glEnd()
+
+
+def draw_skeleton(person, color=(0.2, 0.8, 1.0)):
+    """
+    Backwards-compatible helper that draws a single person's skeleton using the module-level visualizer.
+    """
+    v = SkeletonVisualizer3D()
+    v.draw_person(person, color=color)
+
+
+def draw_skeletons_with_bones(people_data, joint_color=(0.2, 0.8, 1.0), bone_color=(0.8, 0.2, 0.2)):
+    """
+    Helper function to draw skeletons with bone connections.
+    """
+    v = SkeletonVisualizer3D()
+    v.draw_skeleton_with_bones(people_data, joint_color=joint_color, bone_color=bone_color)
+
+
+def estimate_floor_height(people_data):
+    """
+    Estimate floor height based on foot/ankle positions of tracked people.
+    Returns the estimated floor Y coordinate, or None if no data available.
+    """
+    if not people_data:
+        return None
+    
+    # Collect foot/ankle Y positions
+    foot_heights = []
+    
+    for person in people_data:
+        p = _person_to_dict(person)
+        skeleton = p.get("skeleton", [])
+        if len(skeleton) > 32:  # Ensure we have BODY_34 data with heel joints
+            # Get foot/ankle joint indices (BODY_34 model) - using correct indices
+            ankle_joints = [20, 24]  # LEFT_ANKLE, RIGHT_ANKLE
+            foot_joints = [21, 25]   # LEFT_FOOT, RIGHT_FOOT
+            heel_joints = [32, 33]   # LEFT_HEEL, RIGHT_HEEL
+            
+            for joint_idx in ankle_joints + foot_joints + heel_joints:
+                if joint_idx < len(skeleton):
+                    joint = skeleton[joint_idx]
+                    y_pos = joint["pos"]["y"]
+                    foot_heights.append(y_pos)
+    
+    if foot_heights:
+        # Use the minimum Y value (lowest point) as floor estimate
+        # Add a small offset as feet aren't exactly on the floor
+        estimated_floor = min(foot_heights) - 50  # 50mm below lowest foot point
+        return estimated_floor
+    
+    return None
+
+
+# Global variables for stable floor height tracking
+_floor_height_history = []
+_stable_floor_height = None
+_floor_height_samples = 30  # Number of samples to average
+
+
+def get_stable_floor_height(people_data):
+    """
+    Get a stable floor height that doesn't jump around frame by frame.
+    Uses a moving average of floor height estimates.
+    """
+    global _floor_height_history, _stable_floor_height
+    
+    # Get current frame estimate
+    current_estimate = estimate_floor_height(people_data)
+    
+    if current_estimate is not None:
+        # Add to history
+        _floor_height_history.append(current_estimate)
+        
+        # Keep only recent samples
+        if len(_floor_height_history) > _floor_height_samples:
+            _floor_height_history.pop(0)
+        
+        # Calculate stable height using median (more robust than mean)
+        if len(_floor_height_history) >= 5:  # Need at least 5 samples
+            sorted_heights = sorted(_floor_height_history)
+            median_height = sorted_heights[len(sorted_heights) // 2]
+            
+            # Only update if the change is significant (> 50mm) to avoid drift
+            if _stable_floor_height is None or abs(median_height - _stable_floor_height) > 50:
+                _stable_floor_height = median_height
+    
+    return _stable_floor_height
+
+
+def draw_floor_grid(size=2000, spacing=100, height=None, color=(0.3, 0.3, 0.3), people_data=None, zed_floor_height=None):
+    """
+    Draw a floor grid for spatial reference.
+    :param size: Total size of the grid in mm (ZED coordinates)
+    :param spacing: Spacing between grid lines in mm
+    :param height: Y-coordinate height of the floor (None for auto-detection)
+    :param color: RGB tuple for grid line color
+    :param people_data: People data for floor height estimation (if height=None)
+    :param zed_floor_height: Floor height detected by ZED SDK findFloorPlane (preferred)
+    """
+    # Priority order for floor height detection:
+    # 1. Explicit height parameter
+    # 2. ZED SDK detected floor height
+    # 3. Stable foot-based estimation from people data
+    # 4. Fallback to origin (0)
+    
+    if height is None:
+        if zed_floor_height is not None:
+            height = zed_floor_height
+        elif people_data is not None:
+            # Use stable floor height instead of per-frame estimation
+            stable_height = get_stable_floor_height(people_data)
+            if stable_height is not None:
+                height = stable_height
+            else:
+                height = 0  # Fallback to origin
+        else:
+            height = 0  # Default fallback
+    
+    glColor3f(*color)
+    glLineWidth(1.0)
+    glBegin(GL_LINES)
+    
+    # Calculate grid bounds
+    half_size = size // 2
+    
+    # Draw lines parallel to X-axis (running along Z)
+    for z in range(-half_size, half_size + 1, spacing):
+        glVertex3f(-half_size, height, z)
+        glVertex3f(half_size, height, z)
+    
+    # Draw lines parallel to Z-axis (running along X)
+    for x in range(-half_size, half_size + 1, spacing):
+        glVertex3f(x, height, -half_size)
+        glVertex3f(x, height, half_size)
+    
+    glEnd()
+    
+    # Draw coordinate axes for reference
+    glLineWidth(3.0)
+    glBegin(GL_LINES)
+    
+    # X-axis (red)
+    glColor3f(1.0, 0.0, 0.0)
+    glVertex3f(0, height, 0)
+    glVertex3f(200, height, 0)
+    
+    # Z-axis (blue) 
+    glColor3f(0.0, 0.0, 1.0)
+    glVertex3f(0, height, 0)
+    glVertex3f(0, height, 200)
+    
+    # Y-axis (green) - pointing up from floor
+    glColor3f(0.0, 1.0, 0.0)
+    glVertex3f(0, height, 0)
+    glVertex3f(0, height + 200, 0)
+    
+    glEnd()

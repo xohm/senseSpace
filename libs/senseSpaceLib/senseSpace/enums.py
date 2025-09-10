@@ -1,13 +1,59 @@
 from enum import Enum
 
 class Body18Joint(Enum):
-    # Add actual joint names and indices as needed
-    HEAD = 0
-    NECK = 1
-    # ...
+    """ZED SDK BODY_18 joint indices"""
+    PELVIS = 0
+    NAVAL_SPINE = 1
+    CHEST_SPINE = 2
+    NECK = 3
+    LEFT_CLAVICLE = 4
+    LEFT_SHOULDER = 5
+    LEFT_ELBOW = 6
+    LEFT_WRIST = 7
+    LEFT_HAND = 8
+    LEFT_HANDTIP = 9
+    LEFT_THUMB = 10
+    RIGHT_CLAVICLE = 11
+    RIGHT_SHOULDER = 12
+    RIGHT_ELBOW = 13
+    RIGHT_WRIST = 14
+    RIGHT_HAND = 15
+    RIGHT_HANDTIP = 16
+    RIGHT_THUMB = 17
 
 class Body34Joint(Enum):
-    # Add actual joint names and indices as needed
-    HEAD = 0
-    NECK = 1
-    # ...
+    """ZED SDK BODY_34 joint indices"""
+    PELVIS = 0
+    NAVAL_SPINE = 1
+    CHEST_SPINE = 2
+    NECK = 3
+    LEFT_CLAVICLE = 4
+    LEFT_SHOULDER = 5
+    LEFT_ELBOW = 6
+    LEFT_WRIST = 7
+    LEFT_HAND = 8
+    LEFT_HANDTIP = 9
+    LEFT_THUMB = 10
+    RIGHT_CLAVICLE = 11
+    RIGHT_SHOULDER = 12
+    RIGHT_ELBOW = 13
+    RIGHT_WRIST = 14
+    RIGHT_HAND = 15
+    RIGHT_HANDTIP = 16
+    RIGHT_THUMB = 17
+    LEFT_HIP = 18
+    LEFT_KNEE = 19
+    LEFT_ANKLE = 20
+    LEFT_FOOT = 21
+    RIGHT_HIP = 22
+    RIGHT_KNEE = 23
+    RIGHT_ANKLE = 24
+    RIGHT_FOOT = 25
+    HEAD = 26
+    NOSE = 27
+    LEFT_EYE = 28
+    LEFT_EAR = 29
+    RIGHT_EYE = 30
+    RIGHT_EAR = 31
+    LEFT_HEEL = 32
+    RIGHT_HEEL = 33

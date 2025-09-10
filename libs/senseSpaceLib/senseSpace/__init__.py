@@ -5,15 +5,17 @@ A shared library for client and server communication, protocol handling, and vis
 """
 
 
-# Import protocol and enums from local package for shared use
+"""Lightweight package exports for senseSpaceLib.senseSpace.
+
+This file intentionally avoids importing heavy optional dependencies (OpenGL, PyQt5, ZED SDK)
+so that the package can be imported in environments where those are not installed. Import
+visualization, communication, and server modules lazily from application entrypoints.
+"""
+
 from .protocol import Frame, Person, Joint
 from .enums import Body18Joint, Body34Joint
 
-# Import shared communication and visualization modules
-from .communication import TCPServer, TCPClient
-from .visualization import draw_skeleton
-
-# Communication utilities (TCP client/server helpers)
-# Visualization utilities (for drawing skeletons, etc.)
-
-# Add more shared logic here as needed
+__all__ = [
+	'Frame', 'Person', 'Joint',
+	'Body18Joint', 'Body34Joint'
+]

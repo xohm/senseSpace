@@ -1,51 +1,124 @@
-import sys
-import socket
-import json
-import threading
-import argparse
-from PyQt5.QtWidgets import QApplication
-from libs.senseSpaceLib.senseSpace.protocol import Frame
-from server.qt_viewer import MainWindow
+#!/usr/bin/env python3
+"""
+SenseSpace Client - Connects to server and displays body tracking data
 
-def receive_thread(sock, on_frame):
-    buffer = ""
-    while True:
-        data = sock.recv(4096)
-        if not data:
-            break
-        buffer += data.decode('utf-8')
-        while '\n' in buffer:
-            line, buffer = buffer.split('\n', 1)
-            try:
-                msg = json.loads(line)
-                if msg.get("type") == "frame":
-                    frame = Frame.from_dict(msg["data"])
-                    on_frame(frame)
-            except Exception as e:
-                print(f"[ERROR] Failed to parse frame: {e}")
+Usage:
+    python senseSpaceClient.py --viz                                    # Visualization mode with localhost:12345
+    python senseSpaceClient.py --server 192.168.1.100 --port 12346     # Command line mode with custom server
+    python senseSpaceClient.py --viz --server 192.168.1.100             # Visualization mode with custom server
+"""
+
+import argparse
+import sys
+import time
+from typing import Optional
+
+import os, sys
+# Ensure local 'libs' folder is on sys.path when running from repo
+# repo structure: <repo_root>/client/senseSpaceClient.py and <repo_root>/libs/senseSpaceLib
+# so the repo root is one level up from the client folder.
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+libs_path = os.path.join(repo_root, 'libs')
+if os.path.isdir(libs_path) and libs_path not in sys.path:
+    sys.path.insert(0, libs_path)
+elif repo_root not in sys.path:
+    # Fallback: add repo root so an installed package or alternative layout can still import
+    sys.path.insert(0, repo_root)
+
+# Import from our shared library
+from senseSpaceLib.senseSpace.client import SenseSpaceClient, CommandLineClient
+from senseSpaceLib.senseSpace.protocol import Frame
+
+
+class VisualizationClient(SenseSpaceClient):
+    """Client with Qt OpenGL visualization"""
+    
+    def __init__(self, server_ip="localhost", server_port=12345):
+        super().__init__(server_ip, server_port)
+        
+        # Qt components
+        self.qt_app = None
+        self.qt_viewer = None
+        
+        # Set up callbacks
+        self.set_frame_callback(self._on_frame_received)
+        self.set_connection_callback(self._on_connection_changed)
+    
+    def _on_frame_received(self, frame: Frame):
+        """Update Qt viewer with new frame"""
+        if self.qt_viewer:
+            self.qt_viewer.update_frame(frame)
+    
+    def _on_connection_changed(self, connected: bool):
+        """Handle connection status changes"""
+        if connected:
+            print(f"[INFO] Connected to {self.server_ip}:{self.server_port}")
+        else:
+            print(f"[INFO] Disconnected from {self.server_ip}:{self.server_port}")
+    
+    def run(self) -> bool:
+        """Run client in visualization mode"""
+        try:
+            from PyQt5 import QtWidgets, QtCore
+            from qt_client_viewer import ClientSkeletonGLWidget
+        except ImportError as e:
+            print(f"[ERROR] PyQt5 not available for visualization mode: {e}")
+            print("[INFO] Install PyQt5 and PyOpenGL: pip install PyQt5 PyOpenGL")
+            return False
+        
+        if not self.connect():
+            return False
+        
+        # Create Qt application
+        self.qt_app = QtWidgets.QApplication(sys.argv)
+        
+        # Create main window
+        main_window = QtWidgets.QMainWindow()
+        main_window.setWindowTitle(f"SenseSpace Client - {self.server_ip}:{self.server_port}")
+        main_window.resize(800, 600)
+        
+        # Create OpenGL viewer widget
+        self.qt_viewer = ClientSkeletonGLWidget()
+        main_window.setCentralWidget(self.qt_viewer)
+        
+        # Show window
+        main_window.show()
+        
+        print("[INFO] Running in visualization mode. Close window to exit...")
+        
+        try:
+            exit_code = self.qt_app.exec_()
+            return exit_code == 0
+        finally:
+            self.disconnect()
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", required=True, help="Server IP or hostname")
-    parser.add_argument("--port", type=int, default=5000, help="Server port")
+    parser = argparse.ArgumentParser(description="SenseSpace Client - Connect to server and display body tracking data")
+    parser.add_argument("--server", "-s", default="localhost", help="Server IP address (default: localhost)")
+    parser.add_argument("--port", "-p", type=int, default=12345, help="Server port (default: 12345)")
+    parser.add_argument("--viz", "--visualization", action="store_true", help="Enable visualization mode (Qt OpenGL)")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output in command line mode")
+    
     args = parser.parse_args()
+    
+    # Create appropriate client type
+    if args.viz:
+        client = VisualizationClient(
+            server_ip=args.server,
+            server_port=args.port
+        )
+    else:
+        client = CommandLineClient(
+            server_ip=args.server,
+            server_port=args.port,
+            verbose=args.verbose
+        )
+    
+    # Run client
+    success = client.run()
+    sys.exit(0 if success else 1)
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((args.host, args.port))
-    print(f"[CLIENT] Connected to {args.host}:{args.port}")
-
-    app = QApplication(sys.argv)
-    win = MainWindow()
-    win.show()
-
-    def on_frame(frame):
-        # frame: Frame object
-        people_data = [p.to_dict() for p in frame.people]
-        win.update_people(people_data)
-
-    threading.Thread(target=receive_thread, args=(sock, on_frame), daemon=True).start()
-    sys.exit(app.exec_())
 
 if __name__ == "__main__":
     main()

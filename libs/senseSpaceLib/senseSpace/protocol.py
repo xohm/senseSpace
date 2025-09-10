@@ -62,18 +62,24 @@ class Frame:
     timestamp: float
     people: List[Person]
     body_model: str = ""   # set from config
+    floor_height: float = None  # ZED SDK detected floor height in mm
 
     def to_dict(self):
-        return {
+        data = {
             "timestamp": self.timestamp,
             "people": [p.to_dict() for p in self.people],
-            "body_model": self.body_model
+            "body_model": self.body_model,
         }
+        # Only include floor_height when present
+        if self.floor_height is not None:
+            data["floor_height"] = self.floor_height
+        return data
 
     @staticmethod
     def from_dict(d):
         return Frame(
             timestamp=d["timestamp"],
             people=[Person.from_dict(p) for p in d["people"]],
-            body_model=d.get("body_model", "")
+            body_model=d.get("body_model", ""),
+            floor_height=d.get("floor_height", None)
         )
