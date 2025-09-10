@@ -1,2 +1,3 @@
 # senseSpace
-ChatGPT said:  SenseSpace is an interactive art environment that transforms human presence and movement into a shared spatial experience.
+
+SenseSpace is a distributed, interactive media art environment designed to gather, track, and transform human interactions. Within this container, the presence and movement of visitors are sensed and translated into a shared spatial experience. The work explores how bodies, data, and space intersect, creating an evolving choreography of participation where technology and perception merge.
