@@ -1,0 +1,44 @@
+{
+    "33253574": {
+        "FusionConfiguration": {
+            "communication_parameters": {
+                "CommunicationParameters": {
+                    "communication_type": "INTRA PROCESS",
+                    "ip_add": "",
+                    "ip_port": 0
+                }
+            },
+            "input_type": {
+                "InputType": {
+                    "input": "",
+                    "input_type_conf": "33253574",
+                    "input_type_input": "USB SERIAL"
+                }
+            },
+            "override_gravity": false,
+            "pose": "1.000000 0.000000 0.000000 0.000000 0.000000 1.000000 0.000000 -1.304141 0.000000 0.000000 1.000000 0.000000 0.000000 0.000000 0.000000 1.000000",
+            "serial_number": 33253574
+        }
+    },
+    "34893077": {
+        "FusionConfiguration": {
+            "communication_parameters": {
+                "CommunicationParameters": {
+                    "communication_type": "INTRA PROCESS",
+                    "ip_add": "",
+                    "ip_port": 0
+                }
+            },
+            "input_type": {
+                "InputType": {
+                    "input": "",
+                    "input_type_conf": "34893077",
+                    "input_type_input": "USB SERIAL"
+                }
+            },
+            "override_gravity": false,
+            "pose": "0.279165 0.018331 0.960068 -2.052743 0.015258 0.999607 -0.023522 -1.432056 -0.960122 0.021216 0.278775 2.322224 0.000000 0.000000 0.000000 1.000000",
+            "serial_number": 34893077
+        }
+    }
+}

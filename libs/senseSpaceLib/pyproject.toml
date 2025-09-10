@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "senseSpaceLib"
+version = "0.1.0"
+description = "Shared protocol and data structures for senseSpace server and client."
+authors = [
+  { name = "Max Rheiner", email = "max.rheiner@zhdk.ch" }
+]
+readme = "README.md"
+requires-python = ">=3.7"
