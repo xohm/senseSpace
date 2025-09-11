@@ -13,6 +13,7 @@ import queue
 from typing import List, Optional, Callable
 import pyzed.sl as sl
 import os
+from PyQt5.QtGui import QVector3D, QQuaternion
 
 # Import protocol classes
 try:
@@ -416,10 +417,11 @@ class SenseSpaceServer:
         """Return the detected floor height from ZED SDK, or None if not detected."""
         return self.detected_floor_height
 
+
     def get_camera_poses(self):
         """
-        Return a dict with camera poses and floor info.
-        - Always try to detect floor first using find_floor_plane function
+        Return a dict with camera poses and floor info, converted into OpenGL coords.
+        - Detect floor first
         - In fusion mode: read from calibration file and adjust for floor
         - In single camera mode: use SDK defaults
         """
@@ -429,26 +431,21 @@ class SenseSpaceServer:
         poses = []
         floor_info = None
 
-        # FIRST: Always try to detect floor height using the existing find_floor_plane function
+        # --- Detect floor height first ---
         detected_floor_height = None
         try:
-            # Use the enhanced find_floor_plane function
             self.find_floor_plane()
             if self.detected_floor_height is not None:
                 detected_floor_height = self.detected_floor_height
                 detection_source = "fusion" if self.is_fusion_mode else "camera"
                 print(f"[INFO] Floor detected at height {detected_floor_height} mm (via {detection_source})")
-                floor_info = {
-                    "height": detected_floor_height
-                }
+                floor_info = {"height": detected_floor_height}
         except Exception as e:
             print(f"[WARNING] Floor detection error: {e}")
 
-        # Use detected floor height or fallback to stored value or zero
         floor_height_mm = detected_floor_height or self.detected_floor_height or 0.0
 
         if self.is_fusion_mode:
-            # Fusion mode: read static calibration file and adjust for floor
             try:
                 calib_file = self._find_calibration_file()
                 if not calib_file:
@@ -463,10 +460,10 @@ class SenseSpaceServer:
                         fusion_config = entry.get('FusionConfiguration', {})
                         serial = fusion_config.get('serial_number', key)
                         pose_data = fusion_config.get('pose')
-
                         if not pose_data:
                             continue
 
+                        # Parse pose string into flat list of 16 floats
                         if isinstance(pose_data, str):
                             values = pose_data.strip().split()
                             if len(values) != 16:
@@ -482,25 +479,40 @@ class SenseSpaceServer:
                         else:
                             continue
 
-                        # Extract position and convert from meters to millimeters
+                        # --- Convert to OpenGL coords (F * M * F) ---
+                        F = [
+                            [1, 0,  0, 0],
+                            [0, 1,  0, 0],
+                            [0, 0, -1, 0],
+                            [0, 0,  0, 1]
+                        ]
+
+                        def matmul(A, B):
+                            return [[sum(A[i][k]*B[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+
+                        M_zed = matrix
+                        M_gl = matmul(matmul(F, M_zed), F)
+
+                        # --- Extract position (mm) ---
                         position = {
-                            'x': matrix[0][3] * 1000.0,  # X in mm
-                            'y': matrix[1][3] * 1000.0 - (2 * floor_height_mm),  # Y in mm
-                            'z': matrix[2][3] * 1000.0    # Z in mm
+                            'x': M_gl[0][3] * 1000.0,
+                            'y': M_gl[1][3] * 1000.0 - (2 * floor_height_mm),
+                            'z': M_gl[2][3] * 1000.0
                         }
 
-                        # Extract rotation matrix (top-left 3x3) and convert to quaternion
-                        rotation_matrix = [
-                            [matrix[0][0], matrix[0][1], matrix[0][2]],
-                            [matrix[1][0], matrix[1][1], matrix[1][2]],
-                            [matrix[2][0], matrix[2][1], matrix[2][2]]
+                        # --- Extract rotation matrix ---
+                        R = [
+                            [M_gl[0][0], M_gl[0][1], M_gl[0][2]],
+                            [M_gl[1][0], M_gl[1][1], M_gl[1][2]],
+                            [M_gl[2][0], M_gl[2][1], M_gl[2][2]]
                         ]
-                        
-                        # Convert 3x3 rotation matrix to quaternion
-                        quat = self._matrix_to_quaternion(rotation_matrix)
+
+                        # --- Convert to quaternion ---
+                        quat = self._matrix_to_quaternion(R)  # returns (x,y,z,w)
+
                         orientation = {
                             'x': quat[0],
-                            'y': quat[1], 
+                            'y': quat[1],
                             'z': quat[2],
                             'w': quat[3]
                         }
@@ -511,7 +523,7 @@ class SenseSpaceServer:
                             "orientation": orientation
                         })
 
-                        print(f"[DEBUG] Camera {serial}: pos={position}, orientation={orientation}")
+                        print(f"[DEBUG] Camera {serial}: pos={position}, quat={orientation}")
 
                     except Exception as e:
                         print(f"[WARNING] Failed to parse pose for {key}: {e}")
@@ -520,7 +532,7 @@ class SenseSpaceServer:
                 print(f"[WARNING] Failed to read calibration file: {e}")
 
         else:
-            # Single camera mode: use SDK defaults, adjusted for floor
+            # Single camera mode
             try:
                 serial = str(self.camera.get_camera_information().serial_number)
             except Exception:
@@ -529,7 +541,7 @@ class SenseSpaceServer:
             poses.append({
                 "serial": serial,
                 "position": {'x': 0.0, 'y': 0.0, 'z': 0.0},
-                "orientation": {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}  # Identity quaternion
+                "orientation": {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}
             })
 
         result = {"cameras": poses, "floor": floor_info}
@@ -707,6 +719,87 @@ class SenseSpaceServer:
             print(f"[ERROR] Failed to find camera by serial: {e}")
             return False
 
+    @staticmethod
+    def pose_to_qt(pose_values):
+        """
+        Convert a 16-element list or space-separated string into
+        OpenGL position (QVector3D) + orientation (QQuaternion),
+        using only Qt classes.
+
+        Args:
+            pose_values: list of 16 floats OR space-separated string
+
+        Returns:
+            (QVector3D, QQuaternion)
+        """
+        import math
+
+        # Parse input
+        if isinstance(pose_values, str):
+            pose_values = list(map(float, pose_values.strip().split()))
+        if len(pose_values) != 16:
+            raise ValueError("Pose must have 16 values")
+
+        # Convert to 4x4 row-major matrix
+        m = [pose_values[i*4:(i+1)*4] for i in range(4)]
+
+        # Flip Z axis for OpenGL (multiply by diag(1,1,-1,1) on both sides)
+        F = [
+            [1, 0,  0, 0],
+            [0, 1,  0, 0],
+            [0, 0, -1, 0],
+            [0, 0,  0, 1]
+        ]
+        # M_gl = F * m * F
+        def mat_mult(a, b):
+            return [
+                [sum(a[i][k] * b[k][j] for k in range(4)) for j in range(4)]
+                for i in range(4)
+            ]
+        M_gl = mat_mult(F, mat_mult(m, F))
+
+        # Extract translation
+        tx = M_gl[0][3]
+        ty = M_gl[1][3]
+        tz = M_gl[2][3]
+        pos = QVector3D(tx, ty, tz)
+
+        # Extract rotation (top-left 3x3)
+        r00, r01, r02 = M_gl[0][0], M_gl[0][1], M_gl[0][2]
+        r10, r11, r12 = M_gl[1][0], M_gl[1][1], M_gl[1][2]
+        r20, r21, r22 = M_gl[2][0], M_gl[2][1], M_gl[2][2]
+
+        # Quaternion from rotation matrix (robust, normalized)
+        trace = r00 + r11 + r22
+        if trace > 0:
+            s = 0.5 / math.sqrt(trace + 1.0)
+            w = 0.25 / s
+            x = (r21 - r12) * s
+            y = (r02 - r20) * s
+            z = (r10 - r01) * s
+        elif r00 > r11 and r00 > r22:
+            s = 2.0 * math.sqrt(1.0 + r00 - r11 - r22)
+            w = (r21 - r12) / s
+            x = 0.25 * s
+            y = (r01 + r10) / s
+            z = (r02 + r20) / s
+        elif r11 > r22:
+            s = 2.0 * math.sqrt(1.0 + r11 - r00 - r22)
+            w = (r02 - r20) / s
+            x = (r01 + r10) / s
+            y = 0.25 * s
+            z = (r12 + r21) / s
+        else:
+            s = 2.0 * math.sqrt(1.0 + r22 - r00 - r11)
+            w = (r10 - r01) / s
+            x = (r02 + r20) / s
+            y = (r12 + r21) / s
+            z = 0.25 * s
+
+        quat = QQuaternion(w, x, y, z)  # Qt expects (scalar=w, x, y, z)
+
+        return pos, quat
+    
     def _initialize_fusion_cameras(self, device_list, enable_body_tracking: bool = True, enable_floor_detection: bool = True) -> bool:
         """Initialize multiple cameras for fusion mode using a fusion configuration (calib) file."""
         try:
@@ -1044,11 +1137,9 @@ class SenseSpaceServer:
                         except Exception:
                             pass
 
-
                 #test
-                ret = self._try_get_fusion_camera_pose(serial)
-                print("-----------", ret)
-
+                #ret = self._try_get_fusion_camera_pose(serial)
+                #print("-----------", ret)
 
             else:
                 # Fusion failed - could be timeout, no data, etc.
@@ -1066,8 +1157,11 @@ class SenseSpaceServer:
                     pass
                 
                 # Only print warning for critical errors
+                """
                 if fusion_status not in non_critical_errors:
                     print(f"[WARNING] Fusion process failed: {fusion_status}")
+                """
+                
                 # Still send empty frame to keep clients connected
                 empty_frame = Frame(
                     timestamp=time.time(),
@@ -1276,7 +1370,7 @@ class SenseSpaceServer:
                 x = (R[0][2] + R[2][0]) / s
                 y = (R[1][2] + R[2][1]) / s
                 z = 0.25 * s
-                
+
             return [x, y, z, w]
         except Exception as e:
             print(f"[WARNING] Failed to convert matrix to quaternion: {e}")

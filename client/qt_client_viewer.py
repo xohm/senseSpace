@@ -290,7 +290,7 @@ class ClientSkeletonGLWidget(QGLWidget):
 
                         # draw frustum if we have orientation too
                         if pos_t and orientation_dict:
-                            draw_camera(position=pos_t, orientation=orientation_dict, fov_deg=60.0, near=50.0, far=800.0, color=(1.0,1.0,0.0), scale=2.0)
+                            draw_camera(position=pos_t, orientation=orientation_dict, fov_deg=60.0, near=50.0, far=600.0, color=(1.0,1.0,0.0), scale=1.0)
 
                     except Exception as e:
                         print(f"[WARNING] Failed to draw camera {i}: {e}")
