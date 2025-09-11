@@ -110,8 +110,21 @@ class SenseSpaceServer:
                 while self.running:
                     try:
                         client_socket, addr = self.server_socket.accept()
+                        client_socket.settimeout(5.0)
+                        client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                         print(f"[INFO] Client connected from {addr}")
-                        threading.Thread(target=self._client_handler, args=(client_socket,), daemon=True).start()
+                        
+                        # Add client to the list
+                        self.clients.append(client_socket)
+                        
+                        # Create queue and sender thread for this client
+                        q = queue.Queue(maxsize=8)
+                        self._client_queues[client_socket] = q
+                        sender_thread = threading.Thread(target=self._client_sender_worker, args=(client_socket, q), daemon=True)
+                        self._client_sender_threads[client_socket] = sender_thread
+                        sender_thread.start()
+                        
+                        threading.Thread(target=self._client_handler, args=(client_socket, addr), daemon=True).start()
                     except socket.error:
                         if self.running:
                             print("[ERROR] Socket error in TCP server")
@@ -144,60 +157,16 @@ class SenseSpaceServer:
 
         print("[SERVER] TCP server stopped")
 
-    def _tcp_server_loop(self):
-        """Main TCP server loop"""
-        try:
-            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind((self.host, self.port))
-            self.server_socket.listen()
-
-            while self.running:
-                try:
-                    conn, addr = self.server_socket.accept()
-                    # Make client socket send operations timeout quickly to avoid blocking
-                    try:
-                        conn.settimeout(0.2)
-                    except Exception:
-                        pass
-                    try:
-                        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    except Exception:
-                        pass
-                    self.clients.append(conn)
-                    # Create a small bounded queue for outgoing messages to this client
-                    q = queue.Queue(maxsize=8)
-                    self._client_queues[conn] = q
-                    sender_thread = threading.Thread(target=self._client_sender_worker, args=(conn, q), daemon=True)
-                    self._client_sender_threads[conn] = sender_thread
-                    sender_thread.start()
-
-                    client_thread = threading.Thread(
-                        target=self._client_handler,
-                        args=(conn, addr),
-                        daemon=True
-                    )
-                    client_thread.start()
-                except Exception as e:
-                    if self.running:
-                        print(f"[SERVER] Error accepting connection: {e}")
-                    break
-        except Exception as e:
-            print(f"[SERVER] TCP server error: {e}")
-
     def _client_handler(self, conn, addr):
         """Handle individual client connection"""
         print(f"[CLIENT CONNECTED] {addr}")
         try:
-            # Keep the client socket alive by reading small keep-alive data.
-            # Use the socket timeout set at accept time so this thread can exit promptly.
             while self.running:
                 try:
-                    data = conn.recv(1)  # keep alive
+                    data = conn.recv(1024)  # Read larger chunks
                     if not data:
                         break
                 except socket.timeout:
-                    # No data received in timeout window; continue to check running flag
                     continue
                 except Exception:
                     break
@@ -326,7 +295,7 @@ class SenseSpaceServer:
                     payload = frame.to_dict() if hasattr(frame, 'to_dict') else frame
                     text = json.dumps({"type": "frame", "data": payload}, default=lambda o: getattr(o, 'to_dict', lambda: str(o))())
                     client.sendall((text + "\n").encode("utf-8"))
-                except Exception:
+                except Exception as e:
                     try:
                         if client in self.clients:
                             self.clients.remove(client)
@@ -498,8 +467,8 @@ class SenseSpaceServer:
                 try:
                     # Add serials from fusion subscriptions if available
                     if self.fusion is not None:
-                        # Get subscribed camera serials from fusion (if API available)
-                        pass  # fusion API doesn't easily expose subscribed serials
+                        # fusion API doesn't easily expose subscribed serials; skip
+                        pass
 
                     # Add serial from single camera if available
                     if self.camera is not None:
@@ -532,40 +501,93 @@ class SenseSpaceServer:
                         if available_serials and str(serial) not in available_serials:
                             continue
 
-                        if pose_str:
-                            # Parse pose string (e.g., "tx=0,ty=0,tz=0,rx=0,ry=0,rz=0")
-                            pose_dict = {}
-                            for part in pose_str.split(','):
-                                if '=' in part:
-                                    k, v = part.strip().split('=', 1)
+                        if not pose_str:
+                            # no pose provided -> default
+                            position = (0.0, 0.0, 0.0)
+                            target = (0.0, 0.0, -200.0)
+                        else:
+                            # Default values
+                            position = (0.0, 0.0, 0.0)
+                            target = (0.0, 0.0, -200.0)
+
+                            # Try JSON-like matrix first (e.g. [[...],[...],...]) or flat 16 numbers
+                            parsed = None
+                            try:
+                                import json as _json
+                                txt = pose_str.strip()
+                                # Normalize single-quotes -> double-quotes for json.loads if it looks like a list
+                                if txt.startswith('['):
                                     try:
-                                        pose_dict[k] = float(v)
-                                    except ValueError:
-                                        continue
+                                        parsed = _json.loads(txt.replace("'", '"'))
+                                    except Exception:
+                                        parsed = None
+                                else:
+                                    parsed = None
+                            except Exception:
+                                parsed = None
 
-                            # Extract position (tx, ty, tz)
-                            position = (
-                                pose_dict.get('tx', 0.0),
-                                pose_dict.get('ty', 0.0),
-                                pose_dict.get('tz', 0.0)
-                            )
+                            if parsed:
+                                # parsed could be nested lists or flat list
+                                try:
+                                    # nested 4x4 matrix case
+                                    if (isinstance(parsed, list) and len(parsed) == 4 and
+                                            all(isinstance(r, list) and len(r) == 4 for r in parsed)):
+                                        m = parsed  # row-major 4x4
+                                        # translation is last column
+                                        tx, ty, tz = float(m[0][3]), float(m[1][3]), float(m[2][3])
+                                        position = (tx, ty, tz)
+                                        # compute forward = -R[:,2] (third column of rotation)
+                                        try:
+                                            fx = -float(m[0][2]); fy = -float(m[1][2]); fz = -float(m[2][2])
+                                            target = (position[0] + fx * 200.0,
+                                                      position[1] + fy * 200.0,
+                                                      position[2] + fz * 200.0)
+                                        except Exception:
+                                            target = (position[0], position[1], position[2] - 200.0)
+                                    # flat list of 16 numbers
+                                    elif isinstance(parsed, list) and len(parsed) == 16:
+                                        flat = [float(x) for x in parsed]
+                                        # reshape to 4x4 row-major
+                                        m = [flat[0:4], flat[4:8], flat[8:12], flat[12:16]]
+                                        tx, ty, tz = float(m[0][3]), float(m[1][3]), float(m[2][3])
+                                        position = (tx, ty, tz)
+                                        try:
+                                            fx = -float(m[0][2]); fy = -float(m[1][2]); fz = -float(m[2][2])
+                                            target = (position[0] + fx * 200.0,
+                                                      position[1] + fy * 200.0,
+                                                      position[2] + fz * 200.0)
+                                        except Exception:
+                                            target = (position[0], position[1], position[2] - 200.0)
+                                except Exception:
+                                    parsed = None
 
-                            # Compute target by moving forward 200mm from position
-                            # Use rotation to determine forward direction (simplified: assume -Z forward)
-                            target = (
-                                position[0],
-                                position[1],
-                                position[2] - 200.0
-                            )
+                            if parsed is None:
+                                # Fallback: parse key=value pairs like "tx=...,ty=...,tz=...,rx=...,..."
+                                pose_dict = {}
+                                for part in pose_str.split(','):
+                                    if '=' in part:
+                                        k, v = part.strip().split('=', 1)
+                                        try:
+                                            pose_dict[k] = float(v)
+                                        except Exception:
+                                            continue
+                                position = (
+                                    pose_dict.get('tx', 0.0),
+                                    pose_dict.get('ty', 0.0),
+                                    pose_dict.get('tz', 0.0)
+                                )
+                                # if rotation present (rx,ry,rz) we could compute forward, but fallback to -Z
+                                target = (position[0], position[1], position[2] - 200.0)
 
-                            poses.append({
-                                'serial': str(serial),
-                                'position': position,
-                                'target': target
-                            })
+                        poses.append({
+                            'serial': str(serial),
+                            'position': position,
+                            'target': target
+                        })
                     except Exception as e:
                         print(f"[WARNING] Failed to parse camera pose for {key}: {e}")
-                        continue
+                        # continue to next entry
+
         except Exception as e:
             print(f"[WARNING] Failed to load camera poses: {e}")
 
@@ -606,6 +628,13 @@ class SenseSpaceServer:
                          enable_body_tracking: bool = True,
                          enable_floor_detection: bool = True) -> bool:
         """Initialize cameras for body tracking"""
+        # resolve expected calibration file path
+        try:
+            calib_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "server", "calib")
+            calib_file = os.path.join(calib_dir, "calib.json")
+        except Exception:
+            calib_file = None
+
         if serial_numbers is None or len(serial_numbers) == 0:
             # Auto-detect cameras
             try:
@@ -618,7 +647,10 @@ class SenseSpaceServer:
                     # Single camera mode
                     return self._initialize_single_camera(device_list[0], enable_body_tracking, enable_floor_detection)
                 else:
-                    # Multi-camera fusion mode
+                    # Multi-camera fusion mode - require calibration file
+                    if not calib_file or not os.path.isfile(calib_file):
+                        print("[ERROR] Fusion mode requires calibration file at server/calib/calib.json")
+                        return False
                     return self._initialize_fusion_cameras(device_list, enable_body_tracking, enable_floor_detection)
             except Exception as e:
                 print(f"[ERROR] Failed to detect cameras: {e}")
@@ -628,6 +660,10 @@ class SenseSpaceServer:
             if len(serial_numbers) == 1:
                 return self._initialize_single_camera_by_serial(serial_numbers[0], enable_body_tracking, enable_floor_detection)
             else:
+                # Multi-camera fusion by serials - require calibration file
+                if not calib_file or not os.path.isfile(calib_file):
+                    print("[ERROR] Fusion mode requires calibration file at server/calib/calib.json")
+                    return False
                 return self._initialize_fusion_cameras_by_serial(serial_numbers, enable_body_tracking, enable_floor_detection)
 
     def _initialize_single_camera(self, device_info, enable_body_tracking: bool = True, enable_floor_detection: bool = True) -> bool:
@@ -698,64 +734,162 @@ class SenseSpaceServer:
             return False
 
     def _initialize_fusion_cameras(self, device_list, enable_body_tracking: bool = True, enable_floor_detection: bool = True) -> bool:
-        """Initialize multiple cameras for fusion mode"""
+        """Initialize multiple cameras for fusion mode using a fusion configuration (calib) file."""
         try:
-            # Initialize fusion
-            fusion_params = sl.InitFusionParameters()
-            fusion_params.coordinate_units = sl.UNIT.MILLIMETER
-            fusion_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
+            # Find and load calib file
+            calib_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "server", "calib")
+            calib_file = os.path.join(calib_dir, "calib.json")
+            if not os.path.isfile(calib_file):
+                print("[ERROR] Fusion mode requires calibration file at server/calib/calib.json")
+                return False
+
+            # Read fusion configurations using ZED SDK helper
+            fusion_configurations = sl.read_fusion_configuration_file(
+                calib_file,
+                sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP,
+                sl.UNIT.MILLIMETER
+            )
+            if not fusion_configurations:
+                print("[ERROR] No valid fusion configurations found in calib file")
+                return False
+
+            print(f"[INFO] Found {len(fusion_configurations)} cameras in configuration")
+
+            # Common parameters
+            init_params = sl.InitParameters()
+            init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
+            init_params.coordinate_units = sl.UNIT.MILLIMETER
+            init_params.depth_mode = sl.DEPTH_MODE.NEURAL
+            init_params.camera_resolution = sl.RESOLUTION.HD720
+            init_params.camera_fps = 30
+
+            communication_parameters = sl.CommunicationParameters()
+            communication_parameters.set_for_shared_memory()
+
+            positional_tracking_parameters = sl.PositionalTrackingParameters()
+            positional_tracking_parameters.set_as_static = True
+
+            body_tracking_parameters = sl.BodyTrackingParameters()
+            body_tracking_parameters.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE
+            body_tracking_parameters.body_format = sl.BODY_FORMAT.BODY_34
+            body_tracking_parameters.enable_body_fitting = False
+            body_tracking_parameters.enable_tracking = True
+
+            # Start local senders
+            senders = {}
+            for conf in fusion_configurations:
+                serial = conf.serial_number
+                print(f"[INFO] Try to open ZED {serial}")
+                
+                # Skip network cameras (already running)
+                if conf.communication_parameters.comm_type == sl.COMM_TYPE.LOCAL_NETWORK:
+                    print(f"[INFO] Camera {serial} is network sender")
+                    continue
+
+                # Open local camera
+                init_params.input = conf.input_type
+                init_params.set_from_serial_number(serial)
+
+                cam = sl.Camera()
+                status = cam.open(init_params)
+                if status != sl.ERROR_CODE.SUCCESS:
+                    print(f"[WARNING] Error opening camera {serial}: {status}")
+                    continue
+
+                # Enable positional tracking
+                status = cam.enable_positional_tracking(positional_tracking_parameters)
+                if status != sl.ERROR_CODE.SUCCESS:
+                    print(f"[WARNING] Error enabling positional tracking for {serial}")
+                    cam.close()
+                    continue
+
+                # Enable body tracking
+                status = cam.enable_body_tracking(body_tracking_parameters)
+                if status != sl.ERROR_CODE.SUCCESS:
+                    print(f"[WARNING] Error enabling body tracking for {serial}")
+                    cam.close()
+                    continue
+
+                # Start publishing
+                cam.start_publishing(communication_parameters)
+                senders[serial] = cam
+                print(f"[INFO] Camera {serial} is open and publishing")
+
+            if not senders:
+                print("[ERROR] No cameras could be started")
+                return False
+
+            # Warmup - grab a few frames from each sender
+            print("[INFO] Senders started, warming up...")
+            bodies = sl.Bodies()
+            for serial, cam in senders.items():
+                for _ in range(3):
+                    if cam.grab() == sl.ERROR_CODE.SUCCESS:
+                        try:
+                            cam.retrieve_bodies(bodies)
+                        except:
+                            pass
+                        break
+                    time.sleep(0.05)
+
+            # Initialize Fusion
+            print("[INFO] Running the fusion...")
+            init_fusion_parameters = sl.InitFusionParameters()
+            init_fusion_parameters.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
+            init_fusion_parameters.coordinate_units = sl.UNIT.MILLIMETER
+            init_fusion_parameters.output_performance_metrics = False
+            init_fusion_parameters.verbose = True
 
             self.fusion = sl.Fusion()
-            status = self.fusion.init(fusion_params)
+            status = self.fusion.init(init_fusion_parameters)
             if status != sl.FUSION_ERROR_CODE.SUCCESS:
                 print(f"[ERROR] Failed to initialize fusion: {status}")
+                for cam in senders.values():
+                    cam.close()
                 return False
 
             # Subscribe to cameras
-            for device in device_list:
-                try:
-                    init_params = sl.InitParameters()
-                    init_params.camera_resolution = sl.RESOLUTION.HD1080
-                    init_params.camera_fps = 30
-                    init_params.depth_mode = sl.DEPTH_MODE.NEURAL
-                    init_params.coordinate_units = sl.UNIT.MILLIMETER
-                    init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
+            camera_identifiers = []
+            for conf in fusion_configurations:
+                uuid = sl.CameraIdentifier()
+                uuid.serial_number = conf.serial_number
+                
+                print(f"[INFO] Subscribing to {conf.serial_number}")
+                status = self.fusion.subscribe(uuid, conf.communication_parameters, conf.pose)
+                
+                if status == sl.FUSION_ERROR_CODE.SUCCESS:
+                    camera_identifiers.append(uuid)
+                    print(f"[INFO] Subscribed to {conf.serial_number}")
+                else:
+                    print(f"[WARNING] Unable to subscribe to {conf.serial_number}: {status}")
 
-                    # Try to load calibration for this camera
-                    calib_file = self._find_calibration_file(str(device.serial_number))
-                    if calib_file:
-                        communication_params = sl.CommunicationParameters()
-                        communication_params.set_for_shared_memory()
+            if not camera_identifiers:
+                print("[ERROR] No cameras subscribed to fusion")
+                for cam in senders.values():
+                    cam.close()
+                self.fusion.close()
+                return False
 
-                        status = self.fusion.subscribe(
-                            str(device.serial_number),
-                            communication_params,
-                            sl.Transform(),  # Use identity transform if no calibration
-                            init_params
-                        )
-                        if status == sl.FUSION_ERROR_CODE.SUCCESS:
-                            print(f"[INFO] Subscribed to camera {device.serial_number}")
-                        else:
-                            print(f"[WARNING] Failed to subscribe to camera {device.serial_number}: {status}")
-                except Exception as e:
-                    print(f"[WARNING] Failed to process camera {device.serial_number}: {e}")
-
-            # Enable body tracking if requested
+            # Enable fusion body tracking
             if enable_body_tracking:
-                body_params = sl.BodyTrackingFusionParameters()
-                body_params.enable_tracking = True
-                body_params.enable_body_fitting = True
+                body_tracking_fusion_params = sl.BodyTrackingFusionParameters()
+                body_tracking_fusion_params.enable_tracking = True
+                body_tracking_fusion_params.enable_body_fitting = False
 
-                status = self.fusion.enable_body_tracking(body_params)
+                status = self.fusion.enable_body_tracking(body_tracking_fusion_params)
                 if status != sl.FUSION_ERROR_CODE.SUCCESS:
                     print(f"[ERROR] Failed to enable fusion body tracking: {status}")
+                    for cam in senders.values():
+                        cam.close()
+                    self.fusion.close()
                     return False
 
-            # For fusion mode, we don't detect floor on individual cameras
-            # The fusion system handles coordinate alignment
+                print("[INFO] Fusion body tracking enabled")
 
+            # Store references for cleanup
+            self._fusion_senders = senders
             self.is_fusion_mode = True
-            print(f"[INFO] Fusion mode initialized with {len(device_list)} cameras")
+            print(f"[INFO] Fusion mode initialized with {len(camera_identifiers)} cameras")
             return True
 
         except Exception as e:
@@ -797,6 +931,44 @@ class SenseSpaceServer:
             if os.path.isfile(calib_file):
                 return calib_file
             return None
+        except Exception:
+            return None
+
+    def _load_pose_for_serial(self, serial: str):
+        """
+        Try to load/parse the pose entry for a given serial from server/calib/calib.json.
+        Returns one of:
+          - a nested 4x4 list (row-major) or flat 16-list
+          - the raw pose string (fallback)
+          - None if no pose found
+        """
+        try:
+            calib_file = self._find_calibration_file(serial)
+            if not calib_file:
+                return None
+            with open(calib_file, "r") as fh:
+                data = json.load(fh)
+
+            for key, entry in data.items():
+                cfg = entry.get("FusionConfiguration", {})
+                serial_cfg = cfg.get("serial_number", key)
+                if str(serial_cfg) != str(serial):
+                    continue
+                pose_str = cfg.get("pose")
+                if not pose_str:
+                    return None
+
+                # Try JSON list-like first
+                try:
+                    txt = pose_str.strip()
+                    if txt.startswith('['):
+                        parsed = json.loads(txt.replace("'", '"'))
+                        return parsed
+                except Exception:
+                    pass
+
+                # fallback: return raw string (key=value style)
+                return pose_str
         except Exception:
             return None
 
@@ -873,7 +1045,23 @@ class SenseSpaceServer:
                 time.sleep(FRAME_INTERVAL - (now - last_time))
             last_time = time.time()
 
-            if self.fusion.process() == sl.FUSION_ERROR_CODE.SUCCESS:
+            # Grab frames from local senders first (essential for fusion to work)
+            try:
+                if hasattr(self, '_fusion_senders'):
+                    for serial, zed in self._fusion_senders.items():
+                        try:
+                            if zed.grab() == sl.ERROR_CODE.SUCCESS:
+                                try:
+                                    zed.retrieve_bodies(bodies)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            fusion_status = self.fusion.process()
+            if fusion_status == sl.FUSION_ERROR_CODE.SUCCESS:
                 # Retrieve bodies
                 try:
                     if hasattr(sl, 'BodyTrackingFusionRuntimeParameters'):
@@ -898,6 +1086,33 @@ class SenseSpaceServer:
                             threading.Thread(target=self.update_callback, args=(frame.people, self.detected_floor_height), daemon=True).start()
                         except Exception:
                             pass
+            else:
+                # Fusion failed - could be timeout, no data, etc.
+                # Check for common non-critical fusion errors
+                non_critical_errors = []
+                try:
+                    # Try to get common non-critical error codes if they exist
+                    if hasattr(sl.FUSION_ERROR_CODE, 'CAMERA_FPS_TOO_LOW'):
+                        non_critical_errors.append(sl.FUSION_ERROR_CODE.CAMERA_FPS_TOO_LOW)
+                    if hasattr(sl.FUSION_ERROR_CODE, 'NO_NEW_DATA'):
+                        non_critical_errors.append(sl.FUSION_ERROR_CODE.NO_NEW_DATA)
+                    if hasattr(sl.FUSION_ERROR_CODE, 'TIMEOUT'):
+                        non_critical_errors.append(sl.FUSION_ERROR_CODE.TIMEOUT)
+                except Exception:
+                    pass
+                
+                # Only print warning for critical errors
+                if fusion_status not in non_critical_errors:
+                    print(f"[WARNING] Fusion process failed: {fusion_status}")
+                # Still send empty frame to keep clients connected
+                empty_frame = Frame(
+                    timestamp=time.time(),
+                    people=[],
+                    body_model="BODY_34",
+                    floor_height=self.detected_floor_height,
+                    cameras=self.get_camera_poses()
+                )
+                self.broadcast_frame(empty_frame)
 
     def _process_bodies_single_camera(self, bodies) -> Optional[Frame]:
         """Process bodies from single camera and create Frame object"""
