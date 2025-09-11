@@ -485,8 +485,8 @@ class SenseSpaceServer:
                         # Extract position and convert from meters to millimeters
                         position = {
                             'x': matrix[0][3] * 1000.0,  # X in mm
-                            'y': matrix[1][3] * 1000.0,  # Y in mm
-                            'z': matrix[2][3] * 1000.0   # Z in mm
+                            'y': matrix[1][3] * 1000.0 - (2 * floor_height_mm),  # Y in mm
+                            'z': matrix[2][3] * 1000.0    # Z in mm
                         }
 
                         # Extract rotation matrix (top-left 3x3) and convert to quaternion
@@ -537,6 +537,47 @@ class SenseSpaceServer:
         print(f"[INFO] Cached {len(poses)} camera poses with floor height {floor_height_mm} mm")
         return result
 
+    def _try_get_fusion_camera_pose(self, serial):
+        """Return sl.Pose or None. Prints status for debugging."""
+        if not getattr(self, "fusion", None):
+            print("[WARNING] Fusion not initialized")
+            return None
+
+        try:
+            # reuse stored CameraIdentifier if available
+            uid = None
+            if hasattr(self, "_fusion_camera_identifiers"):
+                for cid in self._fusion_camera_identifiers:
+                    try:
+                        if str(getattr(cid, "serial_number", "")) == str(serial):
+                            uid = cid
+                            break
+                    except Exception:
+                        continue
+
+            # build identifier if we don't have one saved
+            if uid is None:
+                uid = sl.CameraIdentifier()
+                try:
+                    uid.serial_number = int(serial)
+                except Exception:
+                    uid.serial_number = serial
+
+            # NOTE: fusion.get_position expects a sl.Pose, not sl.Transform
+            pose = sl.Pose()
+            status = self.fusion.get_position(pose, sl.REFERENCE_FRAME.WORLD)
+            print(f"[DEBUG] fusion.get_position status: {status}")
+
+            if status == sl.FUSION_ERROR_CODE.SUCCESS:
+                print(f"[DEBUG] pose: {pose}")
+                return pose
+            else:
+                print(f"[WARNING] fusion.get_position failed for {serial}: {status}")
+                return None
+
+        except Exception as e:
+            print(f"[ERROR] exception calling fusion.get_position: {e}")
+            return None
 
     def _ensure_frame_has_camera(self, frame):
         """Ensure frame has camera information for single-camera setups"""
@@ -795,6 +836,8 @@ class SenseSpaceServer:
                 else:
                     print(f"[WARNING] Unable to subscribe to {conf.serial_number}: {status}")
                     
+            # store identifiers so later lookups use the exact SDK object/type
+            self._fusion_camera_identifiers = camera_identifiers
 
             if not camera_identifiers:
                 print("[ERROR] No cameras subscribed to fusion")
@@ -1000,6 +1043,13 @@ class SenseSpaceServer:
                             threading.Thread(target=self.update_callback, args=(frame.people, self.detected_floor_height), daemon=True).start()
                         except Exception:
                             pass
+
+
+                #test
+                ret = self._try_get_fusion_camera_pose(serial)
+                print("-----------", ret)
+
+
             else:
                 # Fusion failed - could be timeout, no data, etc.
                 # Check for common non-critical fusion errors

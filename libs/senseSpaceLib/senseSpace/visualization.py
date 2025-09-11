@@ -65,6 +65,21 @@ class SkeletonVisualizer3D:
         for person in people:
             self.draw_person(person, color=color)
 
+    def _normalize_confidence(conf):
+        """Map various confidence ranges into 0.0..1.0"""
+        try:
+            if conf is None:
+                return 1.0
+            val = float(conf)
+            # if value appears to be a percentage e.g. 0..100
+            if val > 1.0:
+                val = val / 100.0
+            # clamp
+            return max(0.0, min(1.0, val))
+        except Exception:
+            return 1.0
+
+
     def draw_skeleton_with_bones(self, people_data, joint_color=(0.2, 0.8, 1.0), bone_color=(0.8, 0.2, 0.2)):
         """
         Draws skeleton with bone connections for BODY_34 model.
@@ -72,12 +87,20 @@ class SkeletonVisualizer3D:
         :param joint_color: RGB tuple for joint points
         :param bone_color: RGB tuple for bone lines
         """
+
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
         for p in people_data:
             p = _person_to_dict(p)
             skeleton = p.get("skeleton", [])
+            confidence = p.get("confidence", 1.0)
+            alpha = type(self)._normalize_confidence(confidence)
             
             # Draw skeleton bones (lines between joints) for BODY_34
             glColor3f(*bone_color)
+            glColor4f(bone_color[0], bone_color[1], bone_color[2], alpha)
+
             glLineWidth(2.0)
             glBegin(GL_LINES)
             
@@ -150,6 +173,8 @@ class SkeletonVisualizer3D:
                 glVertex3f(pos["x"], pos["y"], pos["z"])
             glEnd()
 
+        glDisable(GL_BLEND)            
+
 
 def draw_skeleton(person, color=(0.2, 0.8, 1.0)):
     """
@@ -200,12 +225,6 @@ def estimate_floor_height(people_data):
         return estimated_floor
     
     return None
-
-
-# Global variables for stable floor height tracking
-_floor_height_history = []
-_stable_floor_height = None
-_floor_height_samples = 30  # Number of samples to average
 
 
 def get_stable_floor_height(people_data):
