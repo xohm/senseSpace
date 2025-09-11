@@ -770,17 +770,13 @@ class SenseSpaceServer:
             if frame:
                 frame.floor_height = self.detected_floor_height
 
-                # Ensure frame contains camera info for single-camera setups, then broadcast
-                try:
-                    self._ensure_frame_has_camera(frame)
-                except Exception:
-                    pass
                 self.broadcast_frame(frame)
 
                 # Update UI if callback is set (provide detected floor height or None)
                 if self.update_callback:
                     try:
-                        self.update_callback(frame.people, self.detected_floor_height)
+                        # Run UI update in separate thread so Qt rendering doesn't block capture
+                        threading.Thread(target=self.update_callback, args=(frame.people, self.detected_floor_height), daemon=True).start()
                     except Exception:
                         pass
 
@@ -822,7 +818,7 @@ class SenseSpaceServer:
                     # Update UI if callback is set
                     if self.update_callback:
                         try:
-                            self.update_callback(frame.people, self.detected_floor_height)
+                            threading.Thread(target=self.update_callback, args=(frame.people, self.detected_floor_height), daemon=True).start()
                         except Exception:
                             pass
 
@@ -881,7 +877,7 @@ class SenseSpaceServer:
                 people=people,
                 body_model="BODY_34",
                 floor_height=self.detected_floor_height,
-                cameras=[]  # Will be filled by _ensure_frame_has_camera if needed
+                cameras=self.get_camera_poses()  # Pre-populate to avoid per-frame work
             )
         
         return None
