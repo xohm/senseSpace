@@ -60,19 +60,23 @@ class Person:
 @dataclass
 class Camera:
     serial: str
-    position: Dict[str, float]  # {'x':..,'y':..,'z':..}
-    target: Dict[str, float]    # {'x':..,'y':..,'z':..}
+    position: Dict[str, float]     # {'x':..,'y':..,'z':..}
+    orientation: Dict[str, float]  # quaternion {'x':..,'y':..,'z':..,'w':..}
 
     def to_dict(self):
         return {
             'serial': self.serial,
             'position': self.position,
-            'target': self.target
+            'orientation': self.orientation
         }
 
     @staticmethod
     def from_dict(d):
-        return Camera(serial=d.get('serial', ''), position=d.get('position', {}), target=d.get('target', {}))
+        return Camera(
+            serial=d.get('serial', ''), 
+            position=d.get('position', {}), 
+            orientation=d.get('orientation', {})
+        )
 
 
 @dataclass
@@ -124,4 +128,3 @@ class Frame:
             floor_height=d.get("floor_height", None),
             cameras=cam_objs
         )
-    

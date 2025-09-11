@@ -134,7 +134,9 @@ class SenseSpaceClient:
             frame_data = message.get("data")
             if frame_data:
                 try:
+
                     frame = Frame.from_dict(frame_data)
+
                     self.latest_frame = frame
                     
                     # Call frame callback if set

@@ -238,7 +238,7 @@ def get_stable_floor_height(people_data):
     return _stable_floor_height
 
 
-def draw_floor_grid(size=2000, spacing=100, height=None, color=(0.3, 0.3, 0.3), people_data=None, zed_floor_height=None):
+def draw_floor_grid(size=2000, spacing=100, height=0, color=(0.3, 0.3, 0.3), people_data=None, zed_floor_height=None):
     """
     Draw a floor grid for spatial reference.
     :param size: Total size of the grid in mm (ZED coordinates)
@@ -253,19 +253,6 @@ def draw_floor_grid(size=2000, spacing=100, height=None, color=(0.3, 0.3, 0.3), 
     # 2. ZED SDK detected floor height
     # 3. Stable foot-based estimation from people data
     # 4. Fallback to origin (0)
-    
-    if height is None:
-        if zed_floor_height is not None:
-            height = zed_floor_height
-        elif people_data is not None:
-            # Use stable floor height instead of per-frame estimation
-            stable_height = get_stable_floor_height(people_data)
-            if stable_height is not None:
-                height = stable_height
-            else:
-                height = 0  # Fallback to origin
-        else:
-            height = 0  # Default fallback
     
     glColor3f(*color)
     glLineWidth(1.0)
@@ -308,19 +295,48 @@ def draw_floor_grid(size=2000, spacing=100, height=None, color=(0.3, 0.3, 0.3), 
     glEnd()
 
 
-def draw_camera(position, target, up=(0.0, 1.0, 0.0), fov_deg=45.0, aspect=16.0/9.0, near=200.0, far=800.0, color=(1.0, 1.0, 0.0), scale=1.0, flip=False):
+def draw_camera(position, orientation, up=(0.0, 1.0, 0.0), fov_deg=45.0, aspect=16.0/9.0, near=200.0, far=800.0, color=(1.0, 1.0, 0.0), scale=1.0, flip=False):
     """
     Draw a simple camera frustum and axes using lines.
-    :param position: (x,y,z) camera position in world coordinates
-    :param target: (x,y,z) camera look-at target
-    :param up: up vector
+    :param position: (x,y,z) or {'x':..,'y':..,'z':..} camera position in world coordinates
+    :param orientation: {'x':..,'y':..,'z':..,'w':..} quaternion representing camera rotation
+    :param up: up vector (used as fallback)
     :param fov_deg: vertical field of view in degrees
     :param aspect: aspect ratio (width/height)
     :param near: near plane distance from camera
     :param far: far plane distance from camera
     :param color: RGB tuple for camera lines
     :param scale: scale multiplier for visualization size
+    :param flip: flip the forward direction
     """
+    # Convert position to tuple if it's a dict
+    if isinstance(position, dict):
+        pos = (position['x'], position['y'], position['z'])
+    else:
+        pos = position
+    
+    # Convert quaternion to rotation matrix and extract basis vectors
+    def quaternion_to_matrix(quat):
+        """Convert quaternion {'x':..,'y':..,'z':..,'w':..} to 3x3 rotation matrix"""
+        if isinstance(quat, dict):
+            x, y, z, w = quat['x'], quat['y'], quat['z'], quat['w']
+        else:
+            x, y, z, w = quat[0], quat[1], quat[2], quat[3]
+        
+        # Normalize quaternion
+        import math
+        norm = math.sqrt(x*x + y*y + z*z + w*w)
+        if norm == 0:
+            return [[1,0,0], [0,1,0], [0,0,1]]  # Identity matrix
+        x, y, z, w = x/norm, y/norm, z/norm, w/norm
+        
+        # Convert to rotation matrix
+        return [
+            [1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)],
+            [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)],
+            [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)]
+        ]
+    
     # small vector helpers
     def sub(a, b):
         return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
@@ -334,16 +350,17 @@ def draw_camera(position, target, up=(0.0, 1.0, 0.0), fov_deg=45.0, aspect=16.0/
         if l == 0:
             return (0.0, 0.0, 0.0)
         return (v[0]/l, v[1]/l, v[2]/l)
-    def cross(a, b):
-        return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
 
-    # compute basis
-    forward = norm(sub(target, position))
+    # Get rotation matrix from quaternion
+    rot_matrix = quaternion_to_matrix(orientation)
+    
+    # Extract camera basis vectors from rotation matrix
+    right = (rot_matrix[0][0], rot_matrix[1][0], rot_matrix[2][0])    # X-axis
+    cam_up = (rot_matrix[0][1], rot_matrix[1][1], rot_matrix[2][1])   # Y-axis
+    forward = (-rot_matrix[0][2], -rot_matrix[1][2], -rot_matrix[2][2])  # -Z-axis (camera forward)
+    
     if flip:
         forward = (-forward[0], -forward[1], -forward[2])
-    upn = norm(up)
-    right = norm(cross(forward, upn))
-    cam_up = norm(cross(right, forward))
 
     import math
     fov_rad = math.radians(fov_deg)
@@ -353,8 +370,8 @@ def draw_camera(position, target, up=(0.0, 1.0, 0.0), fov_deg=45.0, aspect=16.0/
     fw = fh * aspect
 
     # near/far centers
-    nc = add(position, mul(forward, near*scale))
-    fc = add(position, mul(forward, far*scale))
+    nc = add(pos, mul(forward, near*scale))
+    fc = add(pos, mul(forward, far*scale))
 
     # near plane corners
     ntl = add(add(nc, mul(cam_up, nh*scale)), mul(right, -nw*scale))
@@ -390,7 +407,7 @@ def draw_camera(position, target, up=(0.0, 1.0, 0.0), fov_deg=45.0, aspect=16.0/
 
     # lines from camera position to near plane corners (visualizes camera pyramid)
     for corner in (ntl, ntr, nbl, nbr):
-        glVertex3f(position[0], position[1], position[2])
+        glVertex3f(pos[0], pos[1], pos[2])
         glVertex3f(corner[0], corner[1], corner[2])
 
     glEnd()
@@ -398,19 +415,19 @@ def draw_camera(position, target, up=(0.0, 1.0, 0.0), fov_deg=45.0, aspect=16.0/
     # draw small local axes at camera position
     glLineWidth(2.0)
     glBegin(GL_LINES)
-    # X (red)
+    # X (red) - camera right
     glColor3f(1.0, 0.0, 0.0)
-    rx = add(position, mul(right, 50.0*scale))
-    glVertex3f(position[0], position[1], position[2])
+    rx = add(pos, mul(right, 50.0*scale))
+    glVertex3f(pos[0], pos[1], pos[2])
     glVertex3f(rx[0], rx[1], rx[2])
-    # Y (green)
+    # Y (green) - camera up
     glColor3f(0.0, 1.0, 0.0)
-    uy = add(position, mul(cam_up, 50.0*scale))
-    glVertex3f(position[0], position[1], position[2])
+    uy = add(pos, mul(cam_up, 50.0*scale))
+    glVertex3f(pos[0], pos[1], pos[2])
     glVertex3f(uy[0], uy[1], uy[2])
-    # Z (blue) - forward
+    # Z (blue) - camera forward
     glColor3f(0.0, 0.0, 1.0)
-    fz = add(position, mul(forward, 100.0*scale))
-    glVertex3f(position[0], position[1], position[2])
+    fz = add(pos, mul(forward, 100.0*scale))
+    glVertex3f(pos[0], pos[1], pos[2])
     glVertex3f(fz[0], fz[1], fz[2])
     glEnd()

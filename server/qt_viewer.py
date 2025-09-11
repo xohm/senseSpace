@@ -85,7 +85,7 @@ class SkeletonGLWidget(QGLWidget):
         glViewport(0, 0, w, h)
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        gluPerspective(60.0, w / float(h or 1), 1.0, 20000.0)
+        gluPerspective(60.0, w / float(h or 1), 1.0, 30000.0)
         glMatrixMode(GL_MODELVIEW)
 
     # ------------------------
@@ -183,24 +183,75 @@ class SkeletonGLWidget(QGLWidget):
                 server_obj = parent.server
             poses = []
             if server_obj and getattr(server_obj, 'is_fusion_mode', False) and hasattr(server_obj, 'get_camera_poses'):
-                poses = server_obj.get_camera_poses()
+                camera_poses_data = server_obj.get_camera_poses()
+                # Handle new format: {"cameras": [...], "floor": {...}}
+                if isinstance(camera_poses_data, dict) and 'cameras' in camera_poses_data:
+                    poses = camera_poses_data['cameras']
+                else:
+                    # Fallback for old format (list of poses)
+                    poses = camera_poses_data if camera_poses_data else []
+                    
             if poses and draw_camera:
                 for p in poses:
-                    pos = p.get('position')
-                    tgt = p.get('target')
-                    draw_camera(position=pos, target=tgt, fov_deg=60.0, near=50.0, far=600.0, color=(1.0, 1.0, 0.0), scale=1.0, flip=self._camera_flip)
+                    try:
+                        pos = p.get('position')
+                        orientation = p.get('orientation')  # New: quaternion orientation
+                        
+                        # Convert position to tuple if it's a dict
+                        if isinstance(pos, dict):
+                            pos_tuple = (pos.get('x', 0.0), pos.get('y', 0.0), pos.get('z', 0.0))
+                        else:
+                            pos_tuple = pos
+                        
+                        # Handle orientation quaternion
+                        if orientation and isinstance(orientation, dict):
+                            orientation_dict = {
+                                'x': float(orientation.get('x', 0.0)),
+                                'y': float(orientation.get('y', 0.0)),
+                                'z': float(orientation.get('z', 0.0)),
+                                'w': float(orientation.get('w', 1.0))
+                            }
+                        else:
+                            # Fallback to identity quaternion
+                            orientation_dict = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}
+                        
+                        if pos_tuple and orientation_dict:
+                            draw_camera(
+                                position=pos_tuple, 
+                                orientation=orientation_dict,  # Use quaternion instead of target
+                                fov_deg=60.0, 
+                                near=50.0, 
+                                far=600.0, 
+                                color=(1.0, 1.0, 0.0), 
+                                scale=1.0, 
+                                flip=self._camera_flip
+                            )
+                    except Exception as e:
+                        print(f"[WARNING] Failed to draw camera: {e}")
+                        continue
             else:
                 # fallback: small reference camera at origin
                 if draw_camera:
                     cam_pos = (0.0, 200.0, 0.0)
-                    cam_target = (0.0, 200.0, 200.0)
-                    draw_camera(position=cam_pos, target=cam_target, fov_deg=60.0, near=50.0, far=600.0, color=(1.0, 1.0, 0.0), scale=1.0, flip=True)
-        except Exception:
+                    # Use identity quaternion for fallback camera
+                    cam_orientation = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}
+                    draw_camera(
+                        position=cam_pos, 
+                        orientation=cam_orientation,  # Use quaternion instead of target
+                        fov_deg=60.0, 
+                        near=50.0, 
+                        far=600.0, 
+                        color=(1.0, 1.0, 0.0), 
+                        scale=1.0, 
+                        flip=True
+                    )
+        except Exception as e:
             # keep rendering even if camera poses fail
+            print(f"[WARNING] Camera rendering failed: {e}")
             pass
 
         # Make the floor grid larger (approx 5m x 5m if units are mm)
-        draw_floor_grid(size=5000, spacing=200, height=None,
+        draw_floor_grid(size=5000, spacing=200, height=0,
                         color=(0.2, 0.2, 0.2), people_data=self.people_data,
                         zed_floor_height=self.zed_floor_height)
 

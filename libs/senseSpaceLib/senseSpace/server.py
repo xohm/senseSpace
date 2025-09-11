@@ -313,105 +313,102 @@ class SenseSpaceServer:
                 # drop message for this slow client
                 continue
 
-    def find_floor_plane(self, cam):
-        """Detect floor plane using ZED SDK"""
+    def find_floor_plane(self, cam=None):
+        """Detect floor plane using ZED SDK - works for both fusion and single camera mode"""
         # Try multiple times with short backoff to improve reliability
         attempts = 3
         wait_secs = 0.2
         self.detected_floor_height = None
+        
         for attempt in range(attempts):
             try:
                 plane = sl.Plane()
                 reset_tracking_floor_frame = sl.Transform()
-                status = cam.find_floor_plane(plane, reset_tracking_floor_frame)
+                
+                # Choose detection method based on mode
+                if self.is_fusion_mode and hasattr(self, '_fusion_senders') and self._fusion_senders:
+                    # Use first available fusion sender camera for floor detection
+                    first_serial = next(iter(self._fusion_senders.keys()))
+                    first_cam = self._fusion_senders[first_serial]
+                    status = first_cam.find_floor_plane(plane, reset_tracking_floor_frame)
+                elif cam is not None:
+                    # Use provided camera for floor detection
+                    status = cam.find_floor_plane(plane, reset_tracking_floor_frame)
+                elif not self.is_fusion_mode and self.camera is not None:
+                    # Use single camera mode
+                    status = self.camera.find_floor_plane(plane, reset_tracking_floor_frame)
+                else:
+                    print("[WARNING] No camera available for floor detection")
+                    return
+                
                 if status == sl.ERROR_CODE.SUCCESS:
-                    # Different ZED SDK versions expose different Plane APIs.
-                    # Try common accessors, fall back to computing distance from plane coefficients.
-                    distance_to_origin = None
+                    
+                    # Extract the floor height from the plane
                     try:
-                        # Newer API
-                        distance_to_origin = plane.get_distance_to_origin()
-                    except Exception:
-                        pass
-
-                    if distance_to_origin is None:
-                        try:
-                            # Older API may expose coefficients a,b,c,d or get_coefficients()
-                            coeffs = None
-                            if hasattr(plane, 'get_coefficients'):
-                                coeffs = plane.get_coefficients()
-                            elif hasattr(plane, 'coeffs'):
-                                coeffs = plane.coeffs
-                            elif hasattr(plane, 'a') and hasattr(plane, 'b') and hasattr(plane, 'c') and hasattr(plane, 'd'):
-                                coeffs = (plane.a, plane.b, plane.c, plane.d)
-
-                            if coeffs is not None and len(coeffs) >= 4:
-                                        a, b, c, d = coeffs[0], coeffs[1], coeffs[2], coeffs[3]
-                                        # Compute Y intercept of plane ax + by + cz + d = 0 at X=0,Z=0 => y = -d / b
-                                        try:
-                                            if abs(b) > 1e-6:
-                                                y_at_origin = -d / b
-                                                # Use this as the detected floor height in camera/world units
-                                                self.detected_floor_height = float(y_at_origin)
-                                            else:
-                                                # If plane is vertical-ish (b ~= 0), fall back to distance computation
-                                                denom = (a * a + b * b + c * c) ** 0.5
-                                                if denom != 0:
-                                                    distance_to_origin = abs(d) / denom
-                                        except Exception:
-                                            distance_to_origin = None
-                        except Exception:
-                            distance_to_origin = None
-
-                    # As a last resort, try to get a normal and a point on plane
-                    if self.detected_floor_height is None and distance_to_origin is None:
-                        try:
-                            normal = None
-                            if hasattr(plane, 'get_normal'):
-                                normal = plane.get_normal()
-                            elif hasattr(plane, 'normal'):
-                                normal = plane.normal
-                            if normal is not None and hasattr(normal, '__len__'):
-                                # If we have a normal and a distance, approximate Y coordinate of the
-                                # closest point on the plane to the origin: point = normal * (-distance)
-                                # If we only have normal, we can't compute distance; default to None.
-                                if distance_to_origin is not None:
-                                    try:
-                                        # assume normal is normalized
-                                        py = float(normal[1])
-                                        self.detected_floor_height = py * (-distance_to_origin)
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            pass
-                    # If we computed distance_to_origin but not direct Y, and detected_floor_height still None,
-                    # attempt to infer a Y using normal if available
-                    if self.detected_floor_height is None and distance_to_origin is not None:
-                        try:
-                            normal = None
-                            if hasattr(plane, 'get_normal'):
-                                normal = plane.get_normal()
-                            elif hasattr(plane, 'normal'):
-                                normal = plane.normal
-                            if normal is not None and hasattr(normal, '__len__'):
-                                py = float(normal[1])
-                                self.detected_floor_height = py * (-distance_to_origin)
+                        # Try to get the plane center point (this gives us the floor level)
+                        plane_center = plane.get_center()
+                        if plane_center is not None:
+                            # Y coordinate of the plane center gives us the floor height
+                            self.detected_floor_height = float(plane_center[1])
+                        else:
+                            # Fallback: try to get bounds and calculate center
+                            bounds = plane.get_bounds()
+                            if bounds is not None and len(bounds) > 0:
+                                # Calculate average Y coordinate from bounds
+                                y_coords = [point[1] for point in bounds]
+                                self.detected_floor_height = float(sum(y_coords) / len(y_coords))
                             else:
-                                # unable to compute Y; leave as None
-                                self.detected_floor_height = None
-                        except Exception:
-                            self.detected_floor_height = None
+                                # Last resort: use plane equation
+                                plane_eq = plane.get_plane_equation()
+                                if plane_eq is not None and len(plane_eq) >= 4:
+                                    a, b, c, d = plane_eq[0], plane_eq[1], plane_eq[2], plane_eq[3]
+                                    # For plane equation ax + by + cz + d = 0, 
+                                    # Y intercept at x=0, z=0 is y = -d/b
+                                    if abs(b) > 1e-6:
+                                        self.detected_floor_height = float(-d / b)
+                                    else:
+                                        print("[WARNING] Invalid plane equation (b coefficient too small)")
+                                        self.detected_floor_height = 0.0
+                                else:
+                                    print("[WARNING] Could not get plane equation")
+                                    self.detected_floor_height = 0.0
+                    except Exception as e:
+                        print(f"[WARNING] Error extracting floor height: {e}")
+                        # Fallback to 0.0
+                        self.detected_floor_height = 0.0
+                    
+                    if self.detected_floor_height is not None:
+                        if self.is_fusion_mode and hasattr(self, '_fusion_senders'):
+                            detection_source = f"fusion sender camera {first_serial}"
+                        else:
+                            detection_source = "camera"
+                        
+                        # Convert to millimeters if we're using UNIT.MILLIMETER coordinate system
+                        # Check if the value seems to be in meters (typically floor height is < 5 meters)
+                        if abs(self.detected_floor_height) < 10.0:
+                            # Likely in meters, convert to mm
+                            self.detected_floor_height *= 1000.0
+                            print(f"[INFO] Floor detected at height: {self.detected_floor_height} mm (via {detection_source}, converted from meters)")
+                        else:
+                            print(f"[INFO] Floor detected at height: {self.detected_floor_height} mm (via {detection_source})")
+                        
+                        self._last_floor_detect_time = time.time()
                     break
                 else:
                     # Keep trying
                     time.sleep(wait_secs)
                     wait_secs *= 2
             except Exception as e:
-                print(f"[WARNING] Floor plane detection error: {e}")
+                print(f"[WARNING] Floor plane detection error on attempt {attempt + 1}: {e}")
                 time.sleep(wait_secs)
                 wait_secs *= 2
+                
         if self.detected_floor_height is None:
-            print("[WARNING] Floor plane detection failed after retries")
+            if self.is_fusion_mode and hasattr(self, '_fusion_senders'):
+                detection_source = f"fusion sender cameras"
+            else:
+                detection_source = "camera"
+            print(f"[WARNING] Floor plane detection failed after {attempts} retries (via {detection_source})")
         else:
             self._last_floor_detect_time = time.time()
 
@@ -421,180 +418,125 @@ class SenseSpaceServer:
 
     def get_camera_poses(self):
         """
-        Return a list of camera poses known to the server (from calibration files).
-        Each pose is a dict: { 'serial': <serial>, 'position': (x,y,z), 'target': (x,y,z) }
-        If no calib file is present, returns an empty list.
+        Return a dict with camera poses and floor info.
+        - Always try to detect floor first using find_floor_plane function
+        - In fusion mode: read from calibration file and adjust for floor
+        - In single camera mode: use SDK defaults
         """
-        # Return cached result (permanent cache - compute once)
         if self._camera_pose_cache is not None:
             return self._camera_pose_cache
 
         poses = []
+        floor_info = None
 
+        # FIRST: Always try to detect floor height using the existing find_floor_plane function
+        detected_floor_height = None
         try:
-            calib_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "server", "calib")
-            calib_file = os.path.join(calib_dir, "calib.json")
-            # For single camera mode, always provide a default camera pose
-            if not self.is_fusion_mode and self.camera is not None:
-                try:
-                    serial = str(self.camera.get_camera_information().serial_number)
-                except Exception:
+            # Use the enhanced find_floor_plane function
+            self.find_floor_plane()
+            if self.detected_floor_height is not None:
+                detected_floor_height = self.detected_floor_height
+                detection_source = "fusion" if self.is_fusion_mode else "camera"
+                print(f"[INFO] Floor detected at height {detected_floor_height} mm (via {detection_source})")
+                floor_info = {
+                    "height": detected_floor_height
+                }
+        except Exception as e:
+            print(f"[WARNING] Floor detection error: {e}")
+
+        # Use detected floor height or fallback to stored value or zero
+        floor_height_mm = detected_floor_height or self.detected_floor_height or 0.0
+
+        if self.is_fusion_mode:
+            # Fusion mode: read static calibration file and adjust for floor
+            try:
+                calib_file = self._find_calibration_file()
+                if not calib_file:
+                    print("[WARNING] No calibration file found for camera poses")
+                    return {"cameras": poses, "floor": floor_info}
+
+                with open(calib_file, 'r') as f:
+                    calib_data = json.load(f)
+
+                for key, entry in calib_data.items():
                     try:
-                        devs = sl.Camera.get_device_list()
-                        if devs and len(devs) >= 1:
-                            serial = str(devs[0].serial_number)
-                        else:
-                            serial = "unknown"
-                    except Exception:
-                        serial = "unknown"
+                        fusion_config = entry.get('FusionConfiguration', {})
+                        serial = fusion_config.get('serial_number', key)
+                        pose_data = fusion_config.get('pose')
 
-                poses.append({
-                    'serial': serial,
-                    'position': (0.0, 0.0, 0.0),
-                    'target': (0.0, 0.0, -200.0)
-                })
-                # Cache and return for single camera mode
-                self._camera_pose_cache = poses
-                self._camera_pose_cache_time = time.time()
-                return poses
-
-            if os.path.isfile(calib_file):
-                with open(calib_file, 'r') as fh:
-                    data = json.load(fh)
-
-                # Build list of available camera serials for filtering
-                available_serials = set()
-                try:
-                    # Add serials from fusion subscriptions if available
-                    if self.fusion is not None:
-                        # fusion API doesn't easily expose subscribed serials; skip
-                        pass
-
-                    # Add serial from single camera if available
-                    if self.camera is not None:
-                        try:
-                            serial = str(self.camera.get_camera_information().serial_number)
-                            available_serials.add(serial)
-                        except Exception:
-                            pass
-
-                    # Add serials from SDK device list
-                    try:
-                        devs = sl.Camera.get_device_list()
-                        if devs:
-                            for dev in devs:
-                                try:
-                                    available_serials.add(str(dev.serial_number))
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-
-                for key, entry in data.items():
-                    try:
-                        cfg = entry.get('FusionConfiguration', {})
-                        pose_str = cfg.get('pose')
-                        serial = cfg.get('serial_number', key)
-                        # Only include calib entries for serials that are actually available
-                        if available_serials and str(serial) not in available_serials:
+                        if not pose_data:
                             continue
 
-                        if not pose_str:
-                            # no pose provided -> default
-                            position = (0.0, 0.0, 0.0)
-                            target = (0.0, 0.0, -200.0)
+                        if isinstance(pose_data, str):
+                            values = pose_data.strip().split()
+                            if len(values) != 16:
+                                print(f"[WARNING] Expected 16 values for {serial}, got {len(values)}")
+                                continue
+                            flat_matrix = [float(v) for v in values]
+                            matrix = [
+                                flat_matrix[0:4],
+                                flat_matrix[4:8],
+                                flat_matrix[8:12],
+                                flat_matrix[12:16],
+                            ]
                         else:
-                            # Default values
-                            position = (0.0, 0.0, 0.0)
-                            target = (0.0, 0.0, -200.0)
+                            continue
 
-                            # Try JSON-like matrix first (e.g. [[...],[...],...]) or flat 16 numbers
-                            parsed = None
-                            try:
-                                import json as _json
-                                txt = pose_str.strip()
-                                # Normalize single-quotes -> double-quotes for json.loads if it looks like a list
-                                if txt.startswith('['):
-                                    try:
-                                        parsed = _json.loads(txt.replace("'", '"'))
-                                    except Exception:
-                                        parsed = None
-                                else:
-                                    parsed = None
-                            except Exception:
-                                parsed = None
+                        # Extract position and convert from meters to millimeters
+                        position = {
+                            'x': matrix[0][3] * 1000.0,  # X in mm
+                            'y': matrix[1][3] * 1000.0,  # Y in mm
+                            'z': matrix[2][3] * 1000.0   # Z in mm
+                        }
 
-                            if parsed:
-                                # parsed could be nested lists or flat list
-                                try:
-                                    # nested 4x4 matrix case
-                                    if (isinstance(parsed, list) and len(parsed) == 4 and
-                                            all(isinstance(r, list) and len(r) == 4 for r in parsed)):
-                                        m = parsed  # row-major 4x4
-                                        # translation is last column
-                                        tx, ty, tz = float(m[0][3]), float(m[1][3]), float(m[2][3])
-                                        position = (tx, ty, tz)
-                                        # compute forward = -R[:,2] (third column of rotation)
-                                        try:
-                                            fx = -float(m[0][2]); fy = -float(m[1][2]); fz = -float(m[2][2])
-                                            target = (position[0] + fx * 200.0,
-                                                      position[1] + fy * 200.0,
-                                                      position[2] + fz * 200.0)
-                                        except Exception:
-                                            target = (position[0], position[1], position[2] - 200.0)
-                                    # flat list of 16 numbers
-                                    elif isinstance(parsed, list) and len(parsed) == 16:
-                                        flat = [float(x) for x in parsed]
-                                        # reshape to 4x4 row-major
-                                        m = [flat[0:4], flat[4:8], flat[8:12], flat[12:16]]
-                                        tx, ty, tz = float(m[0][3]), float(m[1][3]), float(m[2][3])
-                                        position = (tx, ty, tz)
-                                        try:
-                                            fx = -float(m[0][2]); fy = -float(m[1][2]); fz = -float(m[2][2])
-                                            target = (position[0] + fx * 200.0,
-                                                      position[1] + fy * 200.0,
-                                                      position[2] + fz * 200.0)
-                                        except Exception:
-                                            target = (position[0], position[1], position[2] - 200.0)
-                                except Exception:
-                                    parsed = None
-
-                            if parsed is None:
-                                # Fallback: parse key=value pairs like "tx=...,ty=...,tz=...,rx=...,..."
-                                pose_dict = {}
-                                for part in pose_str.split(','):
-                                    if '=' in part:
-                                        k, v = part.strip().split('=', 1)
-                                        try:
-                                            pose_dict[k] = float(v)
-                                        except Exception:
-                                            continue
-                                position = (
-                                    pose_dict.get('tx', 0.0),
-                                    pose_dict.get('ty', 0.0),
-                                    pose_dict.get('tz', 0.0)
-                                )
-                                # if rotation present (rx,ry,rz) we could compute forward, but fallback to -Z
-                                target = (position[0], position[1], position[2] - 200.0)
+                        # Extract rotation matrix (top-left 3x3) and convert to quaternion
+                        rotation_matrix = [
+                            [matrix[0][0], matrix[0][1], matrix[0][2]],
+                            [matrix[1][0], matrix[1][1], matrix[1][2]],
+                            [matrix[2][0], matrix[2][1], matrix[2][2]]
+                        ]
+                        
+                        # Convert 3x3 rotation matrix to quaternion
+                        quat = self._matrix_to_quaternion(rotation_matrix)
+                        orientation = {
+                            'x': quat[0],
+                            'y': quat[1], 
+                            'z': quat[2],
+                            'w': quat[3]
+                        }
 
                         poses.append({
-                            'serial': str(serial),
-                            'position': position,
-                            'target': target
+                            "serial": str(serial),
+                            "position": position,
+                            "orientation": orientation
                         })
+
+                        print(f"[DEBUG] Camera {serial}: pos={position}, orientation={orientation}")
+
                     except Exception as e:
-                        print(f"[WARNING] Failed to parse camera pose for {key}: {e}")
-                        # continue to next entry
+                        print(f"[WARNING] Failed to parse pose for {key}: {e}")
 
-        except Exception as e:
-            print(f"[WARNING] Failed to load camera poses: {e}")
+            except Exception as e:
+                print(f"[WARNING] Failed to read calibration file: {e}")
 
-        # Cache the result permanently
-        self._camera_pose_cache = poses
-        self._camera_pose_cache_time = time.time()
-        return poses
+        else:
+            # Single camera mode: use SDK defaults, adjusted for floor
+            try:
+                serial = str(self.camera.get_camera_information().serial_number)
+            except Exception:
+                serial = "unknown"
+
+            poses.append({
+                "serial": serial,
+                "position": {'x': 0.0, 'y': 0.0, 'z': 0.0},
+                "orientation": {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}  # Identity quaternion
+            })
+
+        result = {"cameras": poses, "floor": floor_info}
+        self._camera_pose_cache = result
+        print(f"[INFO] Cached {len(poses)} camera poses with floor height {floor_height_mm} mm")
+        return result
+
 
     def _ensure_frame_has_camera(self, frame):
         """Ensure frame has camera information for single-camera setups"""
@@ -628,13 +570,6 @@ class SenseSpaceServer:
                          enable_body_tracking: bool = True,
                          enable_floor_detection: bool = True) -> bool:
         """Initialize cameras for body tracking"""
-        # resolve expected calibration file path
-        try:
-            calib_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "server", "calib")
-            calib_file = os.path.join(calib_dir, "calib.json")
-        except Exception:
-            calib_file = None
-
         if serial_numbers is None or len(serial_numbers) == 0:
             # Auto-detect cameras
             try:
@@ -648,9 +583,6 @@ class SenseSpaceServer:
                     return self._initialize_single_camera(device_list[0], enable_body_tracking, enable_floor_detection)
                 else:
                     # Multi-camera fusion mode - require calibration file
-                    if not calib_file or not os.path.isfile(calib_file):
-                        print("[ERROR] Fusion mode requires calibration file at server/calib/calib.json")
-                        return False
                     return self._initialize_fusion_cameras(device_list, enable_body_tracking, enable_floor_detection)
             except Exception as e:
                 print(f"[ERROR] Failed to detect cameras: {e}")
@@ -661,8 +593,9 @@ class SenseSpaceServer:
                 return self._initialize_single_camera_by_serial(serial_numbers[0], enable_body_tracking, enable_floor_detection)
             else:
                 # Multi-camera fusion by serials - require calibration file
-                if not calib_file or not os.path.isfile(calib_file):
-                    print("[ERROR] Fusion mode requires calibration file at server/calib/calib.json")
+                calib_file = self._find_calibration_file()
+                if not calib_file:
+                    print("[ERROR] Fusion mode requires calibration file in server/calib/ directory")
                     return False
                 return self._initialize_fusion_cameras_by_serial(serial_numbers, enable_body_tracking, enable_floor_detection)
 
@@ -736,11 +669,10 @@ class SenseSpaceServer:
     def _initialize_fusion_cameras(self, device_list, enable_body_tracking: bool = True, enable_floor_detection: bool = True) -> bool:
         """Initialize multiple cameras for fusion mode using a fusion configuration (calib) file."""
         try:
-            # Find and load calib file
-            calib_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "server", "calib")
-            calib_file = os.path.join(calib_dir, "calib.json")
-            if not os.path.isfile(calib_file):
-                print("[ERROR] Fusion mode requires calibration file at server/calib/calib.json")
+            # Find newest calibration file
+            calib_file = self._find_calibration_file()
+            if not calib_file:
+                print("[ERROR] Fusion mode requires calibration file in server/calib/ directory")
                 return False
 
             # Read fusion configurations using ZED SDK helper
@@ -862,6 +794,7 @@ class SenseSpaceServer:
                     print(f"[INFO] Subscribed to {conf.serial_number}")
                 else:
                     print(f"[WARNING] Unable to subscribe to {conf.serial_number}: {status}")
+                    
 
             if not camera_identifiers:
                 print("[ERROR] No cameras subscribed to fusion")
@@ -922,54 +855,36 @@ class SenseSpaceServer:
             print(f"[ERROR] Failed to initialize cameras by serial: {e}")
             return False
 
-    def _find_calibration_file(self, serial: str) -> Optional[str]:
-        """Find calibration file for camera serial"""
+    def _find_calibration_file(self, serial: str = None) -> Optional[str]:
+        """Find the newest calibration file in the calib directory"""
         try:
             calib_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "server", "calib")
-            calib_file = os.path.join(calib_dir, "calib.json")
-
-            if os.path.isfile(calib_file):
-                return calib_file
-            return None
-        except Exception:
-            return None
-
-    def _load_pose_for_serial(self, serial: str):
-        """
-        Try to load/parse the pose entry for a given serial from server/calib/calib.json.
-        Returns one of:
-          - a nested 4x4 list (row-major) or flat 16-list
-          - the raw pose string (fallback)
-          - None if no pose found
-        """
-        try:
-            calib_file = self._find_calibration_file(serial)
-            if not calib_file:
+            
+            if not os.path.isdir(calib_dir):
                 return None
-            with open(calib_file, "r") as fh:
-                data = json.load(fh)
-
-            for key, entry in data.items():
-                cfg = entry.get("FusionConfiguration", {})
-                serial_cfg = cfg.get("serial_number", key)
-                if str(serial_cfg) != str(serial):
-                    continue
-                pose_str = cfg.get("pose")
-                if not pose_str:
-                    return None
-
-                # Try JSON list-like first
-                try:
-                    txt = pose_str.strip()
-                    if txt.startswith('['):
-                        parsed = json.loads(txt.replace("'", '"'))
-                        return parsed
-                except Exception:
-                    pass
-
-                # fallback: return raw string (key=value style)
-                return pose_str
-        except Exception:
+            
+            # Find all .json files in calib directory
+            calib_files = []
+            for filename in os.listdir(calib_dir):
+                if filename.endswith('.json'):
+                    filepath = os.path.join(calib_dir, filename)
+                    if os.path.isfile(filepath):
+                        # Get modification time
+                        mtime = os.path.getmtime(filepath)
+                        calib_files.append((filepath, mtime))
+            
+            if not calib_files:
+                return None
+            
+            # Sort by modification time (newest first)
+            calib_files.sort(key=lambda x: x[1], reverse=True)
+            newest_file = calib_files[0][0]
+            
+            print(f"[INFO] Using calibration file: {os.path.basename(newest_file)}")
+            return newest_file
+            
+        except Exception as e:
+            print(f"[WARNING] Failed to find calibration file: {e}")
             return None
 
     def run_body_tracking_loop(self):
@@ -1076,7 +991,6 @@ class SenseSpaceServer:
                 frame = self._process_bodies_fusion(bodies)
                 if frame:
                     frame.floor_height = self.detected_floor_height
-                    frame.cameras = self.get_camera_poses()
 
                     self.broadcast_frame(frame)
 
@@ -1164,12 +1078,35 @@ class SenseSpaceServer:
             ))
 
         if people or True:  # Always send frames for debugging
+            # Get camera poses data
+            camera_poses_data = self.get_camera_poses()
+
+            # Normalize into separate camera list and floor height
+            camera_list = []
+            floor_height = None
+
+            if camera_poses_data:
+                if isinstance(camera_poses_data, dict):
+                    camera_list = camera_poses_data.get('cameras', []) or []
+                    floor_info = camera_poses_data.get('floor')
+                    if isinstance(floor_info, dict):
+                        floor_height = floor_info.get('height')
+                elif isinstance(camera_poses_data, list):
+                    camera_list = camera_poses_data
+                else:
+                    # unknown format - ignore
+                    camera_list = []
+
+            # fallback to detected value if available
+            if floor_height is None:
+                floor_height = getattr(self, 'detected_floor_height', None)
+
             return Frame(
                 timestamp=bodies.timestamp.get_seconds(),
                 people=people,
                 body_model="BODY_34",
-                floor_height=self.detected_floor_height,
-                cameras=self.get_camera_poses()  # Pre-populate to avoid per-frame work
+                floor_height=floor_height,
+                cameras=camera_list
             )
 
         return None
@@ -1224,15 +1161,76 @@ class SenseSpaceServer:
             ))
 
         if people or True:  # Always send frames for debugging
+            # Get camera poses data
+            camera_poses_data = self.get_camera_poses()
+
+            # Normalize into separate camera list and floor height
+            camera_list = []
+            floor_height = None
+
+            if camera_poses_data:
+                if isinstance(camera_poses_data, dict):
+                    camera_list = camera_poses_data.get('cameras', []) or []
+                    floor_info = camera_poses_data.get('floor')
+                    if isinstance(floor_info, dict):
+                        floor_height = floor_info.get('height')
+                elif isinstance(camera_poses_data, list):
+                    camera_list = camera_poses_data
+                else:
+                    # unknown format - ignore
+                    camera_list = []
+
+            # fallback to detected value if available
+            if floor_height is None:
+                floor_height = getattr(self, 'detected_floor_height', None)
+
             return Frame(
                 timestamp=bodies.timestamp.get_seconds(),
                 people=people,
                 body_model="BODY_34",
-                floor_height=self.detected_floor_height,
-                cameras=self.get_camera_poses()
+                floor_height=floor_height,
+                cameras=camera_list
             )
 
         return None
+
+    def _matrix_to_quaternion(self, rotation_matrix):
+        """Convert 3x3 rotation matrix to quaternion [x, y, z, w]"""
+        try:
+            import math
+            
+            R = rotation_matrix
+            trace = R[0][0] + R[1][1] + R[2][2]
+            
+            if trace > 0:
+                s = math.sqrt(trace + 1.0) * 2  # s = 4 * qw
+                w = 0.25 * s
+                x = (R[2][1] - R[1][2]) / s
+                y = (R[0][2] - R[2][0]) / s
+                z = (R[1][0] - R[0][1]) / s
+            elif R[0][0] > R[1][1] and R[0][0] > R[2][2]:
+                s = math.sqrt(1.0 + R[0][0] - R[1][1] - R[2][2]) * 2  # s = 4 * qx
+                w = (R[2][1] - R[1][2]) / s
+                x = 0.25 * s
+                y = (R[0][1] + R[1][0]) / s
+                z = (R[0][2] + R[2][0]) / s
+            elif R[1][1] > R[2][2]:
+                s = math.sqrt(1.0 + R[1][1] - R[0][0] - R[2][2]) * 2  # s = 4 * qy
+                w = (R[0][2] - R[2][0]) / s
+                x = (R[0][1] + R[1][0]) / s
+                y = 0.25 * s
+                z = (R[1][2] + R[2][1]) / s
+            else:
+                s = math.sqrt(1.0 + R[2][2] - R[0][0] - R[1][1]) * 2  # s = 4 * qz
+                w = (R[1][0] - R[0][1]) / s
+                x = (R[0][2] + R[2][0]) / s
+                y = (R[1][2] + R[2][1]) / s
+                z = 0.25 * s
+                
+            return [x, y, z, w]
+        except Exception as e:
+            print(f"[WARNING] Failed to convert matrix to quaternion: {e}")
+            return [0.0, 0.0, 0.0, 1.0]  # Identity quaternion
 
     def cleanup(self):
         """Clean up resources"""
