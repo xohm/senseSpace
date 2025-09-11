@@ -90,46 +90,66 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="TCP server host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=12345, help="TCP server port (default: 12345)")
     parser.add_argument("--no-cameras", action="store_true", help="Skip ZED camera initialization and start TCP server only (debug)")
+    parser.add_argument("--viz", action="store_true", help="Enable visualization (alternative to --mode viz)")
     
     args = parser.parse_args()
+    
+    # Handle --viz flag as alternative to --mode viz
+    if args.viz:
+        args.mode = "viz"
     
     # Create server instance
     server = SenseSpaceServer(host=args.host, port=args.port)
     
     try:
-        # Initialize cameras (optional)
-        if not args.no_cameras:
-            print("[INFO] Initializing ZED cameras...")
-            if not server.initialize_cameras():
-                print("[ERROR] Failed to initialize cameras")
-                return 1
-        else:
-            print("[INFO] Skipping camera initialization (debug mode)")
-        
-        # Start TCP server
-        print("[INFO] Starting TCP server...")
-        server.start_tcp_server()
-        
         if args.mode == "viz":
+            # Visualization mode: initialize cameras and run Qt viewer
+            if not args.no_cameras:
+                print("[INFO] Initializing ZED cameras...")
+                if not server.initialize_cameras():
+                    print("[ERROR] Failed to initialize cameras")
+                    return 1
+            else:
+                print("[INFO] Skipping camera initialization (debug mode)")
+            
+            # Start TCP server
+            print("[INFO] Starting TCP server...")
+            server.start_tcp_server()
+            
             # Run with Qt visualization
             exit_code = start_qt_application(server)
             return exit_code
         else:
-            # Headless mode
+            # Headless server mode
             print("[INFO] Running in headless mode. Press Ctrl+C to exit...")
+            
+            # Initialize cameras only if not in debug mode
+            if not args.no_cameras:
+                print("[INFO] Initializing ZED cameras...")
+                if not server.initialize_cameras():
+                    print("[ERROR] Failed to initialize cameras")
+                    return 1
+            else:
+                print("[INFO] Skipping camera initialization (debug mode)")
+            
+            # Start TCP server
+            print("[INFO] Starting TCP server...")
+            server.start_tcp_server()
+            
             # If cameras were not initialized (debug --no-cameras), run a simple loop
             # to keep the TCP server alive so clients can connect for debugging.
             if args.no_cameras:
-                try:
-                    while server.running:
-                        # Sleep briefly and allow server threads to operate
-                        time.sleep(0.5)
-                    return 0
-                except KeyboardInterrupt:
-                    return 0
+                 try:
+                     while server.running:
+                         # Sleep briefly and allow server threads to operate
+                         time.sleep(0.5)
+                     return 0
+                 except KeyboardInterrupt:
+                     return 0
             else:
-                server.run_body_tracking_loop()
-                return 0
+                # Run body tracking loop in headless mode
+                 server.run_body_tracking_loop()
+                 return 0
             
     except KeyboardInterrupt:
         print("\n[INFO] Shutting down...")

@@ -8,7 +8,7 @@ import time
 from typing import Optional
 
 from PyQt5 import QtWidgets, QtCore, QtOpenGL
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtOpenGL import QGLWidget
 from OpenGL.GL import *
 from OpenGL.GLU import *
@@ -239,24 +239,29 @@ class ClientSkeletonGLWidget(QGLWidget):
         buttons = event.buttons()
 
         # Left: rotate
-        if buttons & QtCore.Qt.LeftButton:
+        if buttons & Qt.LeftButton:
             self.camera_azimuth += dx * 0.5
             self.camera_elevation += -dy * 0.5
             self.camera_elevation = max(-89.9, min(89.9, self.camera_elevation))
 
         # Right: pan
-        elif buttons & QtCore.Qt.RightButton:
+        elif buttons & Qt.RightButton:
             pan_scale = max(0.001, self.camera_distance * 0.002)
-            azimuth_rad = math.radians(self.camera_azimuth)
-            right_x = math.cos(azimuth_rad)
-            right_z = -math.sin(azimuth_rad)
-
-            self.camera_target[0] += (-dx) * right_x * pan_scale
-            self.camera_target[2] += (-dx) * right_z * pan_scale
-            self.camera_target[1] += (dy) * pan_scale * 0.5
+            
+            # Simple panning relative to current view
+            yaw_rad = math.radians(self.camera_azimuth)
+            
+            # Right vector (perpendicular to camera direction)
+            right_x = math.cos(yaw_rad)
+            right_z = -math.sin(yaw_rad)
+            
+            # Move target: dx moves left/right, dy moves up/down
+            self.camera_target[0] += -dx * right_x * pan_scale
+            self.camera_target[1] += dy * pan_scale
+            self.camera_target[2] += -dx * right_z * pan_scale
 
         # Middle or both buttons: zoom
-        elif (buttons & QtCore.Qt.MiddleButton) or ((buttons & QtCore.Qt.LeftButton) and (buttons & QtCore.Qt.RightButton)):
+        elif (buttons & Qt.MiddleButton) or ((buttons & Qt.LeftButton) and (buttons & Qt.RightButton)):
             self.camera_distance += dy * 5.0
             self.camera_distance = max(100.0, min(10000.0, self.camera_distance))
 
