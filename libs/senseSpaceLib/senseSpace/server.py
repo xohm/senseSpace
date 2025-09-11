@@ -11,6 +11,7 @@ import json
 import time
 import glob
 import os
+import queue
 from typing import Optional, Callable, List
 
 import pyzed.sl as sl
@@ -20,8 +21,8 @@ from .visualization import get_stable_floor_height
 
 class SenseSpaceServer:
     """Main server class for ZED SDK body tracking and TCP broadcasting"""
-    
-    def __init__(self, host="0.0.0.0", port=12345):
+
+    def __init__(self, host: str = "0.0.0.0", port: int = 12345):
         self.host = host
         self.port = port
         self.clients = []
@@ -37,7 +38,18 @@ class SenseSpaceServer:
 
         # Callback for UI updates
         self.update_callback = None
+
+        # Camera pose cache to avoid expensive recalculation on each frame
+        self._camera_pose_cache = None
+        self._camera_pose_cache_time = 0.0
+        # Make camera poses computed once at startup (no periodic recompute).
+        # Set to None to indicate permanent cache.
+        self._camera_pose_cache_ttl = None
+
         # No background floor detection here; follow SDK best-practice: detect once at init
+        # Per-client send queues and sender threads (avoid per-frame thread creation)
+        self._client_queues = {}  # socket -> Queue
+        self._client_sender_threads = {}  # socket -> Thread
         
     def set_update_callback(self, callback: Callable):
         """Set callback function for UI updates (e.g., Qt viewer updates)"""
@@ -51,6 +63,11 @@ class SenseSpaceServer:
         self.running = True
         server_thread = threading.Thread(target=self._tcp_server_loop, daemon=True)
         server_thread.start()
+        # Build camera pose cache once at server start to avoid hot-path work
+        try:
+            self.get_camera_poses()
+        except Exception:
+            pass
         print(f"[SERVER] TCP server started on {self.host}:{self.port}")
     
     def stop_tcp_server(self):
@@ -86,7 +103,23 @@ class SenseSpaceServer:
             while self.running:
                 try:
                     conn, addr = self.server_socket.accept()
+                    # Make client socket send operations timeout quickly to avoid blocking
+                    try:
+                        conn.settimeout(0.2)
+                    except Exception:
+                        pass
+                    try:
+                        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    except Exception:
+                        pass
                     self.clients.append(conn)
+                    # Create a small bounded queue for outgoing messages to this client
+                    q = queue.Queue(maxsize=8)
+                    self._client_queues[conn] = q
+                    sender_thread = threading.Thread(target=self._client_sender_worker, args=(conn, q), daemon=True)
+                    self._client_sender_threads[conn] = sender_thread
+                    sender_thread.start()
+
                     client_thread = threading.Thread(
                         target=self._client_handler, 
                         args=(conn, addr), 
@@ -104,9 +137,17 @@ class SenseSpaceServer:
         """Handle individual client connection"""
         print(f"[CLIENT CONNECTED] {addr}")
         try:
+            # Keep the client socket alive by reading small keep-alive data.
+            # Use the socket timeout set at accept time so this thread can exit promptly.
             while self.running:
-                data = conn.recv(1)  # keep alive
-                if not data:
+                try:
+                    data = conn.recv(1)  # keep alive
+                    if not data:
+                        break
+                except socket.timeout:
+                    # No data received in timeout window; continue to check running flag
+                    continue
+                except Exception:
                     break
         except:
             pass
@@ -114,34 +155,142 @@ class SenseSpaceServer:
             print(f"[CLIENT DISCONNECTED] {addr}")
             if conn in self.clients:
                 self.clients.remove(conn)
+            # Clean up sender queue and thread mapping
+            try:
+                if conn in self._client_queues:
+                    try:
+                        # signal sender thread to exit
+                        self._client_queues[conn].put_nowait(None)
+                    except Exception:
+                        pass
+                    del self._client_queues[conn]
+            except Exception:
+                pass
+            try:
+                if conn in self._client_sender_threads:
+                    del self._client_sender_threads[conn]
+            except Exception:
+                pass
             try:
                 conn.close()
             except:
+                pass
+
+    def _client_sender_worker(self, conn, q: "queue.Queue"):
+        """Worker thread that sends queued messages for a single client socket.
+        Accepts either already-encoded bytes or a payload dict/object to serialize
+        and send. Exits when the queue yields None or on socket failure.
+        """
+        def _serialize_message(msg):
+            # msg is expected to be a dict/serializable object
+            try:
+                return (json.dumps(msg) + "\n").encode("utf-8")
+            except TypeError:
+                try:
+                    def _fallback(o):
+                        if hasattr(o, 'to_dict'):
+                            return o.to_dict()
+                        if hasattr(o, 'tolist'):
+                            return list(o.tolist())
+                        try:
+                            return list(o)
+                        except Exception:
+                            return str(o)
+                    return (json.dumps(msg, default=_fallback) + "\n").encode("utf-8")
+                except Exception:
+                    return None
+
+        try:
+            while self.running:
+                try:
+                    item = q.get(timeout=0.5)
+                except Exception:
+                    # timeout, check running flag
+                    continue
+                if item is None:
+                    break
+
+                # If item is raw bytes, send directly; otherwise serialize here.
+                # Accept Frame objects, dicts, or pre-serialized bytes.
+                if isinstance(item, (bytes, bytearray)):
+                    msg_bytes = item
+                else:
+                    # If it's a Frame-like object, try to call to_dict() before serializing.
+                    try:
+                        # avoid importing Frame type here; duck-type
+                        if hasattr(item, 'to_dict') and not isinstance(item, dict):
+                            payload = item.to_dict()
+                        else:
+                            payload = item
+                    except Exception:
+                        # fallback: send string representation
+                        payload = str(item)
+
+                    msg_bytes = _serialize_message(payload)
+                    if msg_bytes is None:
+                        # serialization failed; drop this message for this client
+                        continue
+
+                try:
+                    conn.sendall(msg_bytes)
+                except Exception:
+                    # On error, remove client and break
+                    try:
+                        if conn in self.clients:
+                            self.clients.remove(conn)
+                    except Exception:
+                        pass
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    break
+        except Exception:
+            pass
+        finally:
+            # ensure queue entry and thread mapping removed
+            try:
+                if conn in self._client_queues:
+                    del self._client_queues[conn]
+            except Exception:
+                pass
+            try:
+                if conn in self._client_sender_threads:
+                    del self._client_sender_threads[conn]
+            except Exception:
                 pass
     
     def broadcast_frame(self, frame: Frame):
         """Broadcast a frame to all connected clients"""
         if not self.clients:
             return
-            
-        message = {
-            "type": "frame",
-            "data": frame.to_dict()
-        }
-        
-        msg_bytes = (json.dumps(message) + "\n").encode("utf-8")
-        
+        # Enqueue the Frame object itself: sender worker will call to_dict() and json.dumps().
+        message = {"type": "frame", "data": frame}
         for client in list(self.clients):
-            try:
-                client.sendall(msg_bytes)
-            except:
-                # Remove disconnected clients
-                if client in self.clients:
-                    self.clients.remove(client)
+            q = self._client_queues.get(client)
+            if q is None:
+                # No queue: best-effort short-path; serialize minimally here
                 try:
-                    client.close()
-                except:
-                    pass
+                    payload = frame.to_dict() if hasattr(frame, 'to_dict') else frame
+                    text = json.dumps({"type": "frame", "data": payload}, default=lambda o: getattr(o, 'to_dict', lambda: str(o))())
+                    client.sendall((text + "\n").encode("utf-8"))
+                except Exception:
+                    try:
+                        if client in self.clients:
+                            self.clients.remove(client)
+                    except Exception:
+                        pass
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                continue
+
+            try:
+                q.put_nowait(message)
+            except queue.Full:
+                # drop message for this slow client
+                continue
     
     def find_floor_plane(self, cam):
         """Detect floor plane using ZED SDK"""
@@ -249,6 +398,184 @@ class SenseSpaceServer:
         """Return the detected floor height from ZED SDK, or None if not detected."""
         return self.detected_floor_height
 
+    def get_camera_poses(self):
+        """
+        Return a list of camera poses known to the server (from calibration files).
+        Each pose is a dict: { 'serial': <serial>, 'position': (x,y,z), 'target': (x,y,z) }
+        If no calib file is present, returns an empty list.
+        """
+        # Return cached result (permanent cache - compute once)
+        if self._camera_pose_cache is not None:
+            return self._camera_pose_cache
+
+        poses = []
+        
+        try:
+            calib_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "server", "calib")
+            calib_file = os.path.join(calib_dir, "calib.json")
+            # If the SDK reports exactly one connected camera, ignore calib.json
+            # and return a single default camera pose for debugging/simple setups.
+            try:
+                devs = sl.Camera.get_device_list()
+                if devs is not None and len(devs) == 1:
+                    # determine serial if possible
+                    try:
+                        serial = str(devs[0].serial_number)
+                    except Exception:
+                        serial = str(devs[0])
+                    # prefer the opened camera's serial if available
+                    try:
+                        if self.camera is not None:
+                            serial = str(self.camera.get_camera_information().serial_number)
+                    except Exception:
+                        pass
+                    # default pose: camera at origin looking along -Z (scaled in mm)
+                    poses.append({
+                        'serial': serial,
+                        'position': (0.0, 0.0, 0.0),
+                        'target': (0.0, 0.0, -200.0)
+                    })
+                    return poses
+            except Exception:
+                pass
+            # Determine the set of actually available camera serial numbers.
+            available_serials = set()
+            # If fusion subscriptions exist, prefer their serials
+            if self.fusion is not None:
+                try:
+                    subs = self.fusion.get_subscribed_cameras()
+                    for s in subs:
+                        # subscription objects may expose serial_number attribute or be strings
+                        try:
+                            available_serials.add(str(s.serial_number))
+                        except Exception:
+                            available_serials.add(str(s))
+                except Exception:
+                    pass
+
+            # If a single camera is open, include its serial
+            if self.camera is not None:
+                try:
+                    available_serials.add(str(self.camera.get_camera_information().serial_number))
+                except Exception:
+                    # older SDKs: try attribute access
+                    try:
+                        available_serials.add(str(self.camera.get_serial_number()))
+                    except Exception:
+                        pass
+
+            # As a fallback, query the SDK device list
+            try:
+                devs = sl.Camera.get_device_list()
+                for dev in devs:
+                    try:
+                        available_serials.add(str(dev.serial_number))
+                    except Exception:
+                        try:
+                            available_serials.add(str(dev))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            if os.path.isfile(calib_file):
+                with open(calib_file, 'r') as fh:
+                    data = json.load(fh)
+                for key, entry in data.items():
+                    try:
+                        cfg = entry.get('FusionConfiguration', {})
+                        pose_str = cfg.get('pose')
+                        serial = cfg.get('serial_number', key)
+                        # Only include calib entries for serials that are actually available
+                        if available_serials and str(serial) not in available_serials:
+                            continue
+                        if not pose_str:
+                            continue
+                        vals = [float(x) for x in pose_str.split()]
+                        if len(vals) >= 12:
+                            # assume row-major 4x4 matrix: translation at indices 3,7,11
+                            tx = vals[3]
+                            ty = vals[7]
+                            tz = vals[11]
+                            # forward direction approx from 3rd column (indices 2,6,10)
+                            fx = vals[2]
+                            fy = vals[6]
+                            fz = vals[10]
+                            # normalize forward
+                            norm = (fx*fx + fy*fy + fz*fz) ** 0.5
+                            if norm == 0:
+                                norm = 1.0
+                            forward = (fx / norm, fy / norm, fz / norm)
+                            pos = (tx, ty, tz)
+                            # Some calibration conventions store camera facing direction opposite
+                            # to the visual convention; invert forward so frustums point correctly
+                            target = (tx - forward[0] * 200.0, ty - forward[1] * 200.0, tz - forward[2] * 200.0)
+                            poses.append({'serial': serial, 'position': pos, 'target': target})
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        # cache result
+        try:
+            self._camera_pose_cache = poses
+            self._camera_pose_cache_time = time.time()
+        except Exception:
+            pass
+        return poses
+
+    def _ensure_frame_has_camera(self, frame: Frame):
+        """Ensure the given Frame has at least one camera entry when a single camera exists.
+        This inserts a default pose if get_camera_poses() returned empty but the SDK reports
+        exactly one connected device or a single opened camera.
+        """
+        try:
+            cams = frame.cameras if getattr(frame, 'cameras', None) is not None else []
+            if cams:
+                return
+
+            # Prefer get_camera_poses() result
+            poses = self.get_camera_poses()
+            if poses:
+                frame.cameras = poses
+                return
+
+            # If no poses but SDK reports exactly one device, add a default pose
+            try:
+                devs = sl.Camera.get_device_list()
+                one_device = (devs is not None and len(devs) == 1)
+            except Exception:
+                one_device = False
+
+            if one_device or (self.camera is not None and self.fusion is None):
+                try:
+                    # attempt to get serial
+                    serial = None
+                    try:
+                        if self.camera is not None:
+                            serial = str(self.camera.get_camera_information().serial_number)
+                    except Exception:
+                        pass
+                    if not serial:
+                        try:
+                            devs = sl.Camera.get_device_list()
+                            if devs and len(devs) >= 1:
+                                try:
+                                    serial = str(devs[0].serial_number)
+                                except Exception:
+                                    serial = str(devs[0])
+                        except Exception:
+                            serial = ""
+
+                    frame.cameras = [{
+                        'serial': serial or '',
+                        'position': (0.0, 0.0, 0.0),
+                        'target': (0.0, 0.0, -200.0)
+                    }]
+                except Exception:
+                    # best-effort: leave cameras empty
+                    pass
+        except Exception:
+            pass
+
     # No background floor worker: follow SDK best practice — detect once at init and only re-run on demand
     
     def initialize_cameras(self) -> bool:
@@ -286,7 +613,7 @@ class SenseSpaceServer:
         
         # Set init params
         init_params = sl.InitParameters()
-        init_params.camera_resolution = sl.RESOLUTION.HD1080
+        init_params.camera_resolution = sl.RESOLUTION.HD720
         init_params.camera_fps = 30
         init_params.coordinate_units = sl.UNIT.MILLIMETER
         init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
@@ -360,7 +687,7 @@ class SenseSpaceServer:
             print(f"[FUSION] Subscribing to camera {i}: SN={cam_info.serial_number}")
             
             init_params = sl.InitParameters()
-            init_params.camera_resolution = sl.RESOLUTION.HD1080
+            init_params.camera_resolution = sl.RESOLUTION.HD720
             init_params.camera_fps = 30
             init_params.coordinate_units = sl.UNIT.MILLIMETER
             init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
@@ -437,86 +764,26 @@ class SenseSpaceServer:
                     except Exception as e:
                         print(f'[WARNING] retrieve_bodies failed: {e}')
                         continue
-                
-                # Process bodies and create frame
-                people = []
-                # Build people list similar to _process_bodies_single_camera but inline
-                for person in bodies.body_list:
-                    kp_attr = getattr(person, 'keypoint', None)
-                    if kp_attr is None:
-                        kp_attr = getattr(person, 'keypoints', None)
-                    keypoints = kp_attr if kp_attr is not None else []
+            
+            # Process bodies - use helper function only
+            frame = self._process_bodies_single_camera(bodies)
+            if frame:
+                frame.floor_height = self.detected_floor_height
 
-                    conf_attr = getattr(person, 'keypoint_confidence', None)
-                    if conf_attr is None:
-                        conf_attr = getattr(person, 'keypoint_confidences', None)
-                    confidences = conf_attr if conf_attr is not None else []
-
-                    orientations = getattr(person, 'global_orientation', None)
-                    if orientations is None:
-                        orientations = getattr(person, 'global_root_orientation', None)
-
-                    joints = []
-                    for i, kp in enumerate(keypoints):
-                        pos = {"x": float(kp[0]), "y": float(kp[1]), "z": float(kp[2])}
-                        if orientations is not None:
-                            try:
-                                if len(orientations.shape) == 2:
-                                    ori = orientations[i] if i < len(orientations) else orientations[0]
-                                else:
-                                    ori = orientations
-                                ori_dict = {"x": float(ori[0]), "y": float(ori[1]), "z": float(ori[2]), "w": float(ori[3])}
-                            except (IndexError, AttributeError):
-                                ori_dict = {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
-                        else:
-                            ori_dict = {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
-
-                        conf = float(confidences[i]) if i < len(confidences) else 0.0
-                        joints.append(Joint(i=i, pos=pos, ori=ori_dict, conf=conf))
-
-                    people.append(Person(
-                        id=person.id,
-                        tracking_state=str(person.tracking_state),
-                        confidence=float(person.confidence),
-                        skeleton=joints
-                    ))
-
-                frame = None
+                # Ensure frame contains camera info for single-camera setups, then broadcast
                 try:
-                    frame = self._process_bodies_single_camera(bodies)
+                    self._ensure_frame_has_camera(frame)
                 except Exception:
-                    # fallback: build frame manually if helper fails
                     pass
-                # Only include floor height when ZED provided a detected value.
-                people_for_floor = frame.people if frame else people
-                detected_floor = self.detected_floor_height
-
-                # If frame exists, update its floor_height to the detected value (may be None).
-                if frame:
-                    frame.floor_height = detected_floor
-                else:
-                    frame = Frame(
-                        timestamp=time.time(),
-                        people=people_for_floor,
-                        body_model="BODY_34",
-                        floor_height=detected_floor
-                    )
-
-                # Broadcast to clients
                 self.broadcast_frame(frame)
 
                 # Update UI if callback is set (provide detected floor height or None)
                 if self.update_callback:
                     try:
-                        self.update_callback(frame.people, detected_floor)
+                        self.update_callback(frame.people, self.detected_floor_height)
                     except Exception:
                         pass
 
-                # Do not attempt floor re-detection inside the tight capture loop.
-                # Follow SDK best practice: floor is detected once at init and only
-                # re-detected on-demand. This avoids periodic costly plane-fitting
-                # operations that stall the body-tracking loop.
-    
     def _run_fusion_loop(self):
         """Body tracking loop for fusion mode"""
         bodies = sl.Bodies()
@@ -534,37 +801,49 @@ class SenseSpaceServer:
             last_time = time.time()
             
             if self.fusion.process() == sl.FUSION_ERROR_CODE.SUCCESS:
-                status = self.fusion.retrieve_bodies(bodies)
-                if status == sl.FUSION_ERROR_CODE.SUCCESS:
-                    # Process bodies and create frame
-                    frame = self._process_bodies_fusion(bodies)
-                    if frame:
-                        # Ensure frame.floor_height reflects only the ZED-detected value (may be None)
-                        frame.floor_height = self.detected_floor_height
-
-                        # Broadcast to clients
-                        self.broadcast_frame(frame)
-
-                        # Update UI if callback is set
-                        if self.update_callback:
+                # Retrieve bodies
+                try:
+                    if hasattr(sl, 'BodyTrackingFusionRuntimeParameters'):
+                        self.fusion.retrieve_bodies(bodies, sl.BodyTrackingFusionRuntimeParameters())
+                    else:
+                        self.fusion.retrieve_bodies(bodies)
+                except Exception as e:
+                    print(f'[WARNING] Fusion retrieve_bodies failed: {e}')
+                    continue
+                
+                # Process bodies
+                frame = self._process_bodies_fusion(bodies)
+                if frame:
+                    frame.floor_height = self.detected_floor_height
+                    frame.cameras = self.get_camera_poses()
+                    
+                    self.broadcast_frame(frame)
+                    
+                    # Update UI if callback is set
+                    if self.update_callback:
+                        try:
                             self.update_callback(frame.people, self.detected_floor_height)
-    
+                        except Exception:
+                            pass
+
     def _process_bodies_single_camera(self, bodies) -> Optional[Frame]:
         """Process bodies from single camera and create Frame object"""
         people = []
         
         for person in bodies.body_list:
-            # Handle different SDK versions for keypoint attributes
+            # Handle different SDK versions for keypoints
             kp_attr = getattr(person, 'keypoint', None)
             if kp_attr is None:
                 kp_attr = getattr(person, 'keypoints', None)
             keypoints = kp_attr if kp_attr is not None else []
-
+            
+            # Handle different SDK versions for confidences
             conf_attr = getattr(person, 'keypoint_confidence', None)
             if conf_attr is None:
                 conf_attr = getattr(person, 'keypoint_confidences', None)
             confidences = conf_attr if conf_attr is not None else []
-
+            
+            # Handle orientations
             orientations = getattr(person, 'global_orientation', None)
             if orientations is None:
                 orientations = getattr(person, 'global_root_orientation', None)
@@ -573,11 +852,12 @@ class SenseSpaceServer:
             for i, kp in enumerate(keypoints):
                 pos = {"x": float(kp[0]), "y": float(kp[1]), "z": float(kp[2])}
                 
+                # Handle orientations
                 if orientations is not None:
                     try:
-                        if len(orientations.shape) == 2:  # Nx4 array
+                        if len(orientations.shape) == 2:
                             ori = orientations[i] if i < len(orientations) else orientations[0]
-                        else:  # Single quaternion
+                        else:
                             ori = orientations
                         ori_dict = {"x": float(ori[0]), "y": float(ori[1]), "z": float(ori[2]), "w": float(ori[3])}
                     except (IndexError, AttributeError):
@@ -586,7 +866,6 @@ class SenseSpaceServer:
                     ori_dict = {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
                 
                 conf = float(confidences[i]) if i < len(confidences) else 0.0
-                
                 joints.append(Joint(i=i, pos=pos, ori=ori_dict, conf=conf))
             
             people.append(Person(
@@ -601,32 +880,53 @@ class SenseSpaceServer:
                 timestamp=bodies.timestamp.get_seconds(),
                 people=people,
                 body_model="BODY_34",
-                floor_height=self.detected_floor_height
+                floor_height=self.detected_floor_height,
+                cameras=[]  # Will be filled by _ensure_frame_has_camera if needed
             )
         
         return None
-    
+
     def _process_bodies_fusion(self, bodies) -> Optional[Frame]:
         """Process bodies from fusion and create Frame object"""
         people = []
         
         for person in bodies.body_list:
+            # Handle different SDK versions for keypoints
             kp_attr = getattr(person, 'keypoint', None)
             if kp_attr is None:
                 kp_attr = getattr(person, 'keypoints', None)
             keypoints = kp_attr if kp_attr is not None else []
-
+            
+            # Handle different SDK versions for confidences
             conf_attr = getattr(person, 'keypoint_confidence', None)
             if conf_attr is None:
                 conf_attr = getattr(person, 'keypoint_confidences', None)
             confidences = conf_attr if conf_attr is not None else []
             
+            # Handle orientations
+            orientations = getattr(person, 'global_orientation', None)
+            if orientations is None:
+                orientations = getattr(person, 'global_root_orientation', None)
+            
             joints = []
             for i, kp in enumerate(keypoints):
                 pos = {"x": float(kp[0]), "y": float(kp[1]), "z": float(kp[2])}
-                ori = {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}  # Default orientation
+                
+                # Handle orientations
+                if orientations is not None:
+                    try:
+                        if len(orientations.shape) == 2:
+                            ori = orientations[i] if i < len(orientations) else orientations[0]
+                        else:
+                            ori = orientations
+                        ori_dict = {"x": float(ori[0]), "y": float(ori[1]), "z": float(ori[2]), "w": float(ori[3])}
+                    except (IndexError, AttributeError):
+                        ori_dict = {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
+                else:
+                    ori_dict = {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
+                
                 conf = float(confidences[i]) if i < len(confidences) else 0.0
-                joints.append(Joint(i=i, pos=pos, ori=ori, conf=conf))
+                joints.append(Joint(i=i, pos=pos, ori=ori_dict, conf=conf))
             
             people.append(Person(
                 id=person.id,
@@ -635,32 +935,14 @@ class SenseSpaceServer:
                 skeleton=joints
             ))
         
-        return Frame(
-            timestamp=bodies.timestamp.get_seconds(),
-            people=people,
-            body_model="BODY_34",
-            floor_height=self.detected_floor_height
-        )
-    
-    def cleanup(self):
-        """Clean up resources"""
-        self.running = False
+        if people or True:  # Always send frames for debugging
+            return Frame(
+                timestamp=bodies.timestamp.get_seconds(),
+                people=people,
+                body_model="BODY_34",
+                floor_height=self.detected_floor_height,
+                cameras=self.get_camera_poses()
+            )
         
-        if self.camera:
-            try:
-                self.camera.disable_body_tracking()
-                self.camera.close()
-            except:
-                pass
-            self.camera = None
-        
-        if self.fusion:
-            try:
-                self.fusion.disable_body_tracking()
-                self.fusion.close()
-            except:
-                pass
-            self.fusion = None
-        
-        self.stop_tcp_server()
-        print("[INFO] Server cleanup completed")
+        return None
+

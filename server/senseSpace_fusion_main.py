@@ -12,6 +12,7 @@
 import argparse
 import sys
 import threading
+import time
 
 # Import from our shared library
 import os, sys
@@ -44,7 +45,7 @@ def start_qt_application(server: SenseSpaceServer):
         return len(server.clients)
     
     # Create main window
-    win = MainWindow(server_ip=server.host, get_client_count=get_client_count)
+    win = MainWindow(server=server, server_ip=server.host, server_port=server.port, get_client_count=get_client_count)
     win.show()
     
     # Set up server callback to update Qt viewer
@@ -88,6 +89,7 @@ def main():
                        help="Run in server (headless) or viz (Qt OpenGL) mode")
     parser.add_argument("--host", default="0.0.0.0", help="TCP server host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=12345, help="TCP server port (default: 12345)")
+    parser.add_argument("--no-cameras", action="store_true", help="Skip ZED camera initialization and start TCP server only (debug)")
     
     args = parser.parse_args()
     
@@ -95,11 +97,14 @@ def main():
     server = SenseSpaceServer(host=args.host, port=args.port)
     
     try:
-        # Initialize cameras
-        print("[INFO] Initializing ZED cameras...")
-        if not server.initialize_cameras():
-            print("[ERROR] Failed to initialize cameras")
-            return 1
+        # Initialize cameras (optional)
+        if not args.no_cameras:
+            print("[INFO] Initializing ZED cameras...")
+            if not server.initialize_cameras():
+                print("[ERROR] Failed to initialize cameras")
+                return 1
+        else:
+            print("[INFO] Skipping camera initialization (debug mode)")
         
         # Start TCP server
         print("[INFO] Starting TCP server...")
@@ -112,8 +117,19 @@ def main():
         else:
             # Headless mode
             print("[INFO] Running in headless mode. Press Ctrl+C to exit...")
-            server.run_body_tracking_loop()
-            return 0
+            # If cameras were not initialized (debug --no-cameras), run a simple loop
+            # to keep the TCP server alive so clients can connect for debugging.
+            if args.no_cameras:
+                try:
+                    while server.running:
+                        # Sleep briefly and allow server threads to operate
+                        time.sleep(0.5)
+                    return 0
+                except KeyboardInterrupt:
+                    return 0
+            else:
+                server.run_body_tracking_loop()
+                return 0
             
     except KeyboardInterrupt:
         print("\n[INFO] Shutting down...")

@@ -1,28 +1,47 @@
-import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow
-from PyQt5.QtOpenGL import QGLWidget
-from PyQt5.QtCore import pyqtSignal, Qt
 from OpenGL.GL import *
 from OpenGL.GLU import *
 import math
 import sys
-import os
-from senseSpaceLib.senseSpace.visualization import draw_skeletons_with_bones, draw_floor_grid
-
+import time
+import threading
+from PyQt5.QtWidgets import QApplication, QMainWindow
+from PyQt5.QtOpenGL import QGLWidget
+from PyQt5.QtCore import pyqtSignal, Qt
+from PyQt5.QtGui import QCursor
+try:
+    from senseSpaceLib.senseSpace.visualization import draw_skeletons_with_bones, draw_floor_grid, draw_camera
+except Exception:
+    try:
+        from libs.senseSpaceLib.senseSpace.visualization import draw_skeletons_with_bones, draw_floor_grid, draw_camera
+    except Exception:
+        # best-effort fallback: allow module to run even if visualization isn't importable in this environment
+        draw_skeletons_with_bones = None
+        draw_floor_grid = None
+        draw_camera = None
 
 class SkeletonGLWidget(QGLWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.people_data = []
         self.info_text = ""
-        self.zed_floor_height = None  # Store detected floor height from ZED SDK
-        
-        # Camera parameters for 3D navigation
-        self.camera_distance = 2000  # Distance from target
-        self.camera_azimuth = 45     # Horizontal rotation (degrees)
-        self.camera_elevation = 20   # Vertical rotation (degrees)
-        self.camera_target = [0, 700, 800]  # Look at typical skeleton center
+        self.zed_floor_height = None
 
+        # camera drawing settings
+        self._camera_flip = False  # when True, invert camera frustum direction
+
+        # Camera parameters
+        self.camera_distance = 2000.0
+        self.camera_azimuth = 45.0   # degrees
+        self.camera_elevation = 20.0  # degrees
+        self.camera_target = [0.0, 700.0, 800.0]
+
+        # Mouse state
+        self._dragging = False
+        self._last_pos = None
+
+    # ------------------------
+    # Data setters
+    # ------------------------
     def set_people_data(self, people_data):
         self.people_data = people_data
         self.update()
@@ -32,10 +51,12 @@ class SkeletonGLWidget(QGLWidget):
         self.update()
 
     def set_floor_height(self, height):
-        """Set the floor height detected by ZED SDK."""
         self.zed_floor_height = height
         self.update()
 
+    # ------------------------
+    # OpenGL setup
+    # ------------------------
     def initializeGL(self):
         glEnable(GL_DEPTH_TEST)
         glPointSize(8.0)
@@ -45,39 +66,79 @@ class SkeletonGLWidget(QGLWidget):
         glViewport(0, 0, w, h)
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        gluPerspective(45.0, w / float(h or 1), 10.0, 10000.0)
+        gluPerspective(60.0, w / float(h or 1), 1.0, 20000.0)
         glMatrixMode(GL_MODELVIEW)
 
+    # ------------------------
+    # Mouse handling
+    # ------------------------
     def mousePressEvent(self, event):
-        self.last_mouse_pos = (event.x(), event.y())
+        if event.button() in (Qt.LeftButton, Qt.RightButton, Qt.MiddleButton):
+            self._dragging = True
+            self._last_pos = event.pos()
 
     def mouseMoveEvent(self, event):
-        if self.last_mouse_pos:
-            dx = event.x() - self.last_mouse_pos[0]
-            dy = event.y() - self.last_mouse_pos[1]
-            if event.buttons() & Qt.LeftButton:
-                # Rotate camera
-                self.camera_azimuth += dx * 0.5
-                self.camera_elevation += dy * 0.5
-                self.camera_elevation = max(-90, min(90, self.camera_elevation))
-            elif event.buttons() & Qt.RightButton:
-                # Zoom
-                self.camera_distance += dy * 10
-                self.camera_distance = max(100, min(5000, self.camera_distance))
-            self.last_mouse_pos = (event.x(), event.y())
-            self.update()
+        if not self._dragging or self._last_pos is None:
+            return
 
-    def wheelEvent(self, event):
-        # Zoom with mouse wheel
-        self.camera_distance -= event.angleDelta().y() * 2
-        self.camera_distance = max(100, min(5000, self.camera_distance))
+        dx = event.x() - self._last_pos.x()
+        dy = event.y() - self._last_pos.y()
+        buttons = event.buttons()
+
+        # Left: rotate
+        if buttons & Qt.LeftButton:
+            self.camera_azimuth += dx * 0.5
+            self.camera_elevation += -dy * 0.5
+            self.camera_elevation = max(-89.9, min(89.9, self.camera_elevation))
+
+        # Right: pan
+        elif buttons & Qt.RightButton:
+            pan_scale = max(0.001, self.camera_distance * 0.002)
+            azimuth_rad = math.radians(self.camera_azimuth)
+            right_x = math.cos(azimuth_rad)
+            right_z = -math.sin(azimuth_rad)
+
+            self.camera_target[0] += (-dx) * right_x * pan_scale
+            self.camera_target[2] += (-dx) * right_z * pan_scale
+            self.camera_target[1] += (dy) * pan_scale * 0.5
+
+        # Middle or both buttons: zoom
+        elif (buttons & Qt.MiddleButton) or ((buttons & Qt.LeftButton) and (buttons & Qt.RightButton)):
+            self.camera_distance += dy * 5.0
+            self.camera_distance = max(100.0, min(10000.0, self.camera_distance))
+
+        self._last_pos = event.pos()
         self.update()
 
+    def mouseReleaseEvent(self, event):
+        if event.button() in (Qt.LeftButton, Qt.RightButton, Qt.MiddleButton):
+            self._dragging = False
+            self._last_pos = None
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+        # Smooth zooming: factor <1 for zoom in, >1 for zoom out
+        factor = 0.9 if delta > 0 else 1.1
+        self.camera_distance = max(100.0, min(10000.0, self.camera_distance * factor))
+        self.update()
+
+    def keyPressEvent(self, event):
+        # Toggle camera frustum flip with 'c'
+        if event.key() == Qt.Key_C:
+            self._camera_flip = not self._camera_flip
+            self.update()
+        else:
+            super().keyPressEvent(event)
+
+    # ------------------------
+    # Rendering
+    # ------------------------
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glLoadIdentity()
 
-        # Calculate camera position based on spherical coordinates
         yaw_rad = math.radians(self.camera_azimuth)
         pitch_rad = math.radians(self.camera_elevation)
 
@@ -85,57 +146,65 @@ class SkeletonGLWidget(QGLWidget):
         cam_y = self.camera_target[1] + self.camera_distance * math.sin(pitch_rad)
         cam_z = self.camera_target[2] + self.camera_distance * math.cos(pitch_rad) * math.cos(yaw_rad)
 
-        # Standard up-vector where Y points up
         gluLookAt(cam_x, cam_y, cam_z,
                   self.camera_target[0], self.camera_target[1], self.camera_target[2],
                   0, 1, 0)
 
-        # Draw coordinate axes for reference
-        glBegin(GL_LINES)
-        glColor3f(1, 0, 0)  # X axis - red
-        glVertex3f(0, 0, 0)
-        glVertex3f(200, 0, 0)
-        glColor3f(0, 1, 0)  # Y axis - green
-        glVertex3f(0, 0, 0)
-        glVertex3f(0, 200, 0)
-        glColor3f(0, 0, 1)  # Z axis - blue
-        glVertex3f(0, 0, 0)
-        glVertex3f(0, 0, 200)
-        glEnd()
+        # draw all configured cameras if server provides poses (fusion mode)
+        try:
+            server_obj = None
+            # MainWindow stored server reference on construction
+            parent = self.parent()
+            if parent and hasattr(parent, 'server'):
+                server_obj = parent.server
+            poses = []
+            if server_obj and getattr(server_obj, 'is_fusion_mode', False) and hasattr(server_obj, 'get_camera_poses'):
+                poses = server_obj.get_camera_poses()
+            if poses and draw_camera:
+                for p in poses:
+                    pos = p.get('position')
+                    tgt = p.get('target')
+                    draw_camera(position=pos, target=tgt, fov_deg=60.0, near=50.0, far=600.0, color=(1.0, 1.0, 0.0), scale=1.0, flip=self._camera_flip)
+            else:
+                # fallback: small reference camera at origin
+                if draw_camera:
+                    cam_pos = (0.0, 200.0, 0.0)
+                    cam_target = (0.0, 200.0, 200.0)
+                    draw_camera(position=cam_pos, target=cam_target, fov_deg=60.0, near=50.0, far=600.0, color=(1.0, 1.0, 0.0), scale=1.0, flip=True)
+        except Exception:
+            # keep rendering even if camera poses fail
+            pass
 
-        # Draw floor grid with auto-detected floor height
-        draw_floor_grid(size=2000, spacing=100, height=None,
+        # Make the floor grid larger (approx 5m x 5m if units are mm)
+        draw_floor_grid(size=5000, spacing=200, height=None,
                         color=(0.2, 0.2, 0.2), people_data=self.people_data,
                         zed_floor_height=self.zed_floor_height)
 
-        # Draw skeleton using visualization helper
         draw_skeletons_with_bones(self.people_data,
-                                  joint_color=(0.2, 0.8, 1.0),  # Blue points
-                                  bone_color=(0.8, 0.2, 0.2))   # Red bones
+                                  joint_color=(0.2, 0.8, 1.0),
+                                  bone_color=(0.8, 0.2, 0.2))
 
-        # Draw info overlay (top left) — support multiple lines
         lines = (self.info_text or '').split('\n')
         x = 10
         y = 20
         for i, line in enumerate(lines):
-            # move down by 14 pixels per line
             self.renderText(x, y + i * 14, line)
 
-
 class MainWindow(QMainWindow):
-    # Signal to receive people data from other threads safely
     people_signal = pyqtSignal(object)
 
-    def __init__(self, server_ip=None, get_client_count=None):
+    def __init__(self, server=None, server_ip=None, server_port=None, get_client_count=None):
         super().__init__()
         self.setWindowTitle("ZED Skeleton Qt Viewer")
         self.setGeometry(100, 100, 800, 600)
+        # Pass server object into GL widget so it can query camera poses
+        self.server = server
         self.glWidget = SkeletonGLWidget(self)
         self.setCentralWidget(self.glWidget)
         self.server_ip = server_ip
+        self.server_port = server_port
         self.get_client_count = get_client_count
         self.bodies_tracked = 0
-        # connect signal to GUI update slot
         self.people_signal.connect(self.update_people)
 
     def update_people(self, people_data):
@@ -144,28 +213,27 @@ class MainWindow(QMainWindow):
         self.update_info()
 
     def set_floor_height(self, height):
-        """Set the floor height detected by ZED SDK."""
         self.glWidget.set_floor_height(height)
 
     def update_info(self):
-        info = f"Server IP: {self.server_ip or 'N/A'}\nBodies tracked: {self.bodies_tracked}"
+        hostport = f"{self.server_ip}:{self.server_port}" if (self.server_ip and self.server_port) else (self.server_ip or 'N/A')
+        info = f"Server: {hostport}\nBodies tracked: {self.bodies_tracked}"
         if self.get_client_count:
             info += f"\nClients connected: {self.get_client_count()}"
         self.glWidget.set_info_text(info)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     win = MainWindow()
     win.show()
-    # Example: update with dummy data
-    import time
-    import threading
+
     def update_loop():
         while True:
-            # Replace this with real data update
             dummy = [{"skeleton": [{"pos": {"x": 0, "y": 1, "z": 2}}]}]
-            # if no real data arrives, show a synthetic T-pose like skeleton for quick verification
             win.update_people(dummy)
-            time.sleep(1/30)
+            time.sleep(1 / 30)
+
     threading.Thread(target=update_loop, daemon=True).start()
     sys.exit(app.exec_())
+

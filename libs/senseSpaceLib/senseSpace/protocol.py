@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Dict, Union
 from .enums import Body18Joint, Body34Joint
+from typing import Optional
 
 
 @dataclass
@@ -56,6 +57,23 @@ class Person:
             skeleton=[Joint.from_dict(j) for j in d["skeleton"]]
         )
 
+@dataclass
+class Camera:
+    serial: str
+    position: Dict[str, float]  # {'x':..,'y':..,'z':..}
+    target: Dict[str, float]    # {'x':..,'y':..,'z':..}
+
+    def to_dict(self):
+        return {
+            'serial': self.serial,
+            'position': self.position,
+            'target': self.target
+        }
+
+    @staticmethod
+    def from_dict(d):
+        return Camera(serial=d.get('serial', ''), position=d.get('position', {}), target=d.get('target', {}))
+
 
 @dataclass
 class Frame:
@@ -63,6 +81,7 @@ class Frame:
     people: List[Person]
     body_model: str = ""   # set from config
     floor_height: float = None  # ZED SDK detected floor height in mm
+    cameras: Optional[List[Dict]] = None  # optional list of camera pose dicts or Camera objects
 
     def to_dict(self):
         data = {
@@ -73,13 +92,36 @@ class Frame:
         # Only include floor_height when present
         if self.floor_height is not None:
             data["floor_height"] = self.floor_height
+        # Include cameras if provided
+        if self.cameras is not None:
+            # If Camera objects, convert to dicts; otherwise assume list of dicts
+            out_cams = []
+            for c in self.cameras:
+                try:
+                    out_cams.append(c.to_dict())
+                except Exception:
+                    out_cams.append(c)
+            data["cameras"] = out_cams
         return data
 
     @staticmethod
     def from_dict(d):
+        cams = d.get("cameras", None)
+        if cams is not None:
+            cam_objs = []
+            for c in cams:
+                try:
+                    cam_objs.append(Camera.from_dict(c))
+                except Exception:
+                    cam_objs.append(c)
+        else:
+            cam_objs = None
+
         return Frame(
             timestamp=d["timestamp"],
             people=[Person.from_dict(p) for p in d["people"]],
             body_model=d.get("body_model", ""),
-            floor_height=d.get("floor_height", None)
+            floor_height=d.get("floor_height", None),
+            cameras=cam_objs
         )
+    

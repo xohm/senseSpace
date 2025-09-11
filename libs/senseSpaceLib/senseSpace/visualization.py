@@ -306,3 +306,111 @@ def draw_floor_grid(size=2000, spacing=100, height=None, color=(0.3, 0.3, 0.3), 
     glVertex3f(0, height + 200, 0)
     
     glEnd()
+
+
+def draw_camera(position, target, up=(0.0, 1.0, 0.0), fov_deg=45.0, aspect=16.0/9.0, near=200.0, far=800.0, color=(1.0, 1.0, 0.0), scale=1.0, flip=False):
+    """
+    Draw a simple camera frustum and axes using lines.
+    :param position: (x,y,z) camera position in world coordinates
+    :param target: (x,y,z) camera look-at target
+    :param up: up vector
+    :param fov_deg: vertical field of view in degrees
+    :param aspect: aspect ratio (width/height)
+    :param near: near plane distance from camera
+    :param far: far plane distance from camera
+    :param color: RGB tuple for camera lines
+    :param scale: scale multiplier for visualization size
+    """
+    # small vector helpers
+    def sub(a, b):
+        return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
+    def add(a, b):
+        return (a[0]+b[0], a[1]+b[1], a[2]+b[2])
+    def mul(a, s):
+        return (a[0]*s, a[1]*s, a[2]*s)
+    def norm(v):
+        import math
+        l = math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2])
+        if l == 0:
+            return (0.0, 0.0, 0.0)
+        return (v[0]/l, v[1]/l, v[2]/l)
+    def cross(a, b):
+        return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
+
+    # compute basis
+    forward = norm(sub(target, position))
+    if flip:
+        forward = (-forward[0], -forward[1], -forward[2])
+    upn = norm(up)
+    right = norm(cross(forward, upn))
+    cam_up = norm(cross(right, forward))
+
+    import math
+    fov_rad = math.radians(fov_deg)
+    nh = math.tan(fov_rad / 2.0) * near
+    nw = nh * aspect
+    fh = math.tan(fov_rad / 2.0) * far
+    fw = fh * aspect
+
+    # near/far centers
+    nc = add(position, mul(forward, near*scale))
+    fc = add(position, mul(forward, far*scale))
+
+    # near plane corners
+    ntl = add(add(nc, mul(cam_up, nh*scale)), mul(right, -nw*scale))
+    ntr = add(add(nc, mul(cam_up, nh*scale)), mul(right, nw*scale))
+    nbl = add(add(nc, mul(cam_up, -nh*scale)), mul(right, -nw*scale))
+    nbr = add(add(nc, mul(cam_up, -nh*scale)), mul(right, nw*scale))
+
+    # far plane corners
+    ftl = add(add(fc, mul(cam_up, fh*scale)), mul(right, -fw*scale))
+    ftr = add(add(fc, mul(cam_up, fh*scale)), mul(right, fw*scale))
+    fbl = add(add(fc, mul(cam_up, -fh*scale)), mul(right, -fw*scale))
+    fbr = add(add(fc, mul(cam_up, -fh*scale)), mul(right, fw*scale))
+
+    glColor3f(*color)
+    glLineWidth(1.5)
+
+    # draw frustum lines
+    glBegin(GL_LINES)
+    # near plane outline
+    for a, b in ((ntl, ntr), (ntr, nbr), (nbr, nbl), (nbl, ntl)):
+        glVertex3f(a[0], a[1], a[2])
+        glVertex3f(b[0], b[1], b[2])
+
+    # far plane outline
+    for a, b in ((ftl, ftr), (ftr, fbr), (fbr, fbl), (fbl, ftl)):
+        glVertex3f(a[0], a[1], a[2])
+        glVertex3f(b[0], b[1], b[2])
+
+    # connect near to far
+    for a, b in ((ntl, ftl), (ntr, ftr), (nbl, fbl), (nbr, fbr)):
+        glVertex3f(a[0], a[1], a[2])
+        glVertex3f(b[0], b[1], b[2])
+
+    # lines from camera position to near plane corners (visualizes camera pyramid)
+    for corner in (ntl, ntr, nbl, nbr):
+        glVertex3f(position[0], position[1], position[2])
+        glVertex3f(corner[0], corner[1], corner[2])
+
+    glEnd()
+
+    # draw small local axes at camera position
+    glLineWidth(2.0)
+    glBegin(GL_LINES)
+    # X (red)
+    glColor3f(1.0, 0.0, 0.0)
+    rx = add(position, mul(right, 50.0*scale))
+    glVertex3f(position[0], position[1], position[2])
+    glVertex3f(rx[0], rx[1], rx[2])
+    # Y (green)
+    glColor3f(0.0, 1.0, 0.0)
+    uy = add(position, mul(cam_up, 50.0*scale))
+    glVertex3f(position[0], position[1], position[2])
+    glVertex3f(uy[0], uy[1], uy[2])
+    # Z (blue) - forward
+    glColor3f(0.0, 0.0, 1.0)
+    fz = add(position, mul(forward, 100.0*scale))
+    glVertex3f(position[0], position[1], position[2])
+    glVertex3f(fz[0], fz[1], fz[2])
+    glEnd()

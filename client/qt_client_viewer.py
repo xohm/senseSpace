@@ -14,7 +14,7 @@ from OpenGL.GL import *
 from OpenGL.GLU import *
 
 from senseSpaceLib.senseSpace.protocol import Frame
-from senseSpaceLib.senseSpace.visualization import draw_skeletons_with_bones, draw_floor_grid
+from senseSpaceLib.senseSpace.visualization import draw_skeletons_with_bones, draw_floor_grid, draw_camera
 
 
 class ClientSkeletonGLWidget(QGLWidget):
@@ -22,26 +22,27 @@ class ClientSkeletonGLWidget(QGLWidget):
     
     def __init__(self, parent=None):
         super(ClientSkeletonGLWidget, self).__init__(parent)
-        
-        # Camera parameters (spherical coordinates)
-        self.camera_distance = 3000  # mm from target
-        self.camera_azimuth = 45     # degrees around Y axis
-        self.camera_elevation = 20   # degrees above XZ plane
-        self.camera_target = [0, 0, 0]  # look-at point
-        
-        # Mouse interaction
-        self.last_mouse_pos = None
+
+        # Camera parameters (spherical coordinates) - align with server viewer defaults
+        self.camera_distance = 2000.0
+        self.camera_azimuth = 45.0
+        self.camera_elevation = 20.0
+        self.camera_target = [0.0, 700.0, 800.0]
+
+        # Mouse interaction (Wayland-aware dragging like server viewer)
+        self._dragging = False
+        self._last_pos = None
         self.mouse_sensitivity = 0.5
-        
+
         # Frame data
         self.current_frame: Optional[Frame] = None
         self.frame_lock = QtCore.QMutex()
-        
+
         # UI update timer
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update)
         self.update_timer.start(33)  # ~30 FPS
-        
+
         # Connection status
         self.last_frame_time = 0
         
@@ -71,7 +72,7 @@ class ClientSkeletonGLWidget(QGLWidget):
         glLoadIdentity()
         
         aspect = self.width() / max(1, self.height())
-        gluPerspective(45.0, aspect, 10.0, 10000.0)
+        gluPerspective(45.0, aspect, 1.0, 20000.0)
         
         glMatrixMode(GL_MODELVIEW)
     
@@ -92,11 +93,12 @@ class ClientSkeletonGLWidget(QGLWidget):
             # Draw floor grid: prefer ZED-detected floor height but allow
             # people-based stable fallback inside draw_floor_grid.
             floor_height = frame.floor_height
+            # Match server viewer: larger 5m x 5m grid if units are mm
             draw_floor_grid(
-                size=2000,
-                spacing=100,
+                size=5000,
+                spacing=200,
                 height=None,  # let draw_floor_grid resolve priority
-                color=(0.3, 0.3, 0.3),
+                color=(0.2, 0.2, 0.2),
                 people_data=frame.people,
                 zed_floor_height=floor_height,
             )
@@ -106,6 +108,38 @@ class ClientSkeletonGLWidget(QGLWidget):
                 # draw_skeletons_with_bones expects people_data and optional color args.
                 # Previously we incorrectly passed frame.body_model as the second argument.
                 draw_skeletons_with_bones(frame.people)
+
+            # Draw cameras if present (Frame.cameras may contain protocol.Camera objects or dicts)
+            try:
+                cams = getattr(frame, 'cameras', None)
+                if cams and draw_camera:
+                    for c in cams:
+                        try:
+                            # Accept either Camera objects or dicts
+                            if hasattr(c, 'to_dict'):
+                                cd = c.to_dict()
+                            else:
+                                cd = c
+                            pos = cd.get('position')
+                            tgt = cd.get('target')
+                            # position/target may be dicts {'x':..} or tuples
+                            def to_tuple(v):
+                                if v is None:
+                                    return None
+                                if isinstance(v, dict):
+                                    return (float(v.get('x', 0.0)), float(v.get('y', 0.0)), float(v.get('z', 0.0)))
+                                if isinstance(v, (list, tuple)):
+                                    return (float(v[0]), float(v[1]), float(v[2]))
+                                return None
+
+                            pos_t = to_tuple(pos)
+                            tgt_t = to_tuple(tgt)
+                            if pos_t and tgt_t:
+                                draw_camera(position=pos_t, target=tgt_t, fov_deg=60.0, near=50.0, far=600.0, color=(1.0, 1.0, 0.0), scale=1.0)
+                        except Exception:
+                            continue
+            except Exception:
+                pass
             
             # Draw connection status
             self.draw_connection_status(frame)
@@ -190,40 +224,44 @@ class ClientSkeletonGLWidget(QGLWidget):
     
     # Mouse interaction methods
     def mousePressEvent(self, event):
-        """Handle mouse press"""
-        self.last_mouse_pos = event.pos()
+        """Handle mouse press (Wayland-friendly dragging)"""
+        if event.button() in (QtCore.Qt.LeftButton, QtCore.Qt.RightButton, QtCore.Qt.MiddleButton):
+            self._dragging = True
+            self._last_pos = event.pos()
     
     def mouseMoveEvent(self, event):
         """Handle mouse drag for camera control"""
-        if self.last_mouse_pos is None:
-            self.last_mouse_pos = event.pos()
+        if not self._dragging or self._last_pos is None:
             return
-        
-        dx = event.x() - self.last_mouse_pos.x()
-        dy = event.y() - self.last_mouse_pos.y()
-        
-        if event.buttons() & QtCore.Qt.LeftButton:
-            # Orbit camera
-            self.camera_azimuth += dx * self.mouse_sensitivity
-            self.camera_elevation = max(-85, min(85, self.camera_elevation - dy * self.mouse_sensitivity))
-        elif event.buttons() & QtCore.Qt.RightButton:
-            # Pan camera target
-            # Convert mouse movement to world coordinates
-            pan_scale = self.camera_distance * 0.001
+
+        dx = event.x() - self._last_pos.x()
+        dy = event.y() - self._last_pos.y()
+        buttons = event.buttons()
+
+        # Left: rotate
+        if buttons & QtCore.Qt.LeftButton:
+            self.camera_azimuth += dx * 0.5
+            self.camera_elevation += -dy * 0.5
+            self.camera_elevation = max(-89.9, min(89.9, self.camera_elevation))
+
+        # Right: pan
+        elif buttons & QtCore.Qt.RightButton:
+            pan_scale = max(0.001, self.camera_distance * 0.002)
             azimuth_rad = math.radians(self.camera_azimuth)
-            
-            # Right vector (perpendicular to view direction in XZ plane)
-            right_x = -math.sin(azimuth_rad)
-            right_z = math.cos(azimuth_rad)
-            
-            # Up vector (always Y for now)
-            up_x, up_y, up_z = 0, 1, 0
-            
-            self.camera_target[0] += (dx * right_x) * pan_scale
-            self.camera_target[1] -= dy * pan_scale
-            self.camera_target[2] += (dx * right_z) * pan_scale
-        
-        self.last_mouse_pos = event.pos()
+            right_x = math.cos(azimuth_rad)
+            right_z = -math.sin(azimuth_rad)
+
+            self.camera_target[0] += (-dx) * right_x * pan_scale
+            self.camera_target[2] += (-dx) * right_z * pan_scale
+            self.camera_target[1] += (dy) * pan_scale * 0.5
+
+        # Middle or both buttons: zoom
+        elif (buttons & QtCore.Qt.MiddleButton) or ((buttons & QtCore.Qt.LeftButton) and (buttons & QtCore.Qt.RightButton)):
+            self.camera_distance += dy * 5.0
+            self.camera_distance = max(100.0, min(10000.0, self.camera_distance))
+
+        self._last_pos = event.pos()
+        self.update()
     
     def wheelEvent(self, event):
         """Handle mouse wheel for zoom"""
@@ -231,3 +269,4 @@ class ClientSkeletonGLWidget(QGLWidget):
         zoom_factor = 1.1 if delta > 0 else 0.9
         self.camera_distance *= zoom_factor
         self.camera_distance = max(500, min(10000, self.camera_distance))  # Clamp zoom
+
