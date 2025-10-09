@@ -1,14 +1,14 @@
 #!/bin/bash
-# filepath: /home/max/Documents/development/own/senseSpace/server/startServerLinux.sh
+# filepath: /home/max/Documents/development/own/senseSpace/startServerLinux.sh
 
 # SenseSpace Fusion Server Startup Script
 # Starts the ZED fusion server with visualization
 
-# Get the directory where this script is located
+# Get the directory where this script is located (repo root)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Activate virtual environment if it exists
-VENV_PATH="$SCRIPT_DIR/../.venv"
+VENV_PATH="$SCRIPT_DIR/.venv"
 if [ -d "$VENV_PATH" ]; then
     echo "[INFO] Activating virtual environment..."
     source "$VENV_PATH/bin/activate"
@@ -18,7 +18,7 @@ else
 fi
 
 # Change to server directory
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR/server"
 
 # Start the fusion server with visualization
 echo "[INFO] Starting SenseSpace Fusion Server..."
