@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "senseSpace"
+version = "0.1.0"
+description = "Distributed interactive media art environment for human interaction tracking"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+    {name = "Max Rheiner", email = "max.rheiner@zhdk.ch"}
+]
+dependencies = [
+    "PyQt5>=5.15.0",
+    "PyOpenGL>=3.1.5",
+    "numpy>=1.24.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+server = [
+    # ZED SDK dependencies (if any pip-installable)
+]
+
+[tool.setuptools.packages.find]
+where = ["libs"]

@@ -44,7 +44,7 @@ You should see a version number like `1.xx.x`.
 
 ---
 
-## 🍏 macOS Setup
+## macOS Setup
 
 ### 1. Install Visual Studio Code
 
@@ -89,7 +89,7 @@ code --version
 
 ---
 
-## ✅ Verify Everything Works
+## Verify Everything Works
 
 To test that Python and Copilot work together:
 
@@ -106,7 +106,7 @@ def greet(name):
 
 ---
 
-## 💡 Tips
+## Tips
 
 * Use `Ctrl+`` (Windows) or `Cmd+`` (macOS) to open the built-in terminal in VS Code.
 * To update extensions: open the **Extensions** view and click the **Update** button.
@@ -115,7 +115,7 @@ def greet(name):
 
 ---
 
-## 🧯 Troubleshooting
+## Troubleshooting
 
 | Problem                      | Possible Fix                                                                              |
 | ---------------------------- | ----------------------------------------------------------------------------------------- |
@@ -126,5 +126,5 @@ def greet(name):
 
 ---
 
-🎉 **Done!**
+**Done!**
 You now have a full setup with **VS Code**, **Python**, and **GitHub Copilot** ready to use on Windows and macOS.

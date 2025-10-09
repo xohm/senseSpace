@@ -33,7 +33,7 @@ pip install --upgrade pip
 ```
 Install the dependencies:
 ```
-pip install -r requirements.txt
+pip install -e .
 ```
 Now you are in the Python environment for this project. If you start your computer again you need to activate the environment again:
 ```
