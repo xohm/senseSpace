@@ -11,6 +11,8 @@ Both the server and client require Python 3.12.
 
 # Installtion
 
+If you do not run the server then you only have to setup the client.
+
 ## Windows
 - Download Python from the server and install it: https://www.python.org/downloads/windows/
 - Check that is installed included in your PATH, there is a checkbox in the installer.
@@ -71,3 +73,6 @@ Then go into the server folder and start the server(with visualization):
 cd server
 python3 senseSpace_fusion_main.py  --viz
 ```
+
+## Install Visual Studio Code
+[Go to Setup Page](./setup.md)
