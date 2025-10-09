@@ -497,7 +497,7 @@ class SenseSpaceServer:
                         position = {
                             'x': M_gl[0][3] * 1000.0,
 #                            'y': M_gl[1][3] * 1000.0 - (2 * floor_height_mm),
-                            'y': M_gl[1][3] * 1000.0 + (floor_height_mm),
+                            'y': -(M_gl[1][3] * 1000.0) - floor_height_mm,
                             'z': M_gl[2][3] * 1000.0
                         }
 
