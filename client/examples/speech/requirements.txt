@@ -1,0 +1,18 @@
+# Core dependencies
+requests>=2.31.0
+numpy>=1.24.0
+python-dotenv>=1.0.0
+
+# LLM clients
+openai>=1.0.0
+
+# Speech dependencies
+openai-whisper>=20231117
+pyo>=1.0.5
+
+# Optional: For better audio quality on Linux
+# pyaudio>=0.2.13  # Alternative to pyo for basic audio (not needed if using pyo)
+
+# Optional: GPU acceleration for Whisper (if you have NVIDIA GPU)
+# torch>=2.0.0  # Whisper will auto-detect and use GPU if available
+# torchaudio>=2.0.0
