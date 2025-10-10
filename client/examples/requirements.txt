@@ -1,2 +1,0 @@
-# Additional dependencies for examples
-openai>=1.0.0

@@ -81,6 +81,10 @@ code --version
 
 ### 3. Install GitHub Copilot
 
+Get yourself a Github Copilot Student license:
+https://education.github.com/pack?utm_source=chatgpt.com
+Actually you should get your Github Copilot account through the classroom.
+
 1. In VS Code, open **Extensions** again.
 2. Search for **GitHub Copilot**.
 3. Click **Install**.

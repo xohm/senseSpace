@@ -205,3 +205,27 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Calibration data
+server/calib/
+
+# LLM examples - exclude Ollama models and data
+client/examples/llm/.ollama/
+client/examples/llm/*.gguf
+client/examples/llm/*.ggml
+client/examples/llm/.env
+client/examples/llm/__pycache__/
+# Keep: *.py, README.md, requirements.txt (not excluded)
+
+# Deep learning model files
+*.pth
+*.pt
+*.onnx
+*.pb
+*.h5
+*.tflite
+*.weights
+*.caffemodel
+models/
+checkpoints/
+weights/
