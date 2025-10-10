@@ -9,6 +9,8 @@ openai>=1.0.0
 # Speech dependencies
 openai-whisper>=20231117
 pyo>=1.0.5
+sounddevice>=0.4.6
+soundfile>=0.12.1
 
 # Optional: For better audio quality on Linux
 # pyaudio>=0.2.13  # Alternative to pyo for basic audio (not needed if using pyo)

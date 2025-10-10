@@ -20,6 +20,9 @@ import subprocess
 import platform
 import numpy as np
 
+# Suppress pyo GUI warnings
+os.environ['PYO_GUI_WX'] = '0'
+
 try:
     from pyo import *
     PYO_AVAILABLE = True
@@ -77,6 +80,7 @@ class SpeechIO:
         # Voice recognition thread
         self.is_listening = False
         self.listen_thread = None
+        self._pause_listening = False  # Add this flag
         
         try:
             # Check dependencies
@@ -144,11 +148,67 @@ class SpeechIO:
     def _init_audio_server(self):
         """Initialize Pyo audio server - try matching device native rates and channels"""
         try:
+            # On Linux, use PulseAudio's default device (device 12 usually maps to PulseAudio default)
+            if self.platform == 'Linux':
+                print("[SPEECHIO] Linux detected, configuring for PulseAudio...")
+                
+                # Force device 12 which maps to PulseAudio default
+                actual_input_device = 12 if (self.input_device is None or self.input_device < 0) else self.input_device
+                actual_output_device = 12 if (self.output_device is None or self.output_device < 0) else self.output_device
+                
+                print(f"[SPEECHIO] Using input device {actual_input_device}, output device {actual_output_device}")
+                print(f"[SPEECHIO] Device 12 = PulseAudio default from your KDE settings")
+                
+                # Try common sample rates with duplex=1 for both input and output
+                for sr in [48000, 44100, 32000]:
+                    for out_ch in [2, 1]:
+                        try:
+                            print(f"[SPEECHIO] Trying sr={sr} Hz, out_ch={out_ch}")
+                            self.server = Server(
+                                sr=sr, 
+                                nchnls=out_ch, 
+                                duplex=1,  # Enable both input and output
+                                buffersize=512
+                            )
+                            
+                            # Set both input and output devices
+                            self.server.setInputDevice(actual_input_device)
+                            self.server.setOutputDevice(actual_output_device)
+                            
+                            self.server.boot()
+                            
+                            if self.server.getIsBooted():
+                                self.server.start()
+                                if self.server.getIsStarted():
+                                    self.ready = True
+                                    self.sample_rate = sr
+                                    self.input_device = actual_input_device
+                                    self.output_device = actual_output_device
+                                    print(f"[SPEECHIO] ✓ Audio initialized at {sr} Hz, {out_ch}ch")
+                                    print(f"[SPEECHIO] Input device: {actual_input_device} (PulseAudio default)")
+                                    print(f"[SPEECHIO] Output device: {actual_output_device} (PulseAudio default)")
+                                    return
+                                else:
+                                    self.server.shutdown()
+                                    self.server = None
+                            else:
+                                self.server = None
+                                
+                        except Exception as e:
+                            if self.server:
+                                try:
+                                    self.server.shutdown()
+                                except:
+                                    pass
+                            self.server = None
+                            continue
+
+            # Original ALSA code for other platforms or Linux fallback
             in_info = self._get_device_info(self.input_device, kind='input')
             out_info = self._get_device_info(self.output_device, kind='output')
 
             # If input device reports 0 channels, warn and abort initialization here
-            if in_info['channels'] == 0:
+            if self.input_device is not None and in_info['channels'] == 0:
                 print(f"[SPEECHIO] Input device {self.input_device} reports 0 input channels - choose another mic")
                 self.ready = False
                 return
@@ -330,34 +390,46 @@ class SpeechIO:
         Convert audio file to text using Whisper
         
         Args:
-            audio_file (str): Path to WAV audio file
+            audio_file (str): Path to audio file
             
         Returns:
-            str: Transcribed text or None if failed
+            str: Transcribed text, or empty string if failed
         """
         try:
-            print("[SPEECHIO] Transcribing audio...")
             result = subprocess.run(
-                ['whisper', audio_file, '--model', self.whisper_model, 
-                 '--output_format', 'txt', '--output_dir', '/tmp' if self.platform != 'Windows' else tempfile.gettempdir()],
+                ['whisper', audio_file, '--model', self.whisper_model, '--language', 'en'],
                 capture_output=True,
                 text=True,
                 timeout=30
             )
             
             if result.returncode == 0:
-                txt_file = audio_file.replace('.wav', '.txt')
-                with open(txt_file, 'r') as f:
-                    text = f.read().strip()
-                os.remove(txt_file)
-                print(f"[SPEECHIO] STT: '{text}'")
-                return text
+                # Extract transcription from stdout using regex
+                # Look for timestamp lines like: [00:00.000 --> 00:03.760]  Transcribed text
+                import re
+                stdout = result.stdout
+                
+                # Find all timestamp lines
+                pattern = r'\[\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}\.\d{3}\]\s+(.+)'
+                matches = re.findall(pattern, stdout)
+                
+                if matches:
+                    # Join all transcription segments
+                    text = ' '.join(matches).strip()
+                    return text
+                else:
+                    print("[SPEECHIO] No transcription found in Whisper output")
+                    return ""
             else:
                 print(f"[SPEECHIO] Whisper error: {result.stderr}")
-                return None
+                return ""
+                
+        except subprocess.TimeoutExpired:
+            print("[SPEECHIO] Whisper timeout")
+            return ""
         except Exception as e:
             print(f"[SPEECHIO] STT failed: {e}")
-            return None
+            return ""
     
     def text_to_speech(self, text):
         """
@@ -369,8 +441,14 @@ class SpeechIO:
         Returns:
             bool: True if successful, False otherwise
         """
+        was_listening = False  # Initialize at the start
         try:
             print(f"[SPEECHIO] TTS: '{text}'")
+            
+            # Temporarily pause listening to avoid feedback
+            was_listening = self.is_listening
+            if was_listening:
+                self._pause_listening = True  # Flag to pause, don't stop thread
             
             # Get voice model path
             voice_model_path = self._get_voice_model_path(self.piper_voice)
@@ -381,7 +459,6 @@ class SpeechIO:
             
             # Platform-specific Piper command
             if self.platform == 'Windows':
-                # Windows: Use temporary file for input
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tmp_txt:
                     tmp_txt.write(text)
                     txt_file = tmp_txt.name
@@ -390,28 +467,50 @@ class SpeechIO:
                     result = subprocess.run(piper_cmd, stdin=stdin_file, capture_output=True, timeout=10)
                 os.remove(txt_file)
             else:
-                # Linux/macOS: Use echo pipe
                 piper_cmd = f'echo "{text}" | piper --model {voice_model_path} --output_file {wav_file}'
                 result = subprocess.run(piper_cmd, shell=True, capture_output=True, timeout=10)
             
             if result.returncode == 0 and os.path.exists(wav_file):
-                # Play audio
-                if self.ready and self.server and self.server.getIsStarted():
-                    self._play_audio(wav_file)
-                else:
-                    # Fallback to system player
-                    self._play_audio_fallback(wav_file)
+                try:
+                    import sounddevice as sd
+                    import soundfile as sf
+                    
+                    data, samplerate = sf.read(wav_file)
+                    sd.play(data, samplerate, device=None)
+                    sd.wait()
+                    print("[SPEECHIO] Played via sounddevice (system default)")
+                except ImportError:
+                    if self.ready and self.server and self.server.getIsStarted():
+                        self._play_audio(wav_file)
+                    else:
+                        self._play_audio_fallback(wav_file)
+                except Exception as e:
+                    print(f"[SPEECHIO] sounddevice error: {e}, using fallback")
+                    if self.ready and self.server and self.server.getIsStarted():
+                        self._play_audio(wav_file)
+                    else:
+                        self._play_audio_fallback(wav_file)
                 
                 os.remove(wav_file)
+                
+                # Resume listening after a delay
+                if was_listening:
+                    time.sleep(0.5)  # Wait for audio to clear
+                    self._pause_listening = False
+                
                 return True
             else:
                 print(f"[SPEECHIO] Piper error: {result.stderr.decode() if result.stderr else 'Unknown error'}")
+                if was_listening:
+                    self._pause_listening = False
                 return False
                 
         except Exception as e:
             print(f"[SPEECHIO] TTS failed: {e}")
             import traceback
             traceback.print_exc()
+            if was_listening:
+                self._pause_listening = False
             return False
     
     def _play_audio_fallback(self, wav_file):
@@ -491,19 +590,23 @@ class SpeechIO:
         print("[SPEECHIO] Voice recognition stopped")
     
     def _listen_loop(self):
-        """Background thread for continuous voice recognition"""
-        while self.is_listening:
-            try:
-                if not self.server or not self.server.getIsStarted():
-                    print("[SPEECHIO] Server not running, stopping listener")
-                    break
-                
-                # Record audio
+        """Continuous listening loop in separate thread"""
+        try:
+            print("[SPEECHIO] Listen loop started")
+            while self.is_listening:
+                # Skip recording if paused (during TTS playback)
+                if self._pause_listening:
+                    time.sleep(0.1)
+                    continue
+                    
+                print("[SPEECHIO] Transcribing audio...")
+                # Record audio - use the configured input device
                 recording_table = NewTable(length=self.record_seconds, chnls=1)
-                mic = Input(chnl=0)
+                mic = Input(chnl=0)  # Channel 0 of the selected device
                 recorder = TableRec(mic, table=recording_table)
                 recorder.play()
                 
+                print(f"[SPEECHIO] Recording {self.record_seconds} seconds from device {self.input_device}...")
                 time.sleep(self.record_seconds)
                 
                 recorder.stop()
@@ -517,28 +620,57 @@ class SpeechIO:
                 samples_array = np.array(samples, dtype=np.float32)
                 samples_int16 = (samples_array * 32767).astype(np.int16)
                 
+                # Debug: Check audio levels
+                max_amplitude = np.max(np.abs(samples_array))
+                rms = np.sqrt(np.mean(samples_array**2))
+                print(f"[SPEECHIO] Audio stats - Max: {max_amplitude:.4f}, RMS: {rms:.4f}")
+                
+                if max_amplitude < 0.01:
+                    print("[SPEECHIO] WARNING: Audio level very low! Microphone might not be working.")
+                
                 with wave.open(audio_file, 'wb') as wf:
                     wf.setnchannels(1)
                     wf.setsampwidth(2)
                     wf.setframerate(int(self.server.getSamplingRate()))
                     wf.writeframes(samples_int16.tobytes())
                 
+                # Debug: check file size
+                file_size = os.path.getsize(audio_file)
+                print(f"[SPEECHIO] Recorded audio: {audio_file} ({file_size} bytes)")
+                
+                # TEMP DEBUG: Save a copy to inspect manually
+                import shutil
+                debug_file = f"/tmp/debug_recording_{int(time.time())}.wav"
+                shutil.copy(audio_file, debug_file)
+                print(f"[SPEECHIO] Debug copy saved: {debug_file}")
+                print(f"[SPEECHIO] You can play it with: aplay {debug_file}")
+                
                 # Cleanup pyo objects
                 del recorder, mic, recording_table
                 
                 # Transcribe
                 text = self.speech_to_text(audio_file)
+                print(f"[SPEECHIO] STT: '{text}'")
+                
+                # Cleanup audio file
                 os.remove(audio_file)
                 
                 # Call callback if text was recognized
                 if text and self.stt_callback:
-                    self.stt_callback(text.lower())
+                    try:
+                        self.stt_callback(text.lower())
+                    except Exception as e:
+                        print(f"[SPEECHIO] Callback error: {e}")
+                        import traceback
+                        traceback.print_exc()
                 
                 time.sleep(0.5)
                 
-            except Exception as e:
-                print(f"[SPEECHIO] Listen error: {e}")
-                time.sleep(1)
+        except Exception as e:
+            print(f"[SPEECHIO] Listen error: {e}")
+            import traceback
+            traceback.print_exc()
+            time.sleep(1)
     
     def cleanup(self):
         """Cleanup resources"""

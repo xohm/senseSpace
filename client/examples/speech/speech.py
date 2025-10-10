@@ -40,7 +40,7 @@ class LLMSpeechClient:
     """LLM integration with speech output (TTS only)"""
     
     def __init__(self, model_name="llama3.2", enable_speech=False, 
-                 speaker_device=12):
+                 mic_device=0, speaker_device=0, record_seconds=5):
         self.persons = 0
         self.executor = ThreadPoolExecutor(max_workers=2)
         self.latest_frame = None
@@ -52,21 +52,21 @@ class LLMSpeechClient:
         self.enable_speech = enable_speech
         self.speech_io = None
         
-        # Initialize SpeechIO if speech is enabled (TTS only, no STT)
+        # Initialize SpeechIO with both STT and TTS
         if enable_speech:
             try:
-                print("[INIT] Initializing text-to-speech...")
+                print("[INIT] Initializing speech interface...")
                 self.speech_io = SpeechIO(
                     whisper_model="base",
                     piper_voice="en_US-lessac-medium",
-                    input_device=None,  # No microphone needed
+                    input_device=mic_device,
                     output_device=speaker_device,
-                    record_seconds=0,  # No recording
-                    stt_callback=None  # No voice recognition
+                    record_seconds=record_seconds,  # Now configurable
+                    stt_callback=self._handle_voice_command
                 )
                 
                 if self.speech_io.ready:
-                    print("[INIT] Text-to-speech ready")
+                    print("[INIT] Speech interface ready")
                 else:
                     print("[INIT] Speech interface created but audio server failed")
                     print("[INIT] Continuing without speech capabilities")
@@ -95,9 +95,14 @@ class LLMSpeechClient:
                 print(f"  Voice Model: {status['voice_model']}")
                 self.enable_speech = False
             else:
-                print("[SPEECH] Text-to-speech enabled")
+                print("[SPEECH] Speech interface enabled")
                 print(f"[SPEECH] Sample rate: {status['sample_rate']} Hz")
+                print(f"[SPEECH] Microphone: device {status['input_device']}")
                 print(f"[SPEECH] Speaker: device {status['output_device']}")
+                
+                # Start voice recognition
+                print("[SPEECH] Starting voice recognition...")
+                self.speech_io.start_listening()
 
         # Check Ollama
         if not self._check_ollama_server():
@@ -121,8 +126,13 @@ class LLMSpeechClient:
                 print("  SPACE - Describe the current pose (with speech)")
                 print("  A     - Analyze pose emotions/mood (with speech)")
                 print("  B     - Suggest exercise or activity (with speech)")
-                if self.enable_speech:
-                    print("  S     - Toggle speech output on/off")
+                print("  S     - Toggle speech output on/off")
+                print("  V     - Toggle voice recognition on/off")
+                print("\n[INFO] Voice commands:")
+                print("  'describe' / 'what is the pose' - Describe current pose")
+                print("  'how do I feel' / 'analyze' - Analyze emotions")
+                print("  'suggest exercise' / 'workout' - Get exercise suggestion")
+                print("  'help' - List available commands")
             else:
                 print(f"[ERROR] Model '{self.model_name}' not available")
                 print(f"[INFO] Run: ollama pull {self.model_name}")
@@ -293,6 +303,65 @@ class LLMSpeechClient:
                 self.enable_speech = not self.enable_speech
                 status = "enabled" if self.enable_speech else "disabled"
                 print(f"[KEY] S - Speech output {status}")
+        elif key == 'v':
+            # Toggle voice recognition on/off
+            if self.speech_io:
+                self.speech_io.enable_stt = not self.speech_io.enable_stt
+                status = "enabled" if self.speech_io.enable_stt else "disabled"
+                print(f"[KEY] V - Voice recognition {status}")
+
+    def _handle_voice_command(self, text):
+        """Process voice commands from SpeechIO"""
+        text = text.lower().strip()
+        print(f"[VOICE] Recognized: '{text}'")
+        
+        # Debug: show what we're checking against
+        print(f"[VOICE DEBUG] Checking '{text}' against commands...")
+        
+        # Ignore very short or empty transcriptions
+        if len(text) < 2:
+            print("[VOICE] Ignoring short transcription")
+            return
+        
+        # Don't stop/restart listening from within the callback - causes threading issues
+        # Instead, just process the command
+        
+        # Describe pose commands
+        if any(word in text for word in ['describe', 'what', 'show', 'tell', 'pose', 'position']):
+            print("[VOICE] ✓ Command matched: describe pose")
+            self._analyze_pose('describe', speak_response=True)
+        
+        # Analyze emotion/mood commands
+        elif any(word in text for word in ['emotion', 'feel', 'feeling', 'mood', 'analyze', 'how']):
+            print("[VOICE] ✓ Command matched: analyze emotions")
+            self._analyze_pose('emotion', speak_response=True)
+        
+        # Suggest exercise/activity commands
+        elif any(word in text for word in ['exercise', 'activity', 'suggest', 'workout', 'movement', 'do']):
+            print("[VOICE] ✓ Command matched: suggest activity")
+            self._analyze_pose('activity', speak_response=True)
+        
+        # Help command
+        elif 'help' in text or 'command' in text:
+            print("[VOICE] ✓ Command matched: help")
+            help_text = "Say: describe, analyze, or suggest exercise"
+            print(f"[VOICE] Help requested")
+            if self.speech_io and self.speech_io.ready:
+                print("[VOICE] Calling TTS...")
+                self.speech_io.text_to_speech(help_text)
+                print("[VOICE] TTS call completed")
+            else:
+                print("[VOICE] ERROR: speech_io not ready!")
+        
+        else:
+            # DON'T give TTS feedback for unknown commands to prevent feedback loops
+            if len(text) > 3:
+                print(f"[VOICE] ✗ Unknown command: '{text}' (ignoring)")
+            else:
+                print(f"[VOICE] ✗ Ignoring: '{text}'")
+        
+        # Removed the was_listening restart code - it was causing threading errors
+        # The listening loop continues automatically
 
     def on_frame(self, frame: Frame):
         """Called whenever a new SenseSpace frame arrives"""
@@ -319,15 +388,19 @@ def main():
     parser.add_argument("--port", "-p", type=int, default=12345, help="Server port")
     parser.add_argument("--viz", action="store_true", help="Enable visualization")
     parser.add_argument("--model", "-m", default="llama3.2", help="Ollama model name")
-    parser.add_argument("--speech", action="store_true", help="Enable text-to-speech output")
-    parser.add_argument("--speaker", type=int, default=12, help="Speaker device ID")
+    parser.add_argument("--speech", action="store_true", help="Enable speech interface (TTS + STT)")
+    parser.add_argument("--mic", type=int, default=0, help="Microphone device ID")
+    parser.add_argument("--speaker", type=int, default=0, help="Speaker device ID")
+    parser.add_argument("--record", type=int, default=5, help="Recording duration in seconds")
     args = parser.parse_args()
     
     # Create LLM speech client
     llm_client = LLMSpeechClient(
         model_name=args.model,
         enable_speech=args.speech,
-        speaker_device=args.speaker
+        mic_device=args.mic,
+        speaker_device=args.speaker,
+        record_seconds=args.record  # Pass record duration
     )
     
     # Create minimal client with LLM callbacks
