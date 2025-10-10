@@ -3,6 +3,7 @@ import numpy as np
 import soundfile as sf
 import os
 import time
+from scipy import signal
 
 # Suppress pyo GUI warnings
 os.environ['PYO_GUI_WX'] = '0'
@@ -83,13 +84,14 @@ print("✅ Normal playback finished.")
 # 🎵 Process with Echo Effect (using pyo OFFLINE - directly from buffer)
 # ----------------------------------------------------------------------
 print("\n🎵 Processing with ECHO effect (pyo offline rendering)...")
+start_time = time.time()
 
 # Render for duration + extra time for echo decay
 render_time = duration + 2.0
 num_samples = int(render_time * samplerate)
 
 # Boot pyo server in OFFLINE mode (no audio output)
-s = Server(sr=samplerate, nchnls=1, duplex=0, audio="offline")
+s = Server(sr=samplerate, nchnls=1, duplex=0,audio="jack")
 s.recordOptions(dur=render_time)
 s.boot()
 s.start()
@@ -109,11 +111,11 @@ mixed = sound + echo
 
 # Create output table to capture the result
 output_table = NewTable(length=render_time, chnls=1)
-table_rec = TableRec(mixed, table=output_table)  # Removed fadein/fadeout
+table_rec = TableRec(mixed, table=output_table)
 table_rec.play()
 
 # Process offline (this actually renders the audio)
-print(f"   Rendering {render_time:.1f} seconds of audio...")
+print(f"   Rendering {render_time:.1f} seconds of audio...", end='', flush=True)
 
 # Manually advance the offline server time
 for _ in range(int(render_time * 100)):  # 100 steps per second
@@ -121,7 +123,8 @@ for _ in range(int(render_time * 100)):  # 100 steps per second
     
 s.shutdown()
 
-print(f"✅ Echo effect processed")
+echo_time = time.time() - start_time
+print(f" ✓ ({echo_time:.2f}s)")
 
 # Extract the processed audio from the table
 echo_buffer = np.array(output_table.getTable(), dtype='float32')
@@ -162,15 +165,118 @@ echo_buffer = echo_buffer[:num_samples]
 # ----------------------------------------------------------------------
 # 🔊 Playback #2: Echo version (using sounddevice directly from buffer)
 # ----------------------------------------------------------------------
-print("🔊 Playing back echo version (sounddevice)...")
+print("\n🔊 Playing back echo version (sounddevice)...")
 sd.play(echo_buffer, samplerate, device=None, latency=latency, blocking=True)
 print("✅ Echo playback finished.")
+
+# ----------------------------------------------------------------------
+# 🎵 Process with Pitch Shift Effect (lower pitch, same speed)
+# ----------------------------------------------------------------------
+print("\n🎵 Processing with PITCH SHIFT effect...")
+start_time = time.time()
+
+pitch_shift_semitones = -12  # -12 = 1 octave down
+
+# Try multiple methods in order of preference
+pitch_buffer = None
+method = None
+
+# Method 1: pyrubberband (fastest, requires rubberband-cli)
+try:
+    import pyrubberband as pyrb
+    print(f"   Using pyrubberband (fast) - shifting {pitch_shift_semitones} semitones...", end='', flush=True)
+    pitch_buffer = pyrb.pitch_shift(buffer, samplerate, pitch_shift_semitones)
+    method = "pyrubberband"
+except Exception:
+    pass
+
+# Method 2: librosa (good quality, requires resampy)
+if pitch_buffer is None:
+    try:
+        import librosa
+        print(f"   Using librosa - shifting {pitch_shift_semitones} semitones...", end='', flush=True)
+        pitch_buffer = librosa.effects.pitch_shift(
+            y=buffer,
+            sr=samplerate,
+            n_steps=pitch_shift_semitones,
+            res_type='kaiser_fast'
+        )
+        method = "librosa"
+    except Exception:
+        pass
+
+# Method 3: Simple scipy-based pitch shift (always works, good enough quality)
+if pitch_buffer is None:
+    print(f"   Using scipy simple pitch shift - shifting {pitch_shift_semitones} semitones...", end='', flush=True)
+    
+    # Calculate pitch ratio
+    # IMPORTANT: For negative semitones (lower pitch), ratio < 1, so we need to INVERT it for resampling
+    pitch_ratio = 2 ** (pitch_shift_semitones / 12.0)  # e.g., -12 semitones = 0.5
+    
+    # To lower pitch: we need MORE samples (stretch), then compress back
+    # Resample to LONGER duration (1/pitch_ratio)
+    num_samples_resampled = int(len(buffer) / pitch_ratio)  # FIXED: divide instead of multiply
+    pitch_buffer = signal.resample(buffer, num_samples_resampled)
+    
+    # Time-stretch back to original length using phase vocoder simulation
+    # Simple overlap-add technique
+    hop_size = 256
+    window = np.hanning(hop_size * 2)
+    
+    # Extend the buffer for processing
+    output_buffer = np.zeros(len(buffer), dtype=np.float32)
+    
+    # Calculate stretching factor (how much to compress back)
+    stretch = len(pitch_buffer) / len(buffer)
+    
+    # Simple time-stretch using overlap-add
+    read_pos = 0.0
+    write_pos = 0
+    
+    while write_pos < len(output_buffer) - hop_size * 2:
+        read_idx = int(read_pos)
+        if read_idx + hop_size * 2 < len(pitch_buffer):
+            grain = pitch_buffer[read_idx:read_idx + hop_size * 2] * window
+            output_buffer[write_pos:write_pos + hop_size * 2] += grain
+        
+        read_pos += hop_size * stretch
+        write_pos += hop_size
+    
+    pitch_buffer = output_buffer
+    method = "scipy"
+
+pitch_time = time.time() - start_time
+print(f" ✓ ({pitch_time:.2f}s using {method})")
+
+# Check amplitude
+pitch_max_amp = np.max(np.abs(pitch_buffer))
+print(f"📊 Pitched buffer max amplitude: {pitch_max_amp:.4f}")
+
+if pitch_max_amp > 0:
+    # Normalize to prevent clipping
+    pitch_buffer = pitch_buffer / pitch_max_amp * 0.8
+else:
+    print("⚠️  WARNING: Pitched buffer is silent!")
+
+# ----------------------------------------------------------------------
+# 🔊 Playback #3: Pitched version (using sounddevice directly from buffer)
+# ----------------------------------------------------------------------
+print(f"\n🔊 Playing back pitched version ({pitch_shift_semitones} semitones lower)...")
+sd.play(pitch_buffer, samplerate, device=None, latency=latency, blocking=True)
+print("✅ Pitched playback finished.")
 
 print("\n" + "="*70)
 print("Summary:")
 print("  1. ✅ Recorded with sounddevice → buffer")
 print("  2. ✅ Played normal version from buffer")
-print("  3. ✅ Processed echo effect with pyo (OFFLINE) → buffer")
+print(f"  3. ✅ Processed echo effect with pyo → buffer ({echo_time:.2f}s)")
 print("  4. ✅ Played echo version from buffer")
+print(f"  5. ✅ Processed pitch shift with {method} → buffer ({pitch_time:.2f}s)")
+print(f"  6. ✅ Played pitched version from buffer ({pitch_shift_semitones} semitones lower)")
 print("  → No files saved! Everything in memory!")
+print("\nOptional performance improvements:")
+print("  • For faster/better pitch shifting, install:")
+print("    sudo apt-get install rubberband-cli")
+print("    pip install pyrubberband resampy")
+print(f"\nTo make it MUCH deeper, change pitch_shift_semitones to -18 or -24")
 print("="*70)
