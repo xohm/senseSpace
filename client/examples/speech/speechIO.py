@@ -1,891 +1,812 @@
+#!/usr/bin/env python3
 """
-SpeechIO - Audio Input/Output Handler for Speech Recognition and Synthesis
-
-Handles:
-- Speech-to-Text (STT) using Whisper
-- Text-to-Speech (TTS) using Piper
-- Audio I/O using Pyo
-
-Author: Max Rheiner
-Date: October 2025
+Speech I/O Helper class
+- Records with VAD (Voice Activity Detection)
+- Transcribes with Whisper
+- Synthesizes speech with Piper
+- Plays audio with pyo
+- Cross-platform: Linux, macOS, Windows
 """
 
+import sounddevice as sd
+import numpy as np
+import whisper
+import torch
+import webrtcvad
+import subprocess
+import tempfile
 import os
 import sys
-import time
-import threading
-import tempfile
-import wave
-import subprocess
 import platform
-import numpy as np
+import threading
+import queue
+import time
+import urllib.request
+from pathlib import Path
+from typing import Callable, Optional
 
-# Suppress pyo GUI warnings
+# Suppress pyo warnings
 os.environ['PYO_GUI_WX'] = '0'
+from pyo import Server, DataTable, TableRead
 
-try:
-    from pyo import *
-    PYO_AVAILABLE = True
-except ImportError:
-    PYO_AVAILABLE = False
+# Default paths for models (OS-agnostic)
+SCRIPT_DIR = Path(__file__).parent
+MODELS_DIR = SCRIPT_DIR / "models"
+
+# Model download URLs
+MODEL_URLS = {
+    "en_US-lessac-medium": {
+        "onnx": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
+        "json": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
+    },
+    "en_US-amy-medium": {
+        "onnx": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx",
+        "json": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json"
+    },
+    "de_DE-thorsten_emotional-medium": {
+        "onnx": "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten_emotional/medium/de_DE-thorsten_emotional-medium.onnx",
+        "json": "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten_emotional/medium/de_DE-thorsten_emotional-medium.onnx.json"
+    }
+}
 
 
-class SpeechIO:
+def download_model(model_name: str, force: bool = False) -> bool:
     """
-    Audio I/O handler for speech recognition and synthesis
+    Download Piper model files to models directory
     
-    Features:
-    - Continuous voice recognition (Whisper)
-    - Text-to-speech playback (Piper)
-    - Configurable audio devices
-    - Callback-based architecture
-    - Cross-platform support (Linux, macOS, Windows)
+    Args:
+        model_name: Model name (e.g., 'en_US-amy-medium')
+        force: If True, re-download even if exists
+    
+    Returns:
+        True if model is available, False otherwise
     """
+    if model_name not in MODEL_URLS:
+        print(f"❌ Unknown model '{model_name}'")
+        return False
     
-    def __init__(self, whisper_model="base", piper_voice="en_US-lessac-medium",
-                 sample_rate=48000, input_device=0, output_device=0,
-                 record_seconds=3, stt_callback=None):
-        """
-        Initialize SpeechIO with Whisper (STT) and Piper (TTS)
-        
-        Args:
-            whisper_model: Whisper model size (tiny, base, small, medium, large)
-            piper_voice: Piper voice name
-            sample_rate: Audio sample rate in Hz
-            input_device: Input device index for microphone
-            output_device: Output device index for speakers
-            record_seconds: Duration to record for each STT chunk
-            stt_callback: Callback function for STT results
-        """
-        print("[SPEECHIO] Initializing...")
-        
-        self.whisper_model = whisper_model
-        self.piper_voice = piper_voice
-        self.sample_rate = sample_rate
-        self.input_device = input_device
-        self.output_device = output_device
-        self.record_seconds = record_seconds
-        self.stt_callback = stt_callback
-        
-        # Platform detection
-        self.platform = platform.system()
-        
-        # Component status
-        self.whisper_available = False
-        self.piper_available = False
-        self.voice_model_available = False
-        self.ready = False
-        self.server = None
-        
-        # Voice recognition thread
-        self.is_listening = False
-        self.listen_thread = None
-        self._pause_listening = False  # Add this flag
-        
-        try:
-            # Check dependencies
-            self._check_dependencies()
-            
-            # Initialize audio server
-            if self.whisper_available and self.piper_available and self.voice_model_available:
-                print("[SPEECHIO] Dependencies OK, initializing audio server...")
-                self._init_audio_server()
-            else:
-                print("[SPEECHIO] Missing dependencies, speech disabled")
-                self.ready = False
-        except Exception as e:
-            print(f"[SPEECHIO] Initialization error: {e}")
-            import traceback
-            traceback.print_exc()
-            self.ready = False
-            self.server = None
+    MODELS_DIR.mkdir(exist_ok=True)
     
-    def _get_voice_model_path(self, piper_voice):
-        """Get platform-specific voice model path"""
-        if self.platform == 'Windows':
-            # Windows: %APPDATA%\piper\voices
-            voice_dir = os.path.join(os.environ.get('APPDATA', ''), 'piper', 'voices')
-        elif self.platform == 'Darwin':
-            # macOS: ~/Library/Application Support/piper/voices
-            voice_dir = os.path.expanduser("~/Library/Application Support/piper/voices")
-        else:
-            # Linux: ~/.local/share/piper/voices
-            voice_dir = os.path.expanduser("~/.local/share/piper/voices")
-        
-        return os.path.join(voice_dir, f"{piper_voice}.onnx")
+    onnx_path = MODELS_DIR / f"{model_name}.onnx"
+    json_path = MODELS_DIR / f"{model_name}.onnx.json"
     
-    def _get_device_info(self, device_id, kind='input'):
-        """Return {'sr': int or None, 'channels': int or None} for device_id using pa_get_devices_infos()"""
-        try:
-            devices_info = pa_get_devices_infos()
-            if not devices_info or len(devices_info) != 2:
-                return {'sr': None, 'channels': None}
-            input_devices, output_devices = devices_info
-            if kind == 'input':
-                devs = input_devices
-            else:
-                devs = output_devices
-            info = devs.get(device_id)
-            if not info:
-                return {'sr': None, 'channels': None}
-            sr = int(info.get('default sr')) if info.get('default sr') else None
-            # Try several possible keys for channel count
-            channels = None
-            for k in ('max input channels', 'max output channels', 'channels', 'nchnls'):
-                if k in info:
-                    try:
-                        channels = int(info[k])
-                        break
-                    except:
-                        pass
-            # Fallback: assume stereo if unknown
-            if channels is None:
-                channels = 2
-            return {'sr': sr, 'channels': channels}
-        except Exception:
-            return {'sr': None, 'channels': None}
-
-    def _init_audio_server(self):
-        """Initialize Pyo audio server - try matching device native rates and channels"""
-        try:
-            # On Linux, use PulseAudio's default device (device 12 usually maps to PulseAudio default)
-            if self.platform == 'Linux':
-                print("[SPEECHIO] Linux detected, configuring for PulseAudio...")
-                
-                # Force device 12 which maps to PulseAudio default
-                actual_input_device = 12 if (self.input_device is None or self.input_device < 0) else self.input_device
-                actual_output_device = 12 if (self.output_device is None or self.output_device < 0) else self.output_device
-                
-                print(f"[SPEECHIO] Using input device {actual_input_device}, output device {actual_output_device}")
-                print(f"[SPEECHIO] Device 12 = PulseAudio default from your KDE settings")
-                
-                # Try common sample rates with duplex=1 for both input and output
-                for sr in [48000, 44100, 32000]:
-                    for out_ch in [2, 1]:
-                        try:
-                            print(f"[SPEECHIO] Trying sr={sr} Hz, out_ch={out_ch}")
-                            self.server = Server(
-                                sr=sr, 
-                                nchnls=out_ch, 
-                                duplex=1,  # Enable both input and output
-                                buffersize=512
-                            )
-                            
-                            # Set both input and output devices
-                            self.server.setInputDevice(actual_input_device)
-                            self.server.setOutputDevice(actual_output_device)
-                            
-                            self.server.boot()
-                            
-                            if self.server.getIsBooted():
-                                self.server.start()
-                                if self.server.getIsStarted():
-                                    self.ready = True
-                                    self.sample_rate = sr
-                                    self.input_device = actual_input_device
-                                    self.output_device = actual_output_device
-                                    print(f"[SPEECHIO] ✓ Audio initialized at {sr} Hz, {out_ch}ch")
-                                    print(f"[SPEECHIO] Input device: {actual_input_device} (PulseAudio default)")
-                                    print(f"[SPEECHIO] Output device: {actual_output_device} (PulseAudio default)")
-                                    return
-                                else:
-                                    self.server.shutdown()
-                                    self.server = None
-                            else:
-                                self.server = None
-                                
-                        except Exception as e:
-                            if self.server:
-                                try:
-                                    self.server.shutdown()
-                                except:
-                                    pass
-                            self.server = None
-                            continue
-
-            # Original ALSA code for other platforms or Linux fallback
-            in_info = self._get_device_info(self.input_device, kind='input')
-            out_info = self._get_device_info(self.output_device, kind='output')
-
-            # If input device reports 0 channels, warn and abort initialization here
-            if self.input_device is not None and in_info['channels'] == 0:
-                print(f"[SPEECHIO] Input device {self.input_device} reports 0 input channels - choose another mic")
-                self.ready = False
-                return
-
-            # Build candidate sample rates (prefer device natives)
-            candidates = []
-            if in_info['sr']:
-                candidates.append(in_info['sr'])
-            if out_info['sr']:
-                candidates.append(out_info['sr'])
-            candidates.extend([self.sample_rate, 48000, 44100, 32000, 16000, 22050])
-            # keep order unique
-            sample_rates = list(dict.fromkeys([r for r in candidates if r]))
-
-            # Try combinations of sample rate and likely output channels (mono/stereo)
-            tried = []
-            for sr in sample_rates:
-                for out_ch in (out_info['channels'] or 2, 1, 2):  # Try reported, mono, stereo
-                    key = (sr, out_ch)
-                    if key in tried:
-                        continue
-                    tried.append(key)
-                    try:
-                        print(f"[SPEECHIO] Trying server sr={sr} Hz, out_ch={out_ch}, in_dev={self.input_device}, out_dev={self.output_device}")
-                        # nchnls sets output channels; duplex=1 enables input
-                        self.server = Server(sr=sr, nchnls=out_ch, duplex=1, buffersize=512)
-                        # set devices (if device id not valid, pyo/portaudio will raise)
-                        try:
-                            self.server.setOutputDevice(self.output_device)
-                            self.server.setInputDevice(self.input_device)
-                        except Exception as e:
-                            # some backends ignore device setting; continue to boot attempt
-                            print(f"[SPEECHIO] Warning: setting devices failed: {e}")
-
-                        self.server.boot()
-
-                        if self.server.getIsBooted():
-                            self.server.start()
-                            if self.server.getIsStarted():
-                                self.ready = True
-                                self.sample_rate = sr
-                                print(f"[SPEECHIO] ✓ Audio initialized at {sr} Hz ({self.platform}), out_ch={out_ch}")
-                                print(f"[SPEECHIO] Input device: {self.input_device} (in_ch={in_info['channels']}, sr={in_info['sr']})")
-                                print(f"[SPEECHIO] Output device: {self.output_device} (out_ch={out_info['channels']}, sr={out_info['sr']})")
-                                return
-                            else:
-                                print(f"[SPEECHIO] Server failed to start for sr={sr}, out_ch={out_ch}")
-                                try:
-                                    self.server.shutdown()
-                                except:
-                                    pass
-                                self.server = None
-                        else:
-                            print(f"[SPEECHIO] Server failed to boot for sr={sr}, out_ch={out_ch}")
-                            self.server = None
-
-                    except Exception as e:
-                        # specific portaudio errors will be shown in console
-                        # print(f"[SPEECHIO] Init attempt failed (sr={sr}, out_ch={out_ch}): {e}")
-                        try:
-                            if self.server:
-                                self.server.shutdown()
-                        except:
-                            pass
-                        self.server = None
-                        continue
-
-            # Final attempt: Try using PulseAudio's "default" device by index
-            # Device 6 and 12 from your list are "sysdefault" and "default"
-            print("[SPEECHIO] All specific device configs failed. Trying 'default' devices...")
-            for default_dev in [12, 6]:  # Try 'default' and 'sysdefault'
-                for sr in [48000, 44100, 32000, 16000]:
-                    for out_ch in [2, 1]:
-                        try:
-                            print(f"[SPEECHIO] Trying default device {default_dev} at {sr} Hz, {out_ch}ch")
-                            self.server = Server(sr=sr, nchnls=out_ch, duplex=1, buffersize=512)
-                            self.server.setOutputDevice(default_dev)
-                            self.server.setInputDevice(default_dev)
-                            self.server.boot()
-                            
-                            if self.server.getIsBooted():
-                                self.server.start()
-                                if self.server.getIsStarted():
-                                    self.ready = True
-                                    self.sample_rate = sr
-                                    self.input_device = default_dev
-                                    self.output_device = default_dev
-                                    print(f"[SPEECHIO] ✓ Audio initialized using default device {default_dev} at {sr} Hz, {out_ch}ch")
-                                    print(f"[SPEECHIO] This will use your OS default audio devices")
-                                    return
-                                else:
-                                    self.server.shutdown()
-                                    self.server = None
-                        except:
-                            if self.server:
-                                try:
-                                    self.server.shutdown()
-                                except:
-                                    pass
-                            self.server = None
-                            continue
-
-            # If we reach here, none worked
-            print("[SPEECHIO] ✗ Failed to initialize audio server with any tried configuration")
-            print("[SPEECHIO] TROUBLESHOOTING:")
-            print("  1. Check PulseAudio is running: systemctl --user status pulseaudio")
-            print("  2. List devices: python speech.py --list-devices")
-            print("  3. Try specific device: python speech.py --mic 12 --speaker 12")
-            print("  4. Check: pactl list sinks short && pactl list sources short")
-            print("  5. Kill other audio apps that might lock the device")
-            self.ready = False
-            self.server = None
-
-        except Exception as e:
-            print(f"[SPEECHIO] Audio initialization failed: {e}")
-            import traceback
-            traceback.print_exc()
-            self.ready = False
-            self.server = None
-    
-    def _check_dependencies(self):
-        """
-        Check if all required dependencies are available
-        
-        Returns:
-            tuple: (whisper_ok, piper_ok, voice_model_ok)
-        """
-        # Check Whisper
-        try:
-            result = subprocess.run(['whisper', '--help'], 
-                                  capture_output=True, timeout=5)
-            whisper_ok = result.returncode == 0
-        except:
-            whisper_ok = False
-        
-        # Check Piper
-        try:
-            result = subprocess.run(['piper', '--help'], 
-                                  capture_output=True, timeout=5)
-            piper_ok = result.returncode == 0
-        except:
-            piper_ok = False
-        
-        # Get voice model path
-        voice_model_path = self._get_voice_model_path(self.piper_voice)
-        
-        # Check voice model exists
-        voice_model_ok = os.path.exists(voice_model_path)
-        
-        # Update component availability
-        self.whisper_available = whisper_ok
-        self.piper_available = piper_ok
-        self.voice_model_available = voice_model_ok
-        
-        return whisper_ok, piper_ok, voice_model_ok
-    
-    def get_status(self):
-        """
-        Get current status
-        
-        Returns:
-            dict: Status information
-        """
-        return {
-            'ready': self.ready,
-            'listening': self.is_listening,
-            'whisper': self.whisper_available,
-            'piper': self.piper_available,
-            'pyo': self.ready and self.server is not None,
-            'voice_model': self.voice_model_available,
-            'sample_rate': self.sample_rate,
-            'input_device': self.input_device,
-            'output_device': self.output_device,
-            'platform': self.platform
-        }
-    
-    def speech_to_text(self, audio_file):
-        """
-        Convert audio file to text using Whisper
-        
-        Args:
-            audio_file (str): Path to audio file
-            
-        Returns:
-            str: Transcribed text, or empty string if failed
-        """
-        try:
-            result = subprocess.run(
-                ['whisper', audio_file, '--model', self.whisper_model, '--language', 'en'],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            
-            if result.returncode == 0:
-                # Extract transcription from stdout using regex
-                # Look for timestamp lines like: [00:00.000 --> 00:03.760]  Transcribed text
-                import re
-                stdout = result.stdout
-                
-                # Find all timestamp lines
-                pattern = r'\[\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}\.\d{3}\]\s+(.+)'
-                matches = re.findall(pattern, stdout)
-                
-                if matches:
-                    # Join all transcription segments
-                    text = ' '.join(matches).strip()
-                    return text
-                else:
-                    print("[SPEECHIO] No transcription found in Whisper output")
-                    return ""
-            else:
-                print(f"[SPEECHIO] Whisper error: {result.stderr}")
-                return ""
-                
-        except subprocess.TimeoutExpired:
-            print("[SPEECHIO] Whisper timeout")
-            return ""
-        except Exception as e:
-            print(f"[SPEECHIO] STT failed: {e}")
-            return ""
-    
-    def text_to_speech(self, text):
-        """
-        Convert text to speech and play it
-        
-        Args:
-            text (str): Text to speak
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        was_listening = False  # Initialize at the start
-        try:
-            print(f"[SPEECHIO] TTS: '{text}'")
-            
-            # Temporarily pause listening to avoid feedback
-            was_listening = self.is_listening
-            if was_listening:
-                self._pause_listening = True  # Flag to pause, don't stop thread
-            
-            # Get voice model path
-            voice_model_path = self._get_voice_model_path(self.piper_voice)
-            
-            # Generate speech with Piper
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_wav:
-                wav_file = tmp_wav.name
-            
-            # Platform-specific Piper command
-            if self.platform == 'Windows':
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tmp_txt:
-                    tmp_txt.write(text)
-                    txt_file = tmp_txt.name
-                piper_cmd = ['piper', '--model', voice_model_path, '--output_file', wav_file]
-                with open(txt_file, 'r') as stdin_file:
-                    result = subprocess.run(piper_cmd, stdin=stdin_file, capture_output=True, timeout=10)
-                os.remove(txt_file)
-            else:
-                piper_cmd = f'echo "{text}" | piper --model {voice_model_path} --output_file {wav_file}'
-                result = subprocess.run(piper_cmd, shell=True, capture_output=True, timeout=10)
-            
-            if result.returncode == 0 and os.path.exists(wav_file):
-                try:
-                    import sounddevice as sd
-                    import soundfile as sf
-                    
-                    data, samplerate = sf.read(wav_file)
-                    sd.play(data, samplerate, device=None)
-                    sd.wait()
-                    print("[SPEECHIO] Played via sounddevice (system default)")
-                except ImportError:
-                    if self.ready and self.server and self.server.getIsStarted():
-                        self._play_audio(wav_file)
-                    else:
-                        self._play_audio_fallback(wav_file)
-                except Exception as e:
-                    print(f"[SPEECHIO] sounddevice error: {e}, using fallback")
-                    if self.ready and self.server and self.server.getIsStarted():
-                        self._play_audio(wav_file)
-                    else:
-                        self._play_audio_fallback(wav_file)
-                
-                os.remove(wav_file)
-                
-                # Resume listening after a delay
-                if was_listening:
-                    time.sleep(0.5)  # Wait for audio to clear
-                    self._pause_listening = False
-                
-                return True
-            else:
-                print(f"[SPEECHIO] Piper error: {result.stderr.decode() if result.stderr else 'Unknown error'}")
-                if was_listening:
-                    self._pause_listening = False
-                return False
-                
-        except Exception as e:
-            print(f"[SPEECHIO] TTS failed: {e}")
-            import traceback
-            traceback.print_exc()
-            if was_listening:
-                self._pause_listening = False
-            return False
-    
-    def _play_audio_fallback(self, wav_file):
-        """Platform-specific audio playback fallback"""
-        try:
-            if self.platform == 'Linux':
-                subprocess.run(['aplay', wav_file], capture_output=True)
-            elif self.platform == 'Darwin':
-                subprocess.run(['afplay', wav_file], capture_output=True)
-            elif self.platform == 'Windows':
-                # Windows: Use winsound or PowerShell
-                try:
-                    import winsound
-                    winsound.PlaySound(wav_file, winsound.SND_FILENAME)
-                except:
-                    # PowerShell fallback
-                    ps_cmd = f'(New-Object Media.SoundPlayer "{wav_file}").PlaySync()'
-                    subprocess.run(['powershell', '-Command', ps_cmd], capture_output=True)
-        except Exception as e:
-            print(f"[SPEECHIO] Fallback playback error: {e}")
-    
-    def _play_audio(self, wav_file):
-        """
-        Play WAV file using Pyo
-        
-        Args:
-            wav_file (str): Path to WAV file
-        """
-        try:
-            if not self.server or not self.server.getIsStarted():
-                self._play_audio_fallback(wav_file)
-                return
-            
-            # Load and play sound
-            snd_table = SndTable(wav_file)
-            osc = Osc(table=snd_table, freq=snd_table.getRate(), mul=0.5)
-            osc.out()
-            
-            duration = snd_table.getDur()
-            time.sleep(duration + 0.1)
-            
-            osc.stop()
-            del osc
-            del snd_table
-            
-        except Exception as e:
-            print(f"[SPEECHIO] Playback error: {e}")
-            self._play_audio_fallback(wav_file)
-    
-    def start_listening(self):
-        """Start continuous voice recognition"""
-        if self.is_listening or not self.ready:
-            return False
-        
-        if not self.server or not self.server.getIsStarted():
-            print("[SPEECHIO] Audio server not ready")
-            return False
-        
-        self.is_listening = True
-        self.listen_thread = threading.Thread(
-            target=self._listen_loop,
-            daemon=True
-        )
-        self.listen_thread.start()
-        print("[SPEECHIO] Voice recognition started")
+    # Check if already exists
+    if not force and onnx_path.exists() and json_path.exists():
         return True
     
-    def stop_listening(self):
-        """Stop continuous voice recognition"""
-        if not self.is_listening:
+    print(f"📥 Downloading {model_name}...")
+    
+    try:
+        # Download .onnx file
+        if force or not onnx_path.exists():
+            print(f"   Downloading {onnx_path.name}...")
+            urllib.request.urlretrieve(MODEL_URLS[model_name]["onnx"], onnx_path)
+        
+        # Download .onnx.json file
+        if force or not json_path.exists():
+            print(f"   Downloading {json_path.name}...")
+            urllib.request.urlretrieve(MODEL_URLS[model_name]["json"], json_path)
+        
+        print(f"✅ Downloaded {model_name}")
+        return True
+    
+    except Exception as e:
+        print(f"❌ Failed to download {model_name}: {e}")
+        # Clean up partial downloads
+        if onnx_path.exists():
+            onnx_path.unlink()
+        if json_path.exists():
+            json_path.unlink()
+        return False
+
+
+def find_piper_model(model_name: str, auto_download: bool = True) -> Optional[Path]:
+    """
+    Find Piper model in models directory, download if missing
+    
+    Args:
+        model_name: Model name without .onnx extension
+        auto_download: If True, download model if not found
+    
+    Returns:
+        Path to .onnx file or None if not found
+    """
+    model_file = f"{model_name}.onnx"
+    local_path = MODELS_DIR / model_file
+    
+    if local_path.exists():
+        return local_path
+    
+    # Try to download
+    if auto_download:
+        if download_model(model_name):
+            return local_path
+    
+    return None
+
+
+def find_piper_executable() -> Optional[str]:
+    """
+    Find Piper executable across platforms
+    
+    Returns:
+        Path to piper executable or None if not found
+    """
+    # Check if piper is in PATH
+    from shutil import which
+    piper_cmd = which("piper")
+    if piper_cmd:
+        return piper_cmd
+    
+    # Windows-specific: check common install locations
+    if platform.system() == "Windows":
+        common_paths = [
+            Path.home() / "AppData/Local/Programs/piper/piper.exe",
+            Path(os.environ.get("PROGRAMFILES", "C:/Program Files")) / "piper/piper.exe",
+            Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)")) / "piper/piper.exe",
+        ]
+        for p in common_paths:
+            if p.exists():
+                return str(p)
+    
+    return None
+
+
+class SpeechAudioIO:
+    """
+    Simple speech I/O: record → transcribe → synthesize → playback
+    Cross-platform: Linux, macOS, Windows
+    """
+    
+    def __init__(
+        self,
+        mic_index: Optional[int] = None,
+        speaker_index: Optional[int] = None,
+        whisper_model: str = "tiny",
+        whisper_device: Optional[str] = None,  # None = auto-detect, "cpu" = force CPU, "cuda" = force CUDA
+        whisper_language: Optional[str] = None,  # Force specific language (e.g., "en"), None = auto-detect
+        piper_model_en: Optional[str] = "en_US-amy-medium",  # English voice
+        piper_model_de: Optional[str] = "de_DE-thorsten_emotional-medium",  # German voice
+        piper_model_fallback: Optional[str] = "en_US-lessac-medium",  # Fallback for unknown languages
+        auto_download_models: bool = True,
+        silence_duration: float = 1.2,
+        vad_aggressiveness: int = 2,
+        min_speech_duration: float = 0.8,
+        min_rms_threshold: float = 0.015
+    ):
+        self.mic_index = mic_index
+        self.speaker_index = speaker_index
+        self.whisper_model_name = whisper_model
+        self.whisper_device = whisper_device  # Store device preference (None = auto)
+        self.whisper_language = whisper_language  # Store language preference (None = auto-detect)
+        self.playback_sample_rate = 48000  # Always output at 48kHz
+        self.silence_duration = silence_duration
+        self.min_speech_duration = min_speech_duration
+        self.min_rms_threshold = min_rms_threshold
+        
+        # Audio playback state (reference counter for nested muting)
+        self.playback_count = 0  # Number of active playbacks
+        self.playback_lock = threading.Lock()  # Thread-safe counter
+        
+        # VAD & recording
+        self.vad = webrtcvad.Vad(vad_aggressiveness)
+        self.is_recording = False
+        self.is_listening = False  # ADD THIS LINE
+        self.stop_event = threading.Event()
+        self.audio_queue = queue.Queue()
+        self.on_transcription_callback = None
+        
+        # Whisper (lazy load)
+        self.whisper_model = None
+        
+        # Piper TTS
+        self.piper_models = {}  # {"en": path, "de": path, ...}
+        self.piper_processes = {}  # Cache running piper processes
+        
+        # Download models if needed
+        if auto_download_models:
+            self._download_piper_models(piper_model_en, piper_model_de, piper_model_fallback)
+        
+        # pyo server (lazy boot)
+        self.pyo_server = None
+    
+    def _resolve_piper_model(self, model_name_or_path: str, language_name: str, auto_download: bool) -> Optional[Path]:
+        """Resolve Piper model path, download if needed"""
+        if Path(model_name_or_path).exists():
+            # Full path provided
+            print(f"✅ Using {language_name} Piper model: {model_name_or_path}")
+            return Path(model_name_or_path)
+        else:
+            # Model name provided - search/download
+            found_model = find_piper_model(model_name_or_path, auto_download=auto_download)
+            if found_model:
+                print(f"✅ Using {language_name} Piper model: {found_model}")
+                return found_model
+            else:
+                print(f"⚠️  {language_name} Piper model '{model_name_or_path}' not found.")
+                return None
+
+    @staticmethod
+    def list_devices():
+        """List all available audio devices"""
+        print("=" * 70)
+        print("🎤 INPUT devices:")
+        devices = sd.query_devices()
+        for i, d in enumerate(devices):
+            if d['max_input_channels'] > 0:
+                print(f"  [{i:2d}] {d['name']}")
+        
+        print("\n🔊 OUTPUT devices:")
+        for i, d in enumerate(devices):
+            if d['max_output_channels'] > 0:
+                print(f"  [{i:2d}] {d['name']}")
+        print("=" * 70)
+    
+    def _load_whisper(self):
+        """Load Whisper model on first use (lazy loading)"""
+        if self.whisper_model is not None:
             return
         
-        self.is_listening = False
-        if self.listen_thread:
-            self.listen_thread.join(timeout=2)
+        print(f"🧠 Loading Whisper model '{self.whisper_model_name}'...")
         
-        print("[SPEECHIO] Voice recognition stopped")
-    
-    def _listen_loop(self):
-        """Continuous listening loop in separate thread"""
+        # Determine device
+        if self.whisper_device is None:
+            # Auto-detect: prefer CUDA if available
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"   Auto-detecting device: {device}")
+        else:
+            # User specified device
+            device = self.whisper_device
+            print(f"   Using forced device: {device}")
+        
+        if device == "cuda":
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(0)
+                print(f"   Using GPU: {gpu_name}")
+            else:
+                print("   ⚠️  CUDA requested but not available, falling back to CPU")
+                device = "cpu"
+        
         try:
-            print("[SPEECHIO] Listen loop started")
-            while self.is_listening:
-                # Skip recording if paused (during TTS playback)
-                if self._pause_listening:
-                    time.sleep(0.1)
-                    continue
+            self.whisper_model = whisper.load_model(self.whisper_model_name, device=device)
+            print(f"✅ Whisper model loaded on {device}")
+        except torch.cuda.OutOfMemoryError:
+            print("⚠️  GPU out of memory, falling back to CPU")
+            device = "cpu"
+            self.whisper_model = whisper.load_model(self.whisper_model_name, device=device)
+            print(f"✅ Whisper model loaded on {device}")
+    
+    def _boot_pyo(self):
+        """Boot pyo server for playback at 48kHz"""
+        if self.pyo_server is None or not self.pyo_server.getIsBooted():
+            # OS-specific audio backend
+            if self.platform == "Darwin":  # macOS
+                audio_backend = "coreaudio"
+            elif self.platform == "Windows":
+                audio_backend = "portaudio"
+            else:  # Linux
+                audio_backend = "portaudio"
+            
+            self.pyo_server = Server(
+                sr=self.playback_sample_rate,  # Always 48kHz
+                nchnls=1,
+                duplex=0,
+                audio=audio_backend,
+                buffersize=512
+            )
+            if self.speaker_index is not None:
+                self.pyo_server.setOutputDevice(self.speaker_index)
+            
+            try:
+                self.pyo_server.boot()
+                self.pyo_server.start()
+                print(f"✅ pyo server running @ {self.playback_sample_rate} Hz ({audio_backend})")
+            except Exception as e:
+                print(f"❌ Failed to boot pyo at {self.playback_sample_rate} Hz: {e}")
+                raise
+    
+    def _whisper_worker(self):
+        """Background thread for Whisper transcription"""
+        self._load_whisper()
+        
+        while not self.stop_event.is_set():
+            try:
+                audio_buffer = self.audio_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            
+            if audio_buffer is None:
+                break
+            
+            # Transcribe
+            audio_float = audio_buffer.astype(np.float32) / 32768.0
+            
+            # fp16 only works on CUDA GPU, not on CPU or MPS
+            # Check if model is actually on CUDA (not just if CUDA is available)
+            device = str(self.whisper_model.device)
+            use_fp16 = device.startswith('cuda')
+            
+            # Build transcribe options
+            transcribe_options = {'fp16': use_fp16}
+            if self.whisper_language:
+                transcribe_options['language'] = self.whisper_language
+                print(f"[WHISPER] Forcing language: {self.whisper_language}")
+            
+            result = self.whisper_model.transcribe(audio_float, **transcribe_options)
+            
+            text = result["text"].strip()
+            language = result.get("language", "unknown")
+            
+            # Callback
+            if text and self.on_transcription_callback:
+                self.on_transcription_callback(language, text)
+    
+    def start_listening(
+        self,
+        on_audio: Optional[Callable[[np.ndarray], None]] = None,
+        on_transcription: Optional[Callable[[str, str], None]] = None,
+        transcribe: bool = True
+    ):
+        """
+        Start listening with VAD-based segmentation
+        
+        Args:
+            on_audio: Callback(audio_buffer) when speech segment detected
+            on_transcription: Callback(language, text) when transcribed
+            transcribe: If True, automatically transcribe segments
+        """
+        if self.is_listening:
+            print("⚠️  Already listening")
+            return
+        
+        self.on_audio_callback = on_audio
+        self.on_transcription_callback = on_transcription
+        self.stop_event.clear()
+        self.is_listening = True
+        
+        # Start Whisper worker if needed
+        if transcribe:
+            whisper_thread = threading.Thread(target=self._whisper_worker, daemon=True)
+            whisper_thread.start()
+        
+        # Recording state
+        buffer = np.zeros((0,), dtype=np.int16)
+        silence_frames = 0
+        silence_limit = int(self.silence_duration * 1000 / self.frame_ms)
+        speech_frames = 0
+        min_speech_frames = int(0.3 * 1000 / self.frame_ms)  # 300ms to confirm speech
+        is_recording = False  # Track if we're in a valid recording session
+        
+        def audio_callback(indata, frames, time_info, status):
+            nonlocal buffer, silence_frames, speech_frames, is_recording
+            
+            if self.stop_event.is_set():
+                raise sd.CallbackStop()
+            
+            # 🔇 Skip recording if speaker is playing (mic muted)
+            if self.is_playing:
+                # Clear any accumulated buffer during playback
+                if len(buffer) > 0:
+                    buffer = np.zeros((0,), dtype=np.int16)
+                    silence_frames = 0
+                    speech_frames = 0
+                    is_recording = False
+                return  # Skip processing this frame
+            
+            audio = (indata[:, 0] * 32767).astype(np.int16)
+            is_speech = self.vad.is_speech(audio.tobytes(), self.record_sample_rate)
+            
+            if is_speech:
+                speech_frames += 1
+                silence_frames = 0
+                
+                # Start recording from FIRST speech frame (don't wait!)
+                buffer = np.concatenate((buffer, audio))
+                
+                # Mark as valid recording after 300ms of consecutive speech
+                if speech_frames >= min_speech_frames:
+                    is_recording = True
+            else:
+                # Silence detected
+                if is_recording:
+                    # We were in a valid recording, add silence frames
+                    buffer = np.concatenate((buffer, audio))
+                    silence_frames += 1
+                else:
+                    # Not enough speech yet, discard buffer
+                    if speech_frames > 0:
+                        # Reset - it was just noise
+                        buffer = np.zeros((0,), dtype=np.int16)
+                        speech_frames = 0
+            
+            # End of speech segment (only if we had a valid recording)
+            if is_recording and silence_frames > silence_limit and len(buffer) > 0:
+                duration = len(buffer) / self.record_sample_rate
+                rms = np.sqrt(np.mean(buffer.astype(np.float32)**2)) / 32768.0
+                
+                # Filter short/silent segments
+                if duration >= self.min_speech_duration and rms >= self.min_rms_threshold:
+                    # Audio callback
+                    if self.on_audio_callback:
+                        self.on_audio_callback(buffer.copy())
                     
-                print("[SPEECHIO] Transcribing audio...")
-                # Record audio - use the configured input device
-                recording_table = NewTable(length=self.record_seconds, chnls=1)
-                mic = Input(chnl=0)  # Channel 0 of the selected device
-                recorder = TableRec(mic, table=recording_table)
-                recorder.play()
+                    # Queue for transcription
+                    if transcribe:
+                        self.audio_queue.put(buffer.copy())
+                else:
+                    # Rejected: too short or too quiet
+                    print(f"🔇 Rejected: {duration:.1f}s, RMS={rms:.3f} (noise/too short)")
                 
-                print(f"[SPEECHIO] Recording {self.record_seconds} seconds from device {self.input_device}...")
-                time.sleep(self.record_seconds)
-                
-                recorder.stop()
-                mic.stop()
-                
-                # Save to WAV file
-                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_audio:
-                    audio_file = tmp_audio.name
-                
-                samples = recording_table.getTable()
-                samples_array = np.array(samples, dtype=np.float32)
-                samples_int16 = (samples_array * 32767).astype(np.int16)
-                
-                # Debug: Check audio levels
-                max_amplitude = np.max(np.abs(samples_array))
-                rms = np.sqrt(np.mean(samples_array**2))
-                print(f"[SPEECHIO] Audio stats - Max: {max_amplitude:.4f}, RMS: {rms:.4f}")
-                
-                if max_amplitude < 0.01:
-                    print("[SPEECHIO] WARNING: Audio level very low! Microphone might not be working.")
-                
-                with wave.open(audio_file, 'wb') as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(int(self.server.getSamplingRate()))
-                    wf.writeframes(samples_int16.tobytes())
-                
-                # Debug: check file size
-                file_size = os.path.getsize(audio_file)
-                print(f"[SPEECHIO] Recorded audio: {audio_file} ({file_size} bytes)")
-                
-                # TEMP DEBUG: Save a copy to inspect manually
-                import shutil
-                debug_file = f"/tmp/debug_recording_{int(time.time())}.wav"
-                shutil.copy(audio_file, debug_file)
-                print(f"[SPEECHIO] Debug copy saved: {debug_file}")
-                print(f"[SPEECHIO] You can play it with: aplay {debug_file}")
-                
-                # Cleanup pyo objects
-                del recorder, mic, recording_table
-                
-                # Transcribe
-                text = self.speech_to_text(audio_file)
-                print(f"[SPEECHIO] STT: '{text}'")
-                
-                # Cleanup audio file
-                os.remove(audio_file)
-                
-                # Call callback if text was recognized
-                if text and self.stt_callback:
-                    try:
-                        self.stt_callback(text.lower())
-                    except Exception as e:
-                        print(f"[SPEECHIO] Callback error: {e}")
-                        import traceback
-                        traceback.print_exc()
-                
-                time.sleep(0.5)
-                
+                # Reset state
+                buffer = np.zeros((0,), dtype=np.int16)
+                silence_frames = 0
+                speech_frames = 0
+                is_recording = False
+        
+        print("🎙️  Listening...")
+        with sd.InputStream(
+            channels=1,
+            samplerate=self.record_sample_rate,  # Record at 16kHz
+            dtype="float32",
+            callback=audio_callback,
+            blocksize=self.frame_size,
+            device=self.mic_index
+        ):
+            while not self.stop_event.is_set():
+                time.sleep(0.1)
+        
+        self.is_listening = False
+    
+    def stop_listening(self):
+        """Stop listening"""
+        print("🛑 Stopping listener...")
+        self.stop_event.set()
+        self.audio_queue.put(None)
+    
+    def transcribe_buffer(self, audio_buffer: np.ndarray) -> tuple[str, str]:
+        """
+        Transcribe audio buffer (expects 16kHz int16)
+        
+        Returns:
+            (language, text)
+        """
+        self._load_whisper()
+        
+        # Whisper expects 16kHz float32
+        audio_float = audio_buffer.astype(np.float32) / 32768.0
+        
+        # fp16 only works on CUDA GPU, not on CPU or MPS
+        # Check if model is actually on CUDA (not just if CUDA is available)
+        device = str(self.whisper_model.device)
+        use_fp16 = device.startswith('cuda')
+        
+        # Build transcribe options
+        transcribe_options = {'fp16': use_fp16}
+        if self.whisper_language:
+            transcribe_options['language'] = self.whisper_language
+        
+        result = self.whisper_model.transcribe(audio_float, **transcribe_options)
+        
+        return result.get("language", "unknown"), result["text"].strip()
+    
+    def synthesize_speech(self, text: str, language: Optional[str] = None, speaker: Optional[int] = None) -> np.ndarray:
+        """
+        Synthesize speech from text using Piper
+        Auto-selects voice based on language
+        Always returns 48kHz mono int16
+        
+        Args:
+            text: Text to speak
+            language: Language code (e.g., 'en', 'de') - auto-detected from Whisper if None
+            speaker: Speaker ID number (e.g., 0-7 for thorsten_emotional) - model dependent
+        
+        Returns:
+            Audio buffer (int16, 48kHz, mono)
+        """
+        if not self.piper_executable:
+            return np.zeros(self.playback_sample_rate, dtype=np.int16)
+        
+        # Select model based on language
+        piper_model = None
+        
+        if language and language in self.piper_models:
+            # Language-specific model available
+            piper_model = self.piper_models[language]
+        elif self.piper_fallback_model:
+            # Use fallback (lessac) for unknown languages
+            piper_model = self.piper_fallback_model
+        elif 'en' in self.piper_models:
+            # Fallback to English if no lessac available
+            piper_model = self.piper_models['en']
+        elif self.piper_models:
+            # Use first available
+            piper_model = list(self.piper_models.values())[0]
+        
+        if not piper_model:
+            return np.zeros(self.playback_sample_rate, dtype=np.int16)
+        
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+        
+        try:
+            # Run Piper TTS
+            cmd = [self.piper_executable, "--model", str(piper_model), "--output_file", tmp_path]
+            
+            # Add speaker ID if specified (must be a number)
+            if speaker is not None:
+                cmd.extend(["--speaker", str(speaker)])
+            
+            # Windows needs shell=True for some subprocess calls
+            shell = (self.platform == "Windows")
+            
+            result = subprocess.run(
+                cmd,
+                input=text.encode('utf-8'),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                shell=shell
+            )
+            
+            if result.returncode != 0:
+                error_msg = result.stderr.decode('utf-8', errors='ignore')
+                print(f"❌ Piper TTS failed: {error_msg}")
+                return np.zeros(self.playback_sample_rate, dtype=np.int16)
+            
+            if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+                print(f"❌ Piper did not generate audio file")
+                return np.zeros(self.playback_sample_rate, dtype=np.int16)
+            
+            # Read audio
+            import soundfile as sf
+            audio, sr = sf.read(tmp_path, dtype='int16')
+            
+            # Convert to mono if stereo
+            if len(audio.shape) > 1:
+                audio = audio[:, 0]
+            
+            # Always resample to 48kHz
+            if sr != self.playback_sample_rate:
+                from scipy import signal
+                num_samples = int(len(audio) * self.playback_sample_rate / sr)
+                audio = signal.resample(audio, num_samples).astype(np.int16)
+            
+            return audio
+        
         except Exception as e:
-            print(f"[SPEECHIO] Listen error: {e}")
-            import traceback
-            traceback.print_exc()
-            time.sleep(1)
+            print(f"❌ TTS synthesis failed: {e}")
+            return np.zeros(self.playback_sample_rate, dtype=np.int16)
+        
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+    
+    def speak(self, text: str, language: Optional[str] = None, speaker: Optional[int] = None, effect: Optional[dict] = None, mute_mic: bool = True, blocking: bool = False):
+        """
+        Synthesize and play text (always 48kHz output)
+        Auto-selects voice based on language
+        
+        Args:
+            text: Text to speak
+            language: Language code (e.g., 'en', 'de') - auto-detected if None
+            speaker: Speaker ID (number) for multi-speaker models
+            effect: Audio effect to apply, e.g. {"effect": "echo", "value": 0.5} or {"effect": "pitch", "value": 1.2}
+            mute_mic: If True, mutes microphone during speech
+            blocking: If True, wait for speech to finish. If False (default), return immediately
+        """
+        voice = ""
+        if language in self.piper_models:
+            voice = f" [{language.upper()}]"
+        if speaker is not None:
+            voice += f" (speaker {speaker})"
+        if effect:
+            voice += f" +{effect.get('effect', '?')}({effect.get('value', 0)})"
+        print(f"🗣️{voice} Speaking: {text}")
+        
+        # Increment playback counter (mute mic)
+        if mute_mic:
+            self._increment_playback()
+        
+        if blocking:
+            # Synchronous mode - wait for speech to finish
+            try:
+                self._speak_sync(text, language, speaker, effect)
+            finally:
+                if mute_mic:
+                    self._decrement_playback()
+        else:
+            # Asynchronous mode - play in background thread
+            speech_thread = threading.Thread(
+                target=self._speak_async_wrapper,
+                args=(text, language, speaker, effect, mute_mic),
+                daemon=True
+            )
+            speech_thread.start()
+    
+    def _speak_sync(self, text: str, language: Optional[str], speaker: Optional[int] = None, effect: Optional[dict] = None) -> float:
+        """Internal synchronous speech implementation - returns duration"""
+        audio = self.synthesize_speech(text, language, speaker)  # Returns 48kHz mono int16
+        duration = 0.0
+        if len(audio) > 0:
+            # Apply effect if specified
+            if effect and effect.get('effect'):
+                audio = self._apply_effect(audio, effect)
+            
+            duration = len(audio) / self.playback_sample_rate
+            self.play_buffer(audio)
+        
+        return duration
+    
+    def _speak_async_wrapper(self, text: str, language: Optional[str], speaker: Optional[int], effect: Optional[dict], mute_mic: bool):
+        """Wrapper for async speech that handles playback counter"""
+        try:
+            duration = self._speak_sync(text, language, speaker, effect)
+        finally:
+            if mute_mic:
+                self._decrement_playback()
+    
+    def play_buffer(self, audio_buffer: np.ndarray):
+        """
+        Play audio buffer through pyo (expects 48kHz int16)
+        
+        Args:
+            audio_buffer: Audio data (48kHz, int16)
+        """
+        self._boot_pyo()
+        
+        # Convert to float32 [-1.0, 1.0]
+        if audio_buffer.dtype == np.int16:
+            audio_float = audio_buffer.astype(np.float32) / 32768.0
+        else:
+            audio_float = audio_buffer
+        
+        duration = len(audio_float) / self.playback_sample_rate
+        
+        try:
+            # Play through pyo
+            table = DataTable(size=len(audio_float), init=audio_float.tolist())
+            player = TableRead(table=table, freq=1.0/duration, loop=False, mul=0.8)
+            player.out()
+            
+            time.sleep(duration + 0.1)
+            player.stop()
+        except Exception as e:
+            print(f"❌ Playback failed: {e}")
+    
+    def _download_piper_models(self, piper_model_en, piper_model_de, piper_model_fallback):
+        """Download and register Piper models"""
+        # Find piper executable
+        self.piper_executable = find_piper_executable()
+        if not self.piper_executable:
+            print("⚠️  Piper executable not found. TTS disabled.")
+            print("   Install from: https://github.com/rhasspy/piper")
+            return
+        
+        # Detect platform
+        self.platform = platform.system()
+        
+        # Register models
+        self.piper_fallback_model = None
+        
+        # English model
+        if piper_model_en:
+            model_path = self._resolve_piper_model(piper_model_en, "English", auto_download=True)
+            if model_path:
+                self.piper_models['en'] = model_path
+        
+        # German model
+        if piper_model_de:
+            model_path = self._resolve_piper_model(piper_model_de, "German", auto_download=True)
+            if model_path:
+                self.piper_models['de'] = model_path
+        
+        # Fallback model
+        if piper_model_fallback:
+            model_path = self._resolve_piper_model(piper_model_fallback, "Fallback", auto_download=True)
+            if model_path:
+                self.piper_fallback_model = model_path
+                # Also register as English if no English model
+                if 'en' not in self.piper_models:
+                    self.piper_models['en'] = model_path
+        
+        if not self.piper_models:
+            print("⚠️  No Piper models available. TTS disabled.")
+    
+    @property
+    def is_playing(self) -> bool:
+        """Check if any playback is active"""
+        with self.playback_lock:
+            return self.playback_count > 0
+    
+    def _increment_playback(self):
+        """Increment playback counter (mute mic)"""
+        with self.playback_lock:
+            self.playback_count += 1
+            if self.playback_count == 1:
+                print(f"[MIC] 🔇 Muted (playback count: {self.playback_count})")
+            else:
+                print(f"[MIC] 🔇 Already muted (playback count: {self.playback_count})")
+    
+    def _decrement_playback(self):
+        """Decrement playback counter (unmute mic when reaches 0)"""
+        with self.playback_lock:
+            self.playback_count = max(0, self.playback_count - 1)
+            if self.playback_count == 0:
+                print(f"[MIC] 🎤 Unmuted (playback count: 0)")
+            else:
+                print(f"[MIC] 🔇 Still muted (playback count: {self.playback_count})")
+    
+    # VAD settings (for 16kHz recording)
+    @property
+    def record_sample_rate(self):
+        return 16000  # Whisper expects 16kHz
+    
+    @property
+    def frame_ms(self):
+        return 30  # 30ms frames for VAD
+    
+    @property
+    def frame_size(self):
+        return int(self.record_sample_rate * self.frame_ms / 1000)
+    
+    def _apply_effect(self, audio: np.ndarray, effect: dict) -> np.ndarray:
+        """Apply audio effect to buffer"""
+        effect_type = effect.get('effect', '').lower()
+        value = effect.get('value', 0.5)
+        
+        if effect_type == 'echo':
+            # Simple echo effect
+            delay_samples = int(0.2 * self.playback_sample_rate)  # 200ms delay
+            echo = np.zeros(len(audio) + delay_samples, dtype=np.int16)
+            echo[:len(audio)] = audio
+            echo[delay_samples:] += (audio * value).astype(np.int16)
+            return echo[:len(audio)]
+        
+        elif effect_type in ['low', 'tief']:
+            # Low pitch (slower playback)
+            from scipy import signal
+            factor = 0.85  # Lower pitch
+            new_length = int(len(audio) / factor)
+            return signal.resample(audio, new_length).astype(np.int16)
+        
+        elif effect_type in ['high', 'hoch']:
+            # High pitch (faster playback)
+            from scipy import signal
+            factor = 1.15  # Higher pitch
+            new_length = int(len(audio) / factor)
+            return signal.resample(audio, new_length).astype(np.int16)
+        
+        else:
+            return audio
     
     def cleanup(self):
         """Cleanup resources"""
-        self.stop_listening()
+        print("🧹 Cleaning up SpeechAudioIO...")
         
-        if self.server:
+        # Stop listening if active
+        if self.is_listening:
+            self.stop_listening()
+        
+        # Shutdown pyo server
+        if self.pyo_server is not None:
             try:
-                if self.server.getIsStarted():
-                    self.server.stop()
-                if self.server.getIsBooted():
-                    self.server.shutdown()
-            except:
-                pass
-    
-    @staticmethod
-    def list_pulseaudio_devices():
-        """
-        List PulseAudio devices (includes Bluetooth)
+                self.pyo_server.stop()
+                self.pyo_server.shutdown()
+                print("✅ pyo server stopped")
+            except Exception as e:
+                print(f"⚠️  Error stopping pyo: {e}")
+            self.pyo_server = None
         
-        Returns:
-            str: Formatted list of PulseAudio devices
-        """
-        output = []
-        output.append("\n" + "=" * 80)
-        output.append("PULSEAUDIO DEVICES (includes Bluetooth)")
-        output.append("=" * 80)
+        # Clear Whisper model (free GPU memory)
+        if self.whisper_model is not None:
+            del self.whisper_model
+            self.whisper_model = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print("✅ Whisper model unloaded")
         
-        try:
-            # List sources (microphones)
-            output.append("\nINPUT DEVICES (Microphones/Sources):")
-            output.append("-" * 80)
-            result = subprocess.run(['pactl', 'list', 'sources', 'short'], 
-                                  capture_output=True, text=True)
-            if result.returncode == 0:
-                sources = result.stdout.strip().split('\n')
-                for i, line in enumerate(sources):
-                    if line:
-                        parts = line.split('\t')
-                        if len(parts) >= 2:
-                            device_name = parts[1]
-                            # Highlight Bluetooth devices
-                            if 'bluez' in device_name.lower() or 'bluetooth' in device_name.lower():
-                                output.append(f"  >>> BLUETOOTH [{i}]: {device_name} <<<")
-                            else:
-                                output.append(f"  [{i}]: {device_name}")
-            else:
-                output.append("  Could not list PulseAudio sources")
-            
-            # List sinks (speakers)
-            output.append("\nOUTPUT DEVICES (Speakers/Sinks):")
-            output.append("-" * 80)
-            result = subprocess.run(['pactl', 'list', 'sinks', 'short'], 
-                                  capture_output=True, text=True)
-            if result.returncode == 0:
-                sinks = result.stdout.strip().split('\n')
-                for i, line in enumerate(sinks):
-                    if line:
-                        parts = line.split('\t')
-                        if len(parts) >= 2:
-                            device_name = parts[1]
-                            # Highlight Bluetooth devices
-                            if 'bluez' in device_name.lower() or 'bluetooth' in device_name.lower():
-                                output.append(f"  >>> BLUETOOTH [{i}]: {device_name} <<<")
-                            else:
-                                output.append(f"  [{i}]: {device_name}")
-            else:
-                output.append("  Could not list PulseAudio sinks")
-            
-            # Get default devices
-            output.append("\nDEFAULT DEVICES:")
-            output.append("-" * 80)
-            
-            result = subprocess.run(['pactl', 'get-default-source'], 
-                                  capture_output=True, text=True)
-            if result.returncode == 0:
-                output.append(f"  Default Input:  {result.stdout.strip()}")
-            
-            result = subprocess.run(['pactl', 'get-default-sink'], 
-                                  capture_output=True, text=True)
-            if result.returncode == 0:
-                output.append(f"  Default Output: {result.stdout.strip()}")
-            
-            output.append("\n" + "=" * 80)
-            output.append("\nNOTE:")
-            output.append("  - Pyo (PortAudio) may not see Bluetooth devices directly")
-            output.append("  - To use Bluetooth: Set it as default in PulseAudio")
-            output.append("  - Then use device index 0 (maps to PulseAudio default)")
-            output.append("\nTO SET BLUETOOTH AS DEFAULT:")
-            output.append("  pactl set-default-source <bluetooth_source_name>")
-            output.append("  pactl set-default-sink <bluetooth_sink_name>")
-            output.append("=" * 80)
-            
-            return "\n".join(output)
-            
-        except Exception as e:
-            return f"Error listing PulseAudio devices: {e}\nIs PulseAudio installed?"
+        print("✅ Cleanup complete")
 
-    @staticmethod
-    def list_audio_devices():
-        """
-        List available audio devices in a readable format
-        
-        Returns:
-            str: Formatted list of audio devices
-        """
-        if not PYO_AVAILABLE:
-            return "Pyo not available"
-        
-        try:
-            devices_info = pa_get_devices_infos()
-            
-            if not devices_info or len(devices_info) != 2:
-                return "Could not get device list"
-            
-            input_devices, output_devices = devices_info
-            current_platform = platform.system()
-            
-            output = []
-            output.append("\n" + "=" * 80)
-            output.append(f"AUDIO DEVICES - PortAudio ({current_platform})")
-            output.append("=" * 80)
-            
-            # Input devices (microphones)
-            output.append("\nINPUT DEVICES (Microphones):")
-            output.append("-" * 80)
-            if input_devices:
-                for idx, info in input_devices.items():
-                    output.append(f"  [{idx}] {info['name']}")
-                    output.append(f"      Sample Rate: {info['default sr']} Hz")
-                    output.append(f"      Latency: {info['latency']*1000:.2f} ms")
-                    output.append("")
-            else:
-                output.append("  No input devices found")
-            
-            # Output devices (speakers)
-            output.append("\nOUTPUT DEVICES (Speakers):")
-            output.append("-" * 80)
-            if output_devices:
-                for idx, info in output_devices.items():
-                    output.append(f"  [{idx}] {info['name']}")
-                    output.append(f"      Sample Rate: {info['default sr']} Hz")
-                    output.append(f"      Latency: {info['latency']*1000:.2f} ms")
-                    output.append("")
-            else:
-                output.append("  No output devices found")
-            
-            output.append("=" * 80)
-            output.append("\nUSAGE:")
-            output.append("  python speech.py --mic <input_device_id> --speaker <output_device_id>")
-            output.append("\nEXAMPLE (Logitech C920 mic + Built-in speakers):")
-            output.append("  python speech.py --server localhost --viz --speech --mic 5 --speaker 0")
-            output.append("=" * 80)
-            
-            # Also list PulseAudio devices if on Linux
-            if current_platform == 'Linux':
-                output.append("\n")
-                output.append(SpeechIO.list_pulseaudio_devices())
-            
-            return "\n".join(output)
-            
-        except Exception as e:
-            return f"Error getting device list: {e}"
-
-
-# Example usage and testing
-if __name__ == "__main__":
-    print("=== SpeechIO Test ===\n")
-    print(f"Platform: {platform.system()}\n")
-    
-    # List available devices
-    print("Available audio devices:")
-    print(SpeechIO.list_audio_devices())
-    print()
-    
-    # Create SpeechIO instance
-    def on_speech(text):
-        print(f"\n>>> Heard: '{text}'")
-        if 'hello' in text:
-            speech_io.text_to_speech("Hello! How are you?")
-        elif 'bye' in text or 'exit' in text:
-            print("Exiting...")
-            speech_io.stop_listening()
-    
-    speech_io = SpeechIO(
-        whisper_model="base",
-        piper_voice="en_US-lessac-medium",
-        input_device=0,
-        output_device=0,
-        stt_callback=on_speech
-    )
-    
-    # Check status
-    status = speech_io.get_status()
-    print(f"\nStatus: {status}")
-    
-    if status['ready']:
-        # Test TTS
-        print("\nTesting Text-to-Speech...")
-        speech_io.text_to_speech("Hello, this is a test of the speech synthesis system")
-        
-        # Start listening
-        print("\nStarting voice recognition... Say 'hello' or 'bye' to exit")
-        speech_io.start_listening()
-        
-        try:
-            while speech_io.is_listening:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("\nInterrupted by user")
-    else:
-        print("\nSpeechIO not ready. Check dependencies:")
-        print(f"  Whisper: {status['whisper']}")
-        print(f"  Piper: {status['piper']}")
-        print(f"  Pyo: {status['pyo']}")
-        print(f"  Voice Model: {status['voice_model']}")
-    
-    speech_io.cleanup()
-    print("\nTest complete")
