@@ -44,7 +44,7 @@ def main():
     parser = argparse.ArgumentParser(description='Record (sounddevice) + Real-time Playback (pyo)')
     parser.add_argument('--mic', type=int, default=None, help='Mic device index')
     parser.add_argument('--duration', '-d', type=float, default=5.0, help='Recording duration')
-    parser.add_argument('--pitch', '-p', type=int, default=-2, help='Pitch shift semitones')
+    parser.add_argument('--pitch', '-p', type=int, default=-4, help='Pitch shift semitones')
     parser.add_argument('--list', action='store_true', help='List devices')
     args = parser.parse_args()
 
@@ -157,7 +157,7 @@ def main():
     print("\n🔊 Playing echo version (pyo real-time)...")
     table2 = DataTable(size=len(buffer), init=buffer.tolist())
     sound = TableRead(table=table2, freq=1.0/duration, loop=False, mul=0.8)
-    echo = Delay(sound, delay=[0.3, 0.6], feedback=0.7, maxdelay=2, mul=1.0)
+    echo = Delay(sound, delay=[0.3, 0.6], feedback=0.2, maxdelay=2, mul=1.0)
     mixed = sound + echo
     mixed.out()
 
