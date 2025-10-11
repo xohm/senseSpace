@@ -34,6 +34,18 @@ def list_devices():
         if d['max_output_channels'] > 0:
             default = " [DEFAULT]" if i == sd.default.device[1] else ""
             print(f"  [{i:2d}] {d['name']}{default}")
+    
+    print("\n" + "=" * 70)
+    print("🔊 pyo (PortAudio) OUTPUT devices:")
+    print("=" * 70)
+    # Create temporary server to list devices
+    try:
+        temp_s = Server(audio="portaudio")
+        temp_s.boot()
+        temp_s.pa_list_devices()
+        temp_s.shutdown()
+    except Exception as e:
+        print(f"⚠️  Could not list pyo devices: {e}")
     print("=" * 70)
 
 
@@ -42,7 +54,8 @@ def list_devices():
 # ----------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description='Record (sounddevice) + Real-time Playback (pyo)')
-    parser.add_argument('--mic', type=int, default=None, help='Mic device index')
+    parser.add_argument('--mic', type=int, default=None, help='Mic device index (sounddevice)')
+    parser.add_argument('--speaker', type=int, default=None, help='Speaker device index (pyo/PortAudio)')
     parser.add_argument('--duration', '-d', type=float, default=5.0, help='Recording duration')
     parser.add_argument('--pitch', '-p', type=int, default=-4, help='Pitch shift semitones')
     parser.add_argument('--list', action='store_true', help='List devices')
@@ -120,11 +133,21 @@ def main():
     print("\n🎵 Booting pyo server (real-time)...")
     s = Server(sr=samplerate, nchnls=1, duplex=0, audio="portaudio", buffersize=512)
     
+    # Set output device if specified
+    if args.speaker is not None:
+        print(f"🔊 Setting output device to index {args.speaker}")
+        s.setOutputDevice(args.speaker)
+    else:
+        print("🔊 Using default output device")
+    
     try:
         s.boot()
     except Exception as e:
         print(f"❌ Failed to boot pyo server: {e}")
-        print("Try installing JACK or check your audio configuration")
+        print("Try:")
+        print("  1. Run with --list to see available devices")
+        print("  2. Use --speaker <index> to specify output device")
+        print("  3. Check your audio configuration")
         return
     
     if not s.getIsBooted():
@@ -210,12 +233,13 @@ def main():
     print("  1. ✅ Recorded with sounddevice")
     print("  2. ✅ Played normal with pyo")
     print("  3. ✅ Played echo with pyo (REAL-TIME)")
-    print(f"  4. ✅ Played pitch shift with pyo (REAL-TIME, {args.pitch} semitones)")
+    print(f"  4. ✅ Played pitch shift with pyo (REAL-TIME, {args.pitch:+d} semitones)")
     print("  → All effects processed in REAL-TIME during playback!")
     print("\nUsage:")
-    print(f"  python3 {os.path.basename(__file__)} --mic 5 --pitch -24  # Deep voice")
-    print(f"  python3 {os.path.basename(__file__)} --mic 5 --pitch -18  # Demon")
-    print(f"  python3 {os.path.basename(__file__)} --mic 5 --pitch +7   # Chipmunk")
+    print(f"  python3 {os.path.basename(__file__)} --list  # Show all devices")
+    print(f"  python3 {os.path.basename(__file__)} --mic 5 --speaker 3 --pitch -24  # Deep voice")
+    print(f"  python3 {os.path.basename(__file__)} --mic 5 --speaker 3 --pitch -18  # Demon")
+    print(f"  python3 {os.path.basename(__file__)} --mic 5 --speaker 3 --pitch +7   # Chipmunk")
     print("="*70)
 
 
