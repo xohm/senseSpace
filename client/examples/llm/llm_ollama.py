@@ -1,48 +1,42 @@
 # -----------------------------------------------------------------------------
 # Sense Space
 # -----------------------------------------------------------------------------
-# Ollama LLM Client Example
+# Ollama LLM Client Example (Direct API calls)
 # -----------------------------------------------------------------------------
 # IAD, Zurich University of the Arts / zhdk.ch
 # Max Rheiner
 # -----------------------------------------------------------------------------
 
+# -----------------------------------------------------------------------------
+# This example demonstrates the same as the OpenAI example, but with
+# direct Ollama LLM integration without LLMClient wrapper.
+# So the LLM calls are done directly via the Ollama API from a local model.
+# -----------------------------------------------------------------------------
+
 import argparse
 import sys
-import os
 import time
-import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 import requests
 import subprocess
 
-# Add libs and client to path
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-libs_path = os.path.join(repo_root, 'libs')
-senseSpaceLib_path = os.path.join(libs_path, 'senseSpaceLib')
-client_path = os.path.join(repo_root, 'client')
+# Setup paths
+from senseSpaceLib.senseSpace import setup_paths
+setup_paths()
 
-if libs_path not in sys.path:
-    sys.path.insert(0, libs_path)
-if senseSpaceLib_path not in sys.path:
-    sys.path.insert(0, senseSpaceLib_path)
-if client_path not in sys.path:
-    sys.path.insert(0, client_path)
-
-from miniClient import MinimalClient
-from senseSpaceLib.senseSpace.protocol import Frame, Person, Joint
-from senseSpaceLib.senseSpace.enums import Body34Joint, SkeletonAngle
+from senseSpaceLib.senseSpace import MinimalClient, Frame
 from senseSpaceLib.senseSpace.interpretation import interpret_pose_from_angles
 
-class LLMClient:
-    """Tiny wrapper for LLM integration with async requests"""
+
+class OllamaLLMClient:
+    """Direct Ollama LLM integration (without LLMClient wrapper)"""
     
-    def __init__(self, model_name="llama3.2"):
+    def __init__(self, model_name="llama3.2", confidence_threshold=70.0):
         self.persons = 0
-        self.executor = ThreadPoolExecutor(max_workers=2)  # Pool for async calls
-        self.latest_frame = None  # Store latest frame for on-demand LLM calls
-        self.cur_people = []  # Only high-confidence people
-        self.confidence_threshold = 70.0  # Minimum confidence to consider a person
+        self.executor = ThreadPoolExecutor(max_workers=2)
+        self.latest_frame = None
+        self.cur_people = []
+        self.confidence_threshold = confidence_threshold
         self.ollama_url = "http://localhost:11434"
         self.model_name = model_name
         self.ollama_ready = False
@@ -54,7 +48,7 @@ class LLMClient:
         if not self._check_ollama_server():
             print("[INIT] Ollama server not running, attempting to start...")
             if self._start_ollama_server():
-                time.sleep(2)  # Give it time to start
+                time.sleep(2)
             else:
                 print("[ERROR] Failed to start Ollama server")
                 self.ollama_ready = False
@@ -108,14 +102,13 @@ class LLMClient:
                 models = response.json().get('models', [])
                 available = [m['name'] for m in models]
                 print(f"[INIT] Available models: {', '.join(available)}")
-                # Check if our model (with or without :latest tag) is available
                 return any(self.model_name in m for m in available)
             return False
         except:
             return False
 
     def _llm_call(self, pose_description, person_id, system_prompt, user_prompt):
-        """LLM call - will be executed in thread pool"""
+        """LLM call - executed in thread pool"""
         if not self.ollama_ready:
             print("[ERROR] Ollama not ready. Cannot make request.")
             return
@@ -167,10 +160,8 @@ class LLMClient:
         confidence_val = getattr(person, 'confidence', 0)
         print(f"[LLM] Analyzing person {person.id} (confidence: {confidence_val:.1f})")
         
-        # Get skeleton angles
+        # Get skeleton angles and interpret pose
         angles = person.get_skeletal_angles()
-        
-        # Use library interpretation function
         pose_description = interpret_pose_from_angles(angles)
         
         print(f"[DEBUG] Extracted features:\n{pose_description}")
@@ -214,11 +205,10 @@ class LLMClient:
             print(f"[ERROR] Unknown question type: {question_type}")
             return
         
-        # print pose description and question for the llm
         print(f"[LLM] Question type: {question_type}")
         print(f"[LLM] Prompt:\n{prompt_config['user'].format(pose_features=pose_description)}")
         
-        # Submit to thread pool (fire and forget - non-blocking)
+        # Submit to thread pool (non-blocking)
         self.executor.submit(
             self._llm_call, 
             pose_description, 
@@ -233,7 +223,6 @@ class LLMClient:
             print("[ERROR] Ollama not available. Check if server is running.")
             return
         
-        # Switch-case for different keys
         if key == ' ':
             print("[KEY] Space - Describing pose...")
             self._analyze_pose('describe')
@@ -243,17 +232,11 @@ class LLMClient:
         elif key == 'b':
             print("[KEY] B - Suggesting activity...")
             self._analyze_pose('activity')
-        else:
-            # Ignore other keys silently
-            pass
 
     def on_frame(self, frame: Frame):
         """Called whenever a new SenseSpace frame arrives"""
-        # Store latest frame for on-demand analysis
         self.latest_frame = frame
-        
         people = getattr(frame, "people", None)
-        all_count = len(people) if people else 0
         
         # Filter people by confidence threshold
         if people:
@@ -275,15 +258,20 @@ def main():
     parser.add_argument("--server", "-s", default="localhost", help="Server IP")
     parser.add_argument("--port", "-p", type=int, default=12345, help="Server port")
     parser.add_argument("--viz", action="store_true", help="Enable visualization (required for keyboard input)")
-    parser.add_argument("--model", "-m", default="llama3.2", help="Ollama model name (default: llama3.2)")
+    parser.add_argument("--model", "-m", default="llama3.2", help="Ollama model name")
+    parser.add_argument("--confidence", "-c", type=float, default=70.0,
+                       help="Minimum confidence threshold for person detection")
     args = parser.parse_args()
     
     if not args.viz:
         print("[WARNING] LLM example works best with --viz flag for keyboard input")
         print("[INFO] Run with: python llm_ollama.py --server localhost --viz")
     
-    # Create LLM client wrapper
-    llm_client = LLMClient(model_name=args.model)
+    # Create Ollama LLM client wrapper
+    llm_client = OllamaLLMClient(
+        model_name=args.model,
+        confidence_threshold=args.confidence
+    )
     
     # Create minimal client with LLM callbacks
     client = MinimalClient(

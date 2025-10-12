@@ -7,50 +7,43 @@
 # Max Rheiner
 # -----------------------------------------------------------------------------
 
+# -----------------------------------------------------------------------------
+# This example demonstrates a simple OpenAI LLM client integration for pose analysis.
+# This is not the most performant way to use LLMs, but it shows the basic
+# integration and usage with SenseSpace.
+# -----------------------------------------------------------------------------
+
 import argparse
 import sys
 import os
-import time
-import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-# Add libs and client to path
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-libs_path = os.path.join(repo_root, 'libs')
-senseSpaceLib_path = os.path.join(libs_path, 'senseSpaceLib')
-client_path = os.path.join(repo_root, 'client')
+# Setup paths
+from senseSpaceLib.senseSpace import setup_paths
+setup_paths()
 
-if libs_path not in sys.path:
-    sys.path.insert(0, libs_path)
-if senseSpaceLib_path not in sys.path:
-    sys.path.insert(0, senseSpaceLib_path)
-if client_path not in sys.path:
-    sys.path.insert(0, client_path)
-
-from miniClient import MinimalClient
-from senseSpaceLib.senseSpace.protocol import Frame, Person, Joint
-from senseSpaceLib.senseSpace.enums import Body34Joint, SkeletonAngle
+from senseSpaceLib.senseSpace import MinimalClient, Frame
 from senseSpaceLib.senseSpace.interpretation import interpret_pose_from_angles
 
-# openai 
+# OpenAI
 from openai import OpenAI
 
 # Load environment variables from .env file in the same directory as this script
 env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(dotenv_path=env_path)
 
-class LLMClient:
-    """Tiny wrapper for LLM integration with async requests"""
+class OpenAILLMClient:
+    """OpenAI LLM integration for pose analysis"""
     
-    def __init__(self):
+    def __init__(self, confidence_threshold=70.0):
         self.persons = 0
         self.client = None
-        self.executor = ThreadPoolExecutor(max_workers=2)  # Pool for async calls
-        self.latest_frame = None  # Store latest frame for on-demand LLM calls
-        self.cur_people = []  # Only high-confidence people
-        self.confidence_threshold = 70.0  # Minimum confidence to consider a person
-        self.client_ready = False  # Track if client is ready
+        self.executor = ThreadPoolExecutor(max_workers=2)
+        self.latest_frame = None
+        self.cur_people = []
+        self.confidence_threshold = confidence_threshold
+        self.client_ready = False
 
     def on_init(self):
         print(f"[INIT] Connected to server")
@@ -78,7 +71,7 @@ class LLMClient:
             self.client_ready = False
 
     def _llm_call(self, pose_description, person_id, system_prompt, user_prompt):
-        """LLM call - will be executed in thread pool"""
+        """LLM call - executed in thread pool"""
         if not self.client_ready or self.client is None:
             print("[ERROR] LLM client not initialized. Cannot make request.")
             print("[INFO] Check your .env file and OPENAI_API_KEY")
@@ -126,10 +119,8 @@ class LLMClient:
         confidence_val = getattr(person, 'confidence', 0)
         print(f"[LLM] Analyzing person {person.id} (confidence: {confidence_val:.1f})")
         
-        # Get skeleton angles
+        # Get skeleton angles and interpret pose
         angles = person.get_skeletal_angles()
-        
-        # Use library interpretation function
         pose_description = interpret_pose_from_angles(angles)
         
         print(f"[DEBUG] Extracted features:\n{pose_description}")
@@ -173,11 +164,10 @@ class LLMClient:
             print(f"[ERROR] Unknown question type: {question_type}")
             return
         
-        # print pose description and question for the llm
         print(f"[LLM] Question type: {question_type}")
         print(f"[LLM] Prompt:\n{prompt_config['user'].format(pose_features=pose_description)}")
         
-        # Submit to thread pool (fire and forget - non-blocking)
+        # Submit to thread pool (non-blocking)
         self.executor.submit(
             self._llm_call, 
             pose_description, 
@@ -192,7 +182,6 @@ class LLMClient:
             print("[ERROR] LLM not available. Check API key configuration.")
             return
         
-        # Switch-case for different keys
         if key == ' ':
             print("[KEY] Space - Describing pose...")
             self._analyze_pose('describe')
@@ -202,17 +191,12 @@ class LLMClient:
         elif key == 'b':
             print("[KEY] B - Suggesting activity...")
             self._analyze_pose('activity')
-        else:
-            # Ignore other keys silently
-            pass
 
     def on_frame(self, frame: Frame):
         """Called whenever a new SenseSpace frame arrives"""
-        # Store latest frame for on-demand analysis
         self.latest_frame = frame
         
         people = getattr(frame, "people", None)
-        all_count = len(people) if people else 0
         
         # Filter people by confidence threshold
         if people:
@@ -230,18 +214,20 @@ class LLMClient:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SenseSpace LLM Client Example")
+    parser = argparse.ArgumentParser(description="SenseSpace OpenAI LLM Client Example")
     parser.add_argument("--server", "-s", default="localhost", help="Server IP")
     parser.add_argument("--port", "-p", type=int, default=12345, help="Server port")
     parser.add_argument("--viz", action="store_true", help="Enable visualization (required for keyboard input)")
+    parser.add_argument("--confidence", "-c", type=float, default=70.0,
+                       help="Minimum confidence threshold for person detection")
     args = parser.parse_args()
     
     if not args.viz:
         print("[WARNING] LLM example works best with --viz flag for keyboard input")
         print("[INFO] Run with: python llm.py --server localhost --viz")
     
-    # Create LLM client wrapper
-    llm_client = LLMClient()  
+    # Create OpenAI LLM client wrapper
+    llm_client = OpenAILLMClient(confidence_threshold=args.confidence)
     
     # Create minimal client with LLM callbacks
     client = MinimalClient(
@@ -251,7 +237,7 @@ def main():
         on_init=llm_client.on_init,
         on_frame=llm_client.on_frame,
         on_connection_changed=llm_client.on_connection_changed
-    )   
+    )
     
     # Pass LLM trigger callback to miniClient for keyboard handling
     if args.viz:

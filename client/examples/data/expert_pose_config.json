@@ -1,0 +1,70 @@
+{
+  "name": "BirdlyPoseExpert",
+  "description": "Real-time human pose analyzer for ZED-Fusion Body34 skeleton data in the Sense Space environment.",
+
+  "context": {
+    "environment": "Room equipped with four ZED stereo cameras connected to a central CUDA workstation running ZED Fusion. The system tracks multiple persons using Body34 skeleton data and streams this to client computers.",
+    "coordinate_system": "Y-axis up, Z forward, X right. All rotations in degrees, all distances in meters. Global coordinates are synchronized between cameras.",
+    "data_schema": {
+      "knees_bent": "float (0–180) — 0° straight, 90° sitting posture.",
+      "torso_angle": "float (0–90) — 0° upright, 90° horizontal.",
+      "arm_left_azimuth": "float (-180–180) — left-right orientation of the left arm.",
+      "arm_left_elevation": "float (-90–90) — up-down angle of the left arm.",
+      "arm_right_azimuth": "float (-180–180) — left-right orientation of the right arm.",
+      "arm_right_elevation": "float (-90–90) — up-down angle of the right arm.",
+      "floor_distance": "float (meters) — distance between hip center and floor.",
+      "proximity_to_others": "float (meters) — distance between the closest keypoints of two persons."
+    },
+    "task_rules": [
+      "Classify the person’s posture or interaction per frame.",
+      "Use one short, factual sentence (<15 words).",
+      "Focus on recognizable motion or relational state (e.g., sitting, stretching, touching).",
+      "If uncertain, output 'uncertain'.",
+      "Never ask questions or request more data.",
+      "Never repeat numeric values or the input data."
+    ]
+  },
+
+  "response": {
+    "style": "short, deterministic, lowercase sentence.",
+    "examples": [
+      {
+        "input": "knees_bent=80, torso_angle=70, floor_distance=0.05",
+        "output": "person sitting on the ground leaning forward."
+      },
+      {
+        "input": "arm_right_azimuth=90, arm_right_elevation=10, torso_angle=10",
+        "output": "right arm stretched sideways."
+      },
+      {
+        "input": "arm_left_elevation=60, knees_bent=20",
+        "output": "left arm raised upward while standing."
+      },
+      {
+        "input": "proximity_to_others=0.3, arm_left_azimuth=80, torso_angle=15",
+        "output": "touches another person with left arm."
+      },
+      {
+        "input": "floor_distance=0.0, knees_bent=100, torso_angle=90",
+        "output": "person lying on the ground."
+      }
+    ]
+  },
+
+  "model": "phi4-mini",
+
+  "parameters": {
+    "temperature": 0.05,
+    "num_predict": 20,
+    "top_p": 0.8,
+    "num_ctx": 4096,
+    "stop": ["\\n"]
+  },
+
+  "optimization": {
+    "stream": true,
+    "max_history": 4,
+    "update_interval_ms": 150,
+    "target_latency_ms": 250
+  }
+}

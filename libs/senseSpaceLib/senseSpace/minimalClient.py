@@ -1,3 +1,12 @@
+# -----------------------------------------------------------------------------
+# Sense Space
+# -----------------------------------------------------------------------------
+# Minimal Client - Simple wrapper around SenseSpace client
+# -----------------------------------------------------------------------------
+# IAD, Zurich University of the Arts / zhdk.ch
+# Max Rheiner
+# -----------------------------------------------------------------------------
+
 import sys
 import time
 from typing import Callable, Optional

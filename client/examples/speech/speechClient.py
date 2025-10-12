@@ -1,54 +1,68 @@
 # -----------------------------------------------------------------------------
 # Sense Space
 # -----------------------------------------------------------------------------
-# LLM Speech Client Example with Voice Output
+# LLM Speech Client Example with Voice Output and Expert System
 # -----------------------------------------------------------------------------
 # IAD, Zurich University of the Arts / zhdk.ch
 # Max Rheiner
 # -----------------------------------------------------------------------------
 
+# -----------------------------------------------------------------------------
+# This example demonstrates voice-controlled pose analysis using:
+#   - SpeechAudioIO for speech-to-text (Whisper) and text-to-speech (Piper)
+#   - LLMClient with expert system for consistent, domain-specific responses
+#   - Voice commands: "describe/analyze/check my pose"
+#   - Automatic microphone muting during TTS playback
+#
+# The expert system provides:
+#   - Consistent response format and tone
+#   - Faster inference through conversation context
+#   - Better quality through few-shot learning
+#
+# Keyboard shortcuts (with --viz):
+#   SPACE - Describe pose
+#   A     - Analyze emotions
+#   B     - Suggest activity
+#   R     - Reset conversation context
+#
+# Voice commands:
+#   "describe/tell/scan my pose" - Describe current pose
+#   "analyze/emotion/feeling" - Analyze emotional state
+#   "exercise/activity/workout" - Suggest activity
+# -----------------------------------------------------------------------------
+
 import argparse
 import sys
-import os
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor
-import requests
-import subprocess
 
-# Add libs and client to path
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-libs_path = os.path.join(repo_root, 'libs')
-senseSpaceLib_path = os.path.join(libs_path, 'senseSpaceLib')
-client_path = os.path.join(repo_root, 'client')
+# Setup paths
+from senseSpaceLib.senseSpace import setup_paths
+setup_paths()
 
-if libs_path not in sys.path:
-    sys.path.insert(0, libs_path)
-if senseSpaceLib_path not in sys.path:
-    sys.path.insert(0, senseSpaceLib_path)
-if client_path not in sys.path:
-    sys.path.insert(0, client_path)
-
-from miniClient import MinimalClient
-from senseSpaceLib.senseSpace.protocol import Frame
+from senseSpaceLib.senseSpace import MinimalClient, Frame
 from senseSpaceLib.senseSpace.interpretation import interpret_pose_from_angles
+from senseSpaceLib.senseSpace.llmClient import LLMClient
 from speechIO import SpeechAudioIO
 
 
 class LLMSpeechClient:
-    """LLM integration with speech output using SpeechAudioIO"""
+    """LLM integration with speech output using SpeechAudioIO and Expert System"""
     
-    def __init__(self, model_name="llama3.2", enable_speech=False):
+    def __init__(self, model_name="phi4-mini:Q4_K_M", expert_json=None, enable_speech=False, confidence_threshold=70.0):
         self.persons = 0
-        self.executor = ThreadPoolExecutor(max_workers=2)
         self.latest_frame = None
         self.cur_people = []
-        self.confidence_threshold = 70.0
-        self.ollama_url = "http://localhost:11434"
-        self.model_name = model_name
-        self.ollama_ready = False
+        self.confidence_threshold = confidence_threshold
         self.enable_speech = enable_speech
         self.speech_io = None
+        
+        # Initialize LLM client with expert system
+        self.llm_client = LLMClient(
+            model_name=model_name,
+            expert_json=expert_json,
+            auto_download=True
+        )
         
         # Initialize SpeechAudioIO
         if enable_speech:
@@ -74,20 +88,12 @@ class LLMSpeechClient:
 
     def on_init(self):
         print(f"[INIT] Connected to server")
-
-        # Check/start Ollama
-        if not self._check_ollama_server():
-            print("[INIT] Starting Ollama server...")
-            if self._start_ollama_server():
-                time.sleep(2)
-            else:
-                print("[ERROR] Failed to start Ollama")
-                return
-
-        if self._check_ollama_server() and self._check_model_available():
-            print(f"[INIT] Using model: {self.model_name}")
-            self.ollama_ready = True
-            print("[INFO] Keyboard: SPACE=describe, A=analyze emotions, B=suggest activity")
+        
+        # Initialize LLM client
+        self.llm_client.on_init()
+        
+        if self.llm_client.ollama_ready:
+            print("[INFO] Keyboard: SPACE=describe, A=analyze emotions, B=suggest activity, R=reset context")
             print("[INFO] Voice: 'describe/analyze/check my pose'")
             
             # Start voice recognition
@@ -101,66 +107,9 @@ class LLMSpeechClient:
                     daemon=True
                 )
                 listen_thread.start()
-        else:
-            print(f"[ERROR] Model '{self.model_name}' not available")
-            self.ollama_ready = False
-
-    def _check_ollama_server(self):
-        try:
-            response = requests.get(f"{self.ollama_url}/api/tags", timeout=2)
-            return response.status_code == 200
-        except:
-            return False
-
-    def _start_ollama_server(self):
-        try:
-            subprocess.Popen(['ollama', 'serve'], 
-                           stdout=subprocess.DEVNULL, 
-                           stderr=subprocess.DEVNULL)
-            return True
-        except:
-            return False
-
-    def _check_model_available(self):
-        try:
-            response = requests.get(f"{self.ollama_url}/api/tags")
-            if response.status_code == 200:
-                models = response.json().get('models', [])
-                return any(self.model_name in m['name'] for m in models)
-            return False
-        except:
-            return False
-
-    def _llm_call_sync(self, pose_description, person_id, system_prompt, user_prompt, speak_response=False):
-        """Synchronous LLM call implementation"""
-        if not self.ollama_ready:
-            return
-        
-        try:
-            print(f"[LLM] Requesting analysis for person {person_id}...")
-            
-            payload = {
-                "model": self.model_name,
-                "prompt": f"{system_prompt}\n\n{user_prompt.format(pose_features=pose_description)}",
-                "stream": False,
-                "options": {"temperature": 0.7, "num_predict": 150}
-            }
-            
-            response = requests.post(f"{self.ollama_url}/api/generate", json=payload, timeout=30)
-            
-            if response.status_code == 200:
-                answer = response.json().get('response', 'No response')
-                print(f"[RESPONSE] {answer}")
-                
-                if speak_response and self.enable_speech and self.speech_io:
-                    self.speech_io.speak(answer, language="en")
-            else:
-                print(f"[ERROR] Request failed with status {response.status_code}")
-        except Exception as e:
-            print(f"[ERROR] LLM request failed: {e}")
 
     def _startLlmAnalysis(self, analyze_type, speak_response=True):
-        """Start LLM analysis based on type"""
+        """Start LLM analysis based on type using expert system"""
         if not self.cur_people:
             if speak_response and self.enable_speech and self.speech_io:
                 self.speech_io.speak("No person detected", language="en")
@@ -170,43 +119,43 @@ class LLMSpeechClient:
         angles = person.get_skeletal_angles()
         pose_description = interpret_pose_from_angles(angles)
         
+        # Build context-aware prompts for expert system
         prompts = {
-            'describe': {
-                'system': "You are a motion analysis assistant. Describe the pose in 1-2 sentences.",
-                'user': "Describe this pose:\n{pose_features}"
-            },
-            'emotion': {
-                'system': "You are a body language expert. Analyze the emotional state in 1-2 sentences.",
-                'user': "Analyze the emotional state from this pose:\n{pose_features}"
-            },
-            'activity': {
-                'system': "You are a fitness coach. Suggest one exercise in 1-2 sentences.",
-                'user': "Based on this pose, suggest an exercise:\n{pose_features}"
-            }
+            'describe': f"Describe this pose:\n\nPerson ID: {person.id}\nConfidence: {person.confidence:.1f}%\n\n{pose_description}",
+            'emotion': f"Analyze the emotional state from this pose:\n\nPerson ID: {person.id}\nConfidence: {person.confidence:.1f}%\n\n{pose_description}",
+            'activity': f"Suggest an exercise based on this pose:\n\nPerson ID: {person.id}\nConfidence: {person.confidence:.1f}%\n\n{pose_description}"
         }
         
         prompt = prompts.get(analyze_type)
-        if prompt:
-            # Run async to avoid blocking
-            self.executor.submit(
-                self._llm_call_sync,
-                pose_description,
-                person.id,
-                prompt['system'],
-                prompt['user'],
-                speak_response
-            )
+        if not prompt:
+            return
+        
+        # Callback to handle response and speak it
+        def on_response(response: str):
+            if response:
+                print(f"[EXPERT] {response}")
+                if speak_response and self.enable_speech and self.speech_io:
+                    self.speech_io.speak(response, language="en")
+        
+        # Use expert system call (maintains conversation context)
+        self.llm_client.call_expert_async(prompt, callback=on_response)
     
     def trigger_llm_analysis(self, key):
         """Handle keyboard input"""
-        if not self.ollama_ready:
+        if not self.llm_client.ollama_ready:
             return
         
-        key_map = {' ': 'describe', 'a': 'emotion', 'b': 'activity'}
-        analyze_type = key_map.get(key)
-        
-        if analyze_type:
-            self._startLlmAnalysis(analyze_type, speak_response=self.enable_speech)
+        if key == ' ':
+            self._startLlmAnalysis('describe', speak_response=self.enable_speech)
+        elif key == 'a':
+            self._startLlmAnalysis('emotion', speak_response=self.enable_speech)
+        elif key == 'b':
+            self._startLlmAnalysis('activity', speak_response=self.enable_speech)
+        elif key == 'r':
+            self.llm_client.reset_context()
+            print("[INFO] Conversation context reset")
+            if self.enable_speech and self.speech_io:
+                self.speech_io.speak("Context reset", language="en")
 
     def _handle_voice_command(self, language: str, text: str):
         """Process voice commands"""
@@ -214,6 +163,14 @@ class LLMSpeechClient:
         print(f"[VOICE] [{language.upper()}] Recognized: '{text}'")
         
         if len(text_lower) < 5:
+            return
+        
+        # Check for reset command
+        if "reset" in text_lower or "clear" in text_lower:
+            self.llm_client.reset_context()
+            print("[VOICE] ✓ Context reset")
+            if self.enable_speech and self.speech_io:
+                self.speech_io.speak("Context reset", language="en")
             return
         
         # Determine analysis type
@@ -248,19 +205,31 @@ class LLMSpeechClient:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SenseSpace LLM Speech Client")
+    parser = argparse.ArgumentParser(
+        description="SenseSpace LLM Speech Client with Expert System",
+        epilog="Example: python speechClient.py --viz --expert ../data/expert_pose_config.json"
+    )
     parser.add_argument("--server", "-s", default="localhost", help="Server IP")
     parser.add_argument("--port", "-p", type=int, default=12345, help="Server port")
     parser.add_argument("--viz", action="store_true", help="Enable visualization")
-    parser.add_argument("--model", "-m", default="llama3.2", help="Ollama model name")
+    parser.add_argument("--model", "-m", default="phi4-mini:Q4_K_M", 
+                       help="Ollama model name (default: phi4-mini for fast inference)")
+    parser.add_argument("--expert", "-e", default="../data/expert_pose_config.json",
+                       help="Path to expert configuration JSON")
     parser.add_argument("--no-speech", action="store_true", help="Disable speech (TTS + STT)")
+    parser.add_argument("--confidence", "-c", type=float, default=70.0,
+                       help="Minimum confidence threshold for person detection")
     args = parser.parse_args()
     
+    # Create LLM speech client with expert system
     llm_client = LLMSpeechClient(
         model_name=args.model,
-        enable_speech=not args.no_speech
+        expert_json=args.expert,
+        enable_speech=not args.no_speech,
+        confidence_threshold=args.confidence
     )
     
+    # Create minimal client
     client = MinimalClient(
         server_ip=args.server,
         server_port=args.port,
@@ -270,6 +239,7 @@ def main():
         on_connection_changed=llm_client.on_connection_changed
     )
     
+    # Set keyboard callback for visualization mode
     if args.viz:
         client.llm_callback = llm_client.trigger_llm_analysis
     
