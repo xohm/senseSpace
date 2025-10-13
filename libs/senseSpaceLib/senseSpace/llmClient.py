@@ -277,14 +277,32 @@ class LLMClient:
                 "stream": False,
                 "options": options
             }
-                        
-            start_time = time.time()
-            response = requests.post(
-                f"{self.ollama_url}/api/chat",
-                json=payload,
-                timeout=30
-            )
-            elapsed_ms = int((time.time() - start_time) * 1000)
+            
+            # Suppress Ollama verbose output
+            import sys
+            from io import StringIO
+            
+            # Save original stderr/stdout
+            old_stderr = sys.stderr
+            old_stdout = sys.stdout
+            
+            # Redirect to null if not in verbose mode
+            if not self.verbose:
+                sys.stderr = StringIO()
+                sys.stdout = StringIO()
+            
+            try:
+                start_time = time.time()
+                response = requests.post(
+                    f"{self.ollama_url}/api/chat",
+                    json=payload,
+                    timeout=30
+                )
+                elapsed_ms = int((time.time() - start_time) * 1000)
+            finally:
+                # Always restore stderr/stdout
+                sys.stderr = old_stderr
+                sys.stdout = old_stdout
             
             if response.status_code == 200:
                 result = response.json()
@@ -298,8 +316,9 @@ class LLMClient:
                 # Remove [END] marker if present
                 assistant_message = assistant_message.replace("[END]", "").strip()
                 
-                # Always show timing with response
-                print(f"[{elapsed_ms}ms] reply time\n")
+                # Only show timing if verbose OR if there's actually output
+                if self.verbose or assistant_message:
+                    print(f"[{elapsed_ms}ms] reply time")
                 
                 return assistant_message
             else:

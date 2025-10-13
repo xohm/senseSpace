@@ -40,9 +40,9 @@
   "ollama_options": {
     "temperature": 0.3,
     "top_p": 0.8,
-    "num_predict": 25,
+    "num_predict": 30,
     "num_ctx": 1024,
     "repeat_penalty": 1.5,
-    "stop": [".", "\n\n"]
+    "stop": ["[END]"]
   }
 }
