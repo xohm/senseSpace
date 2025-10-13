@@ -87,9 +87,16 @@ class OllamaLLMClient:
     def _start_ollama_server(self):
         """Attempt to start Ollama server"""
         try:
-            subprocess.Popen(['ollama', 'serve'], 
-                           stdout=subprocess.DEVNULL, 
-                           stderr=subprocess.DEVNULL)
+            # Suppress all Ollama server output
+            import os
+            devnull = open(os.devnull, 'w')
+            subprocess.Popen(
+                ['ollama', 'serve'],
+                stdout=devnull,
+                stderr=devnull,
+                # Prevent subprocess from inheriting parent's file descriptors
+                close_fds=True
+            )
             return True
         except:
             return False

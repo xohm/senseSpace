@@ -58,19 +58,15 @@ class Person:
             skeleton=[Joint.from_dict(j) for j in d["skeleton"]]
         )
 
-    def get_skeletal_angles(self) -> Dict[SkeletonAngle, Union[float, np.ndarray, None]]:
+    def get_skeletal_angles(self) -> dict:
         """
-        Calculate all meaningful angles from this person's skeleton.
+        Calculate all skeletal angles for this person
         
         Returns:
-            dict: {SkeletonAngle: value} where value is either:
-                  - float (angle in degrees)
-                  - np.ndarray (direction vector for orientations)
-                  - None (if joints not available)
+            Dictionary containing skeletal measurements using SkeletonAngle enum keys
         """
-        if not self.skeleton or len(self.skeleton) == 0:
-            return {}
-
+        angles = {}
+        
         # -----------------------------------------------------------
         # Helper functions
         # -----------------------------------------------------------
@@ -134,11 +130,11 @@ class Person:
             
             Returns:
                 (azimuth, elevation) in degrees
-                - azimuth: left(-)/right(+) angle around Y axis (yaw)
+                - azimuth: left(+)/right(-) angle around Y axis (yaw)
                 - elevation: up(+)/down(-) angle from horizontal (pitch)
             """
             x, y, z = v
-            azimuth = np.degrees(np.arctan2(x, z))  # left-right around Y axis
+            azimuth = np.degrees(np.arctan2(x, z))  # Keep original, body frame is now correct
             elevation = np.degrees(np.arcsin(np.clip(y, -1.0, 1.0)))  # up-down
             return float(azimuth), float(elevation)
 
@@ -261,8 +257,6 @@ class Person:
         right_eye = get_joint_by_enum(Body34Joint.RIGHT_EYE)
         nose = get_joint_by_enum(Body34Joint.NOSE)
 
-        angles = {}
-
         # -----------------------------------------------------------
         # Body coordinate system (local frame)
         # -----------------------------------------------------------
@@ -278,11 +272,14 @@ class Person:
             
             # Z-axis: forward direction (perpendicular to shoulders, in XZ plane)
             up_world = np.array([0, 1, 0])
-            z_body = np.cross(x_body, up_world)
+            z_body = np.cross(up_world, x_body)  # FIX: Swap order to get forward, not backward
             z_body = z_body / (np.linalg.norm(z_body) + 1e-8)
             
             # Y-axis: up direction (perpendicular to X and Z)
             y_body = np.cross(z_body, x_body)
+            # Ensure Y points up (positive Y in world space)
+            if y_body[1] < 0:  # If Y component is negative, flip it
+                y_body = -y_body
             y_body = y_body / (np.linalg.norm(y_body) + 1e-8)
             
             # Store body axes
@@ -468,6 +465,12 @@ class Person:
                 angles[SkeletonAngle.RIGHT_LEG_AZIMUTH] = r_leg_az
                 angles[SkeletonAngle.RIGHT_LEG_ELEVATION] = r_leg_el
 
+        # -----------------------------------------------------------
+        # Legs - DELETE THIS COMPLETE SECTION (lines 467-520)
+        # -----------------------------------------------------------
+        
+        # ... rest of existing code for hip/knee angles, body position ...
+        
         return angles
 
 

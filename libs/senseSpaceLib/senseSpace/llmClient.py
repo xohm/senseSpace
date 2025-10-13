@@ -22,28 +22,34 @@ import json
 import requests
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 
 class LLMClient:
     """Generic wrapper for running expert or general LLM systems through Ollama."""
 
-    def __init__(self, model_name="phi4-mini", expert_json=None, auto_download=True):
-        self.executor = ThreadPoolExecutor(max_workers=4)
+    def __init__(self, model_name=None, expert_json=None, auto_download=False, verbose=False):
         self.ollama_url = "http://localhost:11434"
-        self.model_name = model_name
-        self.auto_download = auto_download
         self.ollama_ready = False
-
-        # Expert context
-        self.expert = None
-        self.messages = []
-        self.params = {}
-        self._chat_history = None  # persistent context for performance
-
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self.expert_messages = []
+        self.ollama_options = {}
+        self.input_format = "detailed"
+        self.auto_download = auto_download
+        self.verbose = verbose  # Store verbose flag
+        
+        # Load expert config first (may override model_name)
         if expert_json:
-            self.load_expert(expert_json)
-        else:
-            print("[INIT] No expert definition provided yet.")
+            self.load_expert_config(expert_json)
+        
+        # Only use command-line model if expert config didn't set one
+        if model_name is not None:
+            self.model_name = model_name
+            if self.verbose:
+                print(f"[LOAD] Model overridden: {self.model_name}")
+        elif not hasattr(self, 'model_name'):
+            # No expert config and no command-line arg
+            self.model_name = "llama3.2:1b"
 
     # --------------------------------------------------------------------------
     # Initialization / connection
@@ -165,10 +171,55 @@ class LLMClient:
         except Exception as e:
             print(f"[ERROR] Failed to load expert definition: {e}")
 
+    def load_expert_config(self, json_path: str):
+        """Load expert system configuration from JSON"""
+        try:
+            with open(json_path, 'r') as f:
+                config = json.load(f)
+            
+            if self.verbose:
+                print(f"[LOAD] Loading expert config from {json_path}")
+            
+            # Override model name if specified in config
+            if "model" in config:
+                self.model_name = config["model"]
+                if self.verbose:
+                    print(f"[LOAD] Model from config: {self.model_name}")
+            
+            # Build system message from config
+            system_content = self._build_system_message(config)
+            
+            self.expert_messages = [
+                {"role": "system", "content": system_content}
+            ]
+            
+            # Store ollama options if provided
+            self.ollama_options = config.get("ollama_options", {})
+            
+            if self.verbose:
+                print(f"[LOAD] Expert: {config.get('name', 'Unknown')}")
+                if self.ollama_options:
+                    print(f"[LOAD] Options: num_predict={self.ollama_options.get('num_predict', 'default')}, "
+                          f"ctx={self.ollama_options.get('num_ctx', 'default')}")
+            
+        except FileNotFoundError:
+            print(f"[ERROR] Config not found: {json_path}")
+            self.expert_messages = []
+            self.ollama_options = {}
+        except json.JSONDecodeError as e:
+            print(f"[ERROR] Invalid JSON: {e}")
+            self.expert_messages = []
+            self.ollama_options = {}
+
     def reset_context(self):
-        """Clear the persistent chat memory."""
-        self._chat_history = None
-        print("[CHAT] Context cleared.")
+        """Reset conversation context to initial system message"""
+        if self.expert_messages and len(self.expert_messages) > 0:
+            # Keep only the system message (first message)
+            system_msg = self.expert_messages[0]
+            self.expert_messages = [system_msg]
+            print("[CHAT] Conversation context reset")
+        else:
+            print("[WARN] No expert context to reset")
 
     # --------------------------------------------------------------------------
     # Optimized chat-based request (persistent context)
@@ -208,6 +259,61 @@ class LLMClient:
             print(f"[ERROR] Chat request failed: {e}")
             return ""
 
+    def _call_ollama_chat(self, messages: list) -> Optional[str]:
+        """Internal: Call Ollama chat API"""
+        try:
+            default_options = {
+                "temperature": 0.3,
+                "top_p": 0.9,
+                "num_predict": 100,
+                "stop": ["\n\n\n"]
+            }
+            
+            options = {**default_options, **self.ollama_options}
+            
+            payload = {
+                "model": self.model_name,
+                "messages": messages,
+                "stream": False,
+                "options": options
+            }
+                        
+            start_time = time.time()
+            response = requests.post(
+                f"{self.ollama_url}/api/chat",
+                json=payload,
+                timeout=30
+            )
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            
+            if response.status_code == 200:
+                result = response.json()
+                assistant_message = result.get("message", {}).get("content", "").strip()
+                
+                if not assistant_message:
+                    if self.verbose:
+                        print(f"[WARN] Empty response")
+                    return None
+                
+                # Remove [END] marker if present
+                assistant_message = assistant_message.replace("[END]", "").strip()
+                
+                # Always show timing with response
+                print(f"[{elapsed_ms}ms] reply time\n")
+                
+                return assistant_message
+            else:
+                error_msg = response.json().get("error", "Unknown error")
+                print(f"[ERROR] {response.status_code}: {error_msg}")
+                return None
+                
+        except requests.exceptions.Timeout:
+            print("[ERROR] Timeout")
+            return None
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            return None
+
     # --------------------------------------------------------------------------
     # Expert Calls
     # --------------------------------------------------------------------------
@@ -219,22 +325,38 @@ class LLMClient:
             return ""
         return self._llm_chat_request(input_data)
 
-    def call_expert_async(self, input_data: str, callback=None):
-        """Asynchronous expert call using persistent chat context."""
-        if not self.ollama_ready or not self.expert:
-            print("[ERROR] LLM not ready or expert not loaded.")
-            return None
-
-        def worker():
-            res = self._llm_chat_request(input_data)
+    def call_expert_async(self, user_input: str, callback=None):
+        """
+        Call the expert system asynchronously with user input
+        Stateless - only sends system message + current input
+        """
+        if not self.ollama_ready:
+            print("[ERROR] Ollama not ready.")
             if callback:
-                try:
-                    callback(res)
-                except Exception as cb_err:
-                    print(f"[WARN] Callback error: {cb_err}")
-            return res
-
-        return self.executor.submit(worker)
+                callback(None)
+            return
+        
+        # Build user message
+        user_message = {
+            "role": "user",
+            "content": user_input
+        }
+        
+        # Always stateless: system message + current input only
+        if len(self.expert_messages) > 0:
+            system_msg = self.expert_messages[0]
+            messages_to_send = [system_msg, user_message]
+        else:
+            messages_to_send = [user_message]
+        
+        # Submit to thread pool
+        future = self.executor.submit(
+            self._call_ollama_chat,
+            messages_to_send
+        )
+        
+        if callback:
+            future.add_done_callback(lambda f: callback(f.result()))
 
     # --------------------------------------------------------------------------
     # Generic Model Calls (no context)
@@ -316,3 +438,31 @@ class LLMClient:
         """Close thread pool cleanly."""
         self.executor.shutdown(wait=False)
         print("[LLM] Thread pool shut down.")
+
+    def _build_system_message(self, config: dict) -> str:
+        """Build system message from expert configuration"""
+        parts = []
+        
+        # Add role and task clearly
+        if "context" in config:
+            context = config["context"]
+            if "role" in context:
+                parts.append(context['role'])
+            if "task" in context:
+                parts.append(context['task'])
+        
+        # Add rules as bullet points
+        if "rules" in config:
+            parts.append("\nRules:")
+            for rule in config["rules"]:
+                parts.append(f"• {rule}")
+        
+        # Add examples WITHOUT the User:/You: format (just show input → output)
+        if "examples" in config and len(config["examples"]) > 0:
+            parts.append("\nExamples:")
+            for example in config["examples"]:
+                parts.append(f"Input: {example['input']}")
+                parts.append(f"Output: {example['output']}")
+                parts.append("")  # blank line between examples
+        
+        return "\n".join(parts)

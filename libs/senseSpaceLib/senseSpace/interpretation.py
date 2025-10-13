@@ -5,191 +5,249 @@ This module provides human-readable interpretations of skeleton angles,
 accounting for tracking limitations and providing semantic descriptions.
 """
 
-import numpy as np
-from typing import Dict, Union, List
 from .enums import SkeletonAngle
+import numpy as np
 
 
-def interpret_pose_from_angles(angles: Dict[SkeletonAngle, Union[float, np.ndarray, None]]) -> str:
+def interpret_pose_from_angles(angles: dict) -> str:
     """
-    Interpret pose features from skeleton angles into human-readable descriptions.
-    
-    This function accounts for skeleton tracking limitations (e.g., limited head rotation range)
-    and provides semantic descriptions suitable for LLM processing or human understanding.
+    Interpret skeletal angles into a human-readable pose description
     
     Args:
-        angles: dict from Person.get_skeletal_angles()
+        angles: Dictionary of skeletal angles from get_skeletal_angles()
         
     Returns:
-        str: Human-readable pose description with features and measurements
+        Formatted string describing the detected pose
     """
-    if not angles:
-        return "No skeleton data available"
-
-    desc = []
-    features = []
-
-    # -----------------------------------------------------------
+    descriptions = []
+    numeric_measurements = []
+    
     # Body orientation
-    # -----------------------------------------------------------
-    if SkeletonAngle.BODY_FORWARD_DIRECTION in angles:
-        forward = angles[SkeletonAngle.BODY_FORWARD_DIRECTION]
-        features.append(f"Body facing: [{forward[0]:.2f}, {forward[1]:.2f}, {forward[2]:.2f}]")
-
-    # -----------------------------------------------------------
-    # Head orientation
-    # NOTE: Skeleton tracking has limited head rotation range (~±45° max)
-    # Convention: Positive = LEFT (counterclockwise from above), Negative = RIGHT (clockwise)
-    # -----------------------------------------------------------
+    body_facing = angles.get(SkeletonAngle.BODY_FORWARD_DIRECTION)
+    if body_facing is not None:
+        numeric_measurements.append(f"• Body facing: [{body_facing[0]:.2f}, {body_facing[1]:.2f}, {body_facing[2]:.2f}]")
+    
+    # Head orientation - FIX THE THRESHOLD
     head_rotation = angles.get(SkeletonAngle.HEAD_ROTATION)
     if head_rotation is not None:
-        # Skeleton tracking typically maxes out around ±30-45°
-        # We scale interpretation accordingly
-        if abs(head_rotation) < 10:
-            desc.append("Head facing forward")
-            direction = "forward"
-        elif head_rotation > 30:
-            # At tracking limit - likely turning further left
-            desc.append(f"Head turned strongly left ({head_rotation:.0f}°, likely 60-90°)")
-            direction = "strongly left (at tracking limit)"
-        elif head_rotation > 15:
-            desc.append(f"Head turned left ({head_rotation:.0f}°)")
+        # Use 10° threshold for better detection
+        if head_rotation > 10:
             direction = "left"
-        elif head_rotation < -30:
-            # At tracking limit - likely turning further right
-            desc.append(f"Head turned strongly right ({abs(head_rotation):.0f}°, likely 60-90°)")
-            direction = "strongly right (at tracking limit)"
-        elif head_rotation < -15:
-            desc.append(f"Head turned right ({abs(head_rotation):.0f}°)")
+        elif head_rotation < -10:
             direction = "right"
         else:
-            desc.append("Head facing forward")
             direction = "forward"
-        
-        features.append(f"Head rotation: {head_rotation:.0f}° ({direction})")
-
+        descriptions.append(f"Head facing {direction}")
+        numeric_measurements.append(f"• Head rotation: {head_rotation:.0f}° ({direction})")
+    
+    # Neck tilt - DON'T add to descriptions, only to numeric
     neck_tilt = angles.get(SkeletonAngle.NECK_TILT)
     if neck_tilt is not None:
-        if abs(neck_tilt) < 10:
-            desc.append("Head level")
+        numeric_measurements.append(f"• Neck tilt: {neck_tilt:.0f}°")
+    
+    # Head pitch (looking up/down) - USE ROTATION, NOT TILT
+    head_pitch = angles.get(SkeletonAngle.HEAD_LOOK_UP_DOWN)
+    if head_pitch is not None:
+        numeric_measurements.append(f"• Head pitch: {head_pitch:.0f}°")
+        # Determine looking direction based on ROTATION first, then pitch
+        if head_rotation is not None and abs(head_rotation) > 15:
+            # Head is turned left or right
+            if head_rotation > 15:
+                descriptions.append("Looking left")
+            else:
+                descriptions.append("Looking right")
         else:
-            side = "left" if neck_tilt < 0 else "right"
-            desc.append(f"Head tilted {side} ({abs(neck_tilt):.0f}°)")
-        features.append(f"Neck tilt: {neck_tilt:.0f}°")
-
-    head_updown = angles.get(SkeletonAngle.HEAD_LOOK_UP_DOWN)
-    if head_updown is not None:
-        if head_updown < -15:
-            desc.append("Looking down")
-        elif head_updown > 15:
-            desc.append("Looking up")
-        else:
-            desc.append("Looking straight ahead")
-        features.append(f"Head pitch: {head_updown:.0f}°")
-
-    # -----------------------------------------------------------
-    # Arms - 3D orientation
-    # -----------------------------------------------------------
-    for side, az_key, el_key, elbow_key in [
-        ("Left", SkeletonAngle.LEFT_ARM_AZIMUTH, SkeletonAngle.LEFT_ARM_ELEVATION, SkeletonAngle.LEFT_ELBOW_ANGLE),
-        ("Right", SkeletonAngle.RIGHT_ARM_AZIMUTH, SkeletonAngle.RIGHT_ARM_ELEVATION, SkeletonAngle.RIGHT_ELBOW_ANGLE)
-    ]:
-        azimuth = angles.get(az_key)
-        elevation = angles.get(el_key)
-        elbow_angle = angles.get(elbow_key)
+            # Head is facing forward, check pitch for up/down
+            if head_pitch > 15:
+                descriptions.append("Looking up")
+            elif head_pitch < -15:
+                descriptions.append("Looking down")
+            else:
+                descriptions.append("Looking straight ahead")
+    
+    # Arms
+    for side in ['LEFT', 'RIGHT']:
+        arm_elevation = angles.get(SkeletonAngle[f'{side}_ARM_ELEVATION'])
+        arm_azimuth = angles.get(SkeletonAngle[f'{side}_ARM_AZIMUTH'])
+        elbow_angle = angles.get(SkeletonAngle[f'{side}_ELBOW_ANGLE'])
         
-        if azimuth is not None and elevation is not None:
-            # Describe direction
-            if elevation > 60:
-                elev_desc = "raised overhead"
-            elif elevation > 20:
-                elev_desc = "raised"
-            elif elevation > -20:
-                elev_desc = "extended horizontally"
-            elif elevation > -60:
-                elev_desc = "lowered"
-            else:
-                elev_desc = "down"
-            
-            if abs(azimuth) < 20:
-                az_desc = "forward"
-            elif azimuth > 60:
-                az_desc = "to the right"
-            elif azimuth > 20:
-                az_desc = "diagonally right"
-            elif azimuth < -60:
-                az_desc = "to the left"
-            elif azimuth < -20:
-                az_desc = "diagonally left"
-            else:
-                az_desc = ""
-            
-            desc.append(f"{side} arm {elev_desc} {az_desc}".strip())
-            features.append(f"{side} arm: elevation={elevation:.0f}°, azimuth={azimuth:.0f}°")
+        if arm_elevation is not None:
+            arm_desc = _describe_arm_position(arm_elevation, arm_azimuth, side.lower())
+            descriptions.append(arm_desc)
+            numeric_measurements.append(f"• {side.capitalize()} arm: elevation={arm_elevation:.0f}°, azimuth={arm_azimuth:.0f}°")
         
         if elbow_angle is not None:
-            if elbow_angle < 90:
-                desc.append(f"{side} elbow tightly bent ({elbow_angle:.0f}°)")
-            elif elbow_angle < 140:
-                desc.append(f"{side} elbow bent ({elbow_angle:.0f}°)")
-            features.append(f"{side} elbow: {elbow_angle:.0f}°")
-
-    # -----------------------------------------------------------
-    # Legs and body position
-    # -----------------------------------------------------------
+            elbow_state = _describe_elbow(elbow_angle)
+            if elbow_state:
+                descriptions.append(f"{side.capitalize()} elbow {elbow_state} ({elbow_angle:.0f}°)")
+                numeric_measurements.append(f"• {side.capitalize()} elbow: {elbow_angle:.0f}°")
+    
+    # Body position classification - REWRITE THIS SECTION
     left_hip = angles.get(SkeletonAngle.LEFT_HIP_ANGLE)
     right_hip = angles.get(SkeletonAngle.RIGHT_HIP_ANGLE)
     left_knee = angles.get(SkeletonAngle.LEFT_KNEE_ANGLE)
     right_knee = angles.get(SkeletonAngle.RIGHT_KNEE_ANGLE)
-
-    hip_angles = [a for a in [left_hip, right_hip] if a is not None]
-    knee_angles = [a for a in [left_knee, right_knee] if a is not None]
-
-    if hip_angles and knee_angles:
-        avg_hip = np.mean(hip_angles)
-        avg_knee = np.mean(knee_angles)
-        
-        # Body position classification
-        if avg_hip < 120 and avg_knee < 130:
-            desc.append("Body position: SITTING")
-        elif avg_hip < 140:
-            desc.append("Body position: CROUCHING")
-        elif avg_knee < 140:
-            desc.append("Body position: STANDING with bent knees")
+    
+    avg_hip = (left_hip + right_hip) / 2 if left_hip and right_hip else None
+    avg_knee = (left_knee + right_knee) / 2 if left_knee and right_knee else None
+    
+    body_position = "UNKNOWN"
+    if avg_hip and avg_knee:
+        # Standing: knees > 140° (even if hips slightly bent from posture)
+        if avg_knee > 140:
+            body_position = "STANDING"
+        # Sitting: hips < 140° AND knees < 120° (both significantly bent)
+        elif avg_hip < 140 and avg_knee < 120:
+            body_position = "SITTING"
+        # Laying: hips < 100° AND knees < 90° (deeply bent, horizontal)
+        elif avg_hip < 100 and avg_knee < 90:
+            body_position = "LAYING"
         else:
-            desc.append("Body position: STANDING")
+            # In-between = standing with bent knees
+            body_position = "STANDING"
+    
+    descriptions.append(f"Body position: {body_position}")
+    
+    # Legs - ADD LEG DESCRIPTIONS HERE
+    for side in ['LEFT', 'RIGHT']:
+        leg_elevation = angles.get(SkeletonAngle[f'{side}_LEG_ELEVATION'])
+        leg_azimuth = angles.get(SkeletonAngle[f'{side}_LEG_AZIMUTH'])
+        hip_angle = angles.get(SkeletonAngle[f'{side}_HIP_ANGLE'])
+        knee_angle = angles.get(SkeletonAngle[f'{side}_KNEE_ANGLE'])
         
-        features.append(f"Avg hip angle: {avg_hip:.0f}°")
-        features.append(f"Avg knee angle: {avg_knee:.0f}°")
-
-    # Individual leg descriptions
-    for side, hip_key, knee_key in [
-        ("Left", SkeletonAngle.LEFT_HIP_ANGLE, SkeletonAngle.LEFT_KNEE_ANGLE),
-        ("Right", SkeletonAngle.RIGHT_HIP_ANGLE, SkeletonAngle.RIGHT_KNEE_ANGLE)
-    ]:
-        hip_angle = angles.get(hip_key)
-        knee_angle = angles.get(knee_key)
+        # Add leg orientation to descriptions if available
+        if leg_elevation is not None and leg_azimuth is not None:
+            leg_desc = _describe_leg_position(leg_elevation, leg_azimuth, side.lower())
+            if leg_desc:
+                descriptions.append(leg_desc)
+            numeric_measurements.append(f"• {side.capitalize()} leg: elevation={leg_elevation:.0f}°, azimuth={leg_azimuth:.0f}°")
         
         if hip_angle is not None:
-            if hip_angle < 100:
-                desc.append(f"{side} hip deeply bent ({hip_angle:.0f}°)")
-            elif hip_angle < 140:
-                desc.append(f"{side} hip bent ({hip_angle:.0f}°)")
-            features.append(f"{side} hip: {hip_angle:.0f}°")
-            
+            hip_state = _describe_hip(hip_angle)
+            if hip_state:
+                descriptions.append(f"{side.capitalize()} hip {hip_state} ({hip_angle:.0f}°)")
+                numeric_measurements.append(f"• {side.capitalize()} hip: {hip_angle:.0f}°")
+        
         if knee_angle is not None:
-            if knee_angle < 100:
-                desc.append(f"{side} knee deeply bent ({knee_angle:.0f}°)")
-            elif knee_angle < 140:
-                desc.append(f"{side} knee bent ({knee_angle:.0f}°)")
-            features.append(f"{side} knee: {knee_angle:.0f}°")
+            knee_state = _describe_knee(knee_angle)
+            if knee_state:
+                descriptions.append(f"{side.capitalize()} knee {knee_state} ({knee_angle:.0f}°)")
+                numeric_measurements.append(f"• {side.capitalize()} knee: {knee_angle:.0f}°")
+    
+    # Hip and knee averages
+    if avg_hip:
+        numeric_measurements.append(f"• Avg hip angle: {avg_hip:.0f}°")
+    if avg_knee:
+        numeric_measurements.append(f"• Avg knee angle: {avg_knee:.0f}°")
+    
+    # Build final output
+    output = "Detected pose features:\n\n"
+    for desc in descriptions:
+        output += f"• {desc}\n"
+    
+    if numeric_measurements:
+        output += "\nNumeric measurements:\n"
+        for measurement in numeric_measurements:
+            output += f"{measurement}\n"
+    
+    return output.strip()
 
-    # -----------------------------------------------------------
-    # Format output
-    # -----------------------------------------------------------
-    result = []
-    result.append("Detected pose features:\n")
-    result += ["• " + d for d in desc]
-    result.append("\nNumeric measurements:")
-    result += ["• " + f for f in features]
-    return "\n".join(result)
+
+def _describe_leg_position(elevation: float, azimuth: float, side: str) -> str:
+    """Describe leg position based on elevation and azimuth"""
+    desc_parts = [f"{side.capitalize()} leg"]
+    
+    # Elevation description (note: elevation is negative when leg points down)
+    if elevation > -30:  # Leg raised or horizontal
+        desc_parts.append("raised")
+    elif elevation > -60:  # Slightly lowered
+        desc_parts.append("slightly lowered")
+    else:  # Normal standing/sitting position
+        return None  # Don't describe normal leg position
+    
+    # Azimuth description (lateral position)
+    if abs(azimuth) > 20:
+        if side == 'left':
+            if azimuth < 0:
+                desc_parts.append("to the left")
+            else:
+                desc_parts.append("crossing right")
+        else:  # right leg
+            if azimuth > 0:
+                desc_parts.append("to the right")
+            else:
+                desc_parts.append("crossing left")
+    
+    # Only return if there's something interesting to say
+    if len(desc_parts) > 2:
+        return " ".join(desc_parts)
+    return None
+
+
+def _describe_arm_position(elevation: float, azimuth: float, side: str) -> str:
+    """Describe arm position based on elevation and azimuth"""
+    desc_parts = [f"{side.capitalize()} arm"]
+    
+    # Elevation description (vertical angle)
+    if elevation > 60:
+        desc_parts.append("raised overhead")
+    elif elevation > 20:
+        desc_parts.append("raised")
+    elif elevation > -20:
+        desc_parts.append("extended horizontally")
+    elif elevation > -60:
+        desc_parts.append("lowered")
+    else:
+        desc_parts.append("down")
+    
+    # Azimuth description (horizontal direction)
+    # For left arm: negative azimuth = to the left, positive = to the right
+    # For right arm: positive azimuth = to the right, negative = to the left
+    if side == 'left':
+        if azimuth < -45:
+            desc_parts.append("to the left")
+        elif azimuth > 45:
+            desc_parts.append("to the right")
+    else:  # right arm
+        if azimuth > 45:
+            desc_parts.append("to the right")
+        elif azimuth < -45:
+            desc_parts.append("to the left")
+    
+    return " ".join(desc_parts)
+
+
+def _describe_elbow(angle: float) -> str:
+    """Describe elbow bend state"""
+    if angle < 90:
+        return "deeply bent"
+    elif angle < 140:
+        return "bent"
+    elif angle > 170:
+        return None  # Straight, no need to mention
+    else:
+        return "slightly bent"
+
+
+def _describe_hip(angle: float) -> str:
+    """Describe hip bend state"""
+    if angle < 100:
+        return "deeply bent"
+    elif angle < 140:
+        return "bent"
+    elif angle > 170:
+        return None  # Straight
+    else:
+        return "slightly bent"
+
+
+def _describe_knee(angle: float) -> str:
+    """Describe knee bend state"""
+    if angle < 90:
+        return "deeply bent"
+    elif angle < 140:
+        return "bent"
+    elif angle > 170:
+        return None  # Straight
+    else:
+        return "slightly bent"

@@ -163,11 +163,11 @@ class SpeechAudioIO:
         mic_index: Optional[int] = None,
         speaker_index: Optional[int] = None,
         whisper_model: str = "tiny",
-        whisper_device: Optional[str] = None,  # None = auto-detect, "cpu" = force CPU, "cuda" = force CUDA
-        whisper_language: Optional[str] = None,  # Force specific language (e.g., "en"), None = auto-detect
-        piper_model_en: Optional[str] = "en_US-amy-medium",  # English voice
-        piper_model_de: Optional[str] = "de_DE-thorsten_emotional-medium",  # German voice
-        piper_model_fallback: Optional[str] = "en_US-lessac-medium",  # Fallback for unknown languages
+        whisper_device: Optional[str] = None,
+        whisper_language: Optional[str] = None,
+        piper_model_en: Optional[str] = "en_US-amy-medium",
+        piper_model_de: Optional[str] = "de_DE-thorsten_emotional-medium",
+        piper_model_fallback: Optional[str] = "en_US-lessac-medium",
         auto_download_models: bool = True,
         silence_duration: float = 1.2,
         vad_aggressiveness: int = 2,
@@ -175,6 +175,25 @@ class SpeechAudioIO:
         min_rms_threshold: float = 0.015
     ):
         self.mic_index = mic_index
+        
+        # Validate speaker device if provided
+        if speaker_index is not None:
+            try:
+                device_info = sd.query_devices(speaker_index)
+                if device_info['max_output_channels'] == 0:
+                    print(f"❌ Device {speaker_index} '{device_info['name']}' is an INPUT device, not an output device!")
+                    print(f"   Available OUTPUT devices:")
+                    for i, d in enumerate(sd.query_devices()):
+                        if d['max_output_channels'] > 0:
+                            print(f"     [{i}] {d['name']}")
+                    print(f"   Using auto-selection instead.")
+                    speaker_index = None
+                else:
+                    print(f"✅ Output device {speaker_index} validated: {device_info['name']}")
+            except Exception as e:
+                print(f"❌ Invalid speaker device {speaker_index}: {e}")
+                speaker_index = None
+        
         self.speaker_index = speaker_index
         self.whisper_model_name = whisper_model
         self.whisper_device = whisper_device  # Store device preference (None = auto)
@@ -280,12 +299,48 @@ class SpeechAudioIO:
         """Boot pyo server for playback at 48kHz"""
         if self.pyo_server is None or not self.pyo_server.getIsBooted():
             # OS-specific audio backend
-            if self.platform == "Darwin":  # macOS
+            platform_name = platform.system()
+            if platform_name == "Darwin":  # macOS
                 audio_backend = "coreaudio"
-            elif self.platform == "Windows":
+            elif platform_name == "Windows":
                 audio_backend = "portaudio"
             else:  # Linux
                 audio_backend = "portaudio"
+            
+            # Find a valid output device (only if not already set)
+            if self.speaker_index is None:
+                # Auto-select first available output device
+                try:
+                    # Try to get system default output device
+                    default_out = sd.query_devices(kind='output')
+                    self.speaker_index = default_out['index']
+                    print(f"[AUDIO] Auto-selected output device {self.speaker_index}: {default_out['name']}")
+                except Exception:
+                    # Fallback: find first device with output channels
+                    devices = sd.query_devices()
+                    for i, d in enumerate(devices):
+                        if d['max_output_channels'] > 0:
+                            self.speaker_index = i
+                            print(f"[AUDIO] Auto-selected output device {i}: {d['name']}")
+                            break
+            else:
+                # User specified device - verify it exists and has output channels
+                try:
+                    device_info = sd.query_devices(self.speaker_index)
+                    if device_info['max_output_channels'] > 0:
+                        print(f"[AUDIO] Using specified output device {self.speaker_index}: {device_info['name']}")
+                    else:
+                        print(f"❌ Device {self.speaker_index} has no output channels!")
+                        self.speaker_index = None
+                        return
+                except Exception as e:
+                    print(f"❌ Invalid output device {self.speaker_index}: {e}")
+                    self.speaker_index = None
+                    return
+            
+            if self.speaker_index is None:
+                print("❌ No output device found!")
+                return
             
             self.pyo_server = Server(
                 sr=self.playback_sample_rate,  # Always 48kHz
@@ -294,13 +349,12 @@ class SpeechAudioIO:
                 audio=audio_backend,
                 buffersize=512
             )
-            if self.speaker_index is not None:
-                self.pyo_server.setOutputDevice(self.speaker_index)
+            self.pyo_server.setOutputDevice(self.speaker_index)
             
             try:
                 self.pyo_server.boot()
                 self.pyo_server.start()
-                print(f"✅ pyo server running @ {self.playback_sample_rate} Hz ({audio_backend})")
+                print(f"✅ pyo server running @ {self.playback_sample_rate} Hz ({audio_backend}) on device {self.speaker_index}")
             except Exception as e:
                 print(f"❌ Failed to boot pyo at {self.playback_sample_rate} Hz: {e}")
                 raise
@@ -343,125 +397,125 @@ class SpeechAudioIO:
     
     def start_listening(
         self,
-        on_audio: Optional[Callable[[np.ndarray], None]] = None,
         on_transcription: Optional[Callable[[str, str], None]] = None,
-        transcribe: bool = True
+        language: Optional[str] = None
     ):
-        """
-        Start listening with VAD-based segmentation
-        
-        Args:
-            on_audio: Callback(audio_buffer) when speech segment detected
-            on_transcription: Callback(language, text) when transcribed
-            transcribe: If True, automatically transcribe segments
-        """
+        """Start listening for speech with VAD"""
         if self.is_listening:
-            print("⚠️  Already listening")
             return
         
-        self.on_audio_callback = on_audio
-        self.on_transcription_callback = on_transcription
-        self.stop_event.clear()
         self.is_listening = True
+        self.on_transcription_callback = on_transcription
         
-        # Start Whisper worker if needed
-        if transcribe:
-            whisper_thread = threading.Thread(target=self._whisper_worker, daemon=True)
-            whisper_thread.start()
-        
-        # Recording state
-        buffer = np.zeros((0,), dtype=np.int16)
-        silence_frames = 0
-        silence_limit = int(self.silence_duration * 1000 / self.frame_ms)
-        speech_frames = 0
-        min_speech_frames = int(0.3 * 1000 / self.frame_ms)  # 300ms to confirm speech
-        is_recording = False  # Track if we're in a valid recording session
-        
-        def audio_callback(indata, frames, time_info, status):
-            nonlocal buffer, silence_frames, speech_frames, is_recording
-            
-            if self.stop_event.is_set():
-                raise sd.CallbackStop()
-            
-            # 🔇 Skip recording if speaker is playing (mic muted)
-            if self.is_playing:
-                # Clear any accumulated buffer during playback
-                if len(buffer) > 0:
-                    buffer = np.zeros((0,), dtype=np.int16)
-                    silence_frames = 0
-                    speech_frames = 0
-                    is_recording = False
-                return  # Skip processing this frame
-            
-            audio = (indata[:, 0] * 32767).astype(np.int16)
-            is_speech = self.vad.is_speech(audio.tobytes(), self.record_sample_rate)
-            
-            if is_speech:
-                speech_frames += 1
-                silence_frames = 0
-                
-                # Start recording from FIRST speech frame (don't wait!)
-                buffer = np.concatenate((buffer, audio))
-                
-                # Mark as valid recording after 300ms of consecutive speech
-                if speech_frames >= min_speech_frames:
-                    is_recording = True
-            else:
-                # Silence detected
-                if is_recording:
-                    # We were in a valid recording, add silence frames
-                    buffer = np.concatenate((buffer, audio))
-                    silence_frames += 1
-                else:
-                    # Not enough speech yet, discard buffer
-                    if speech_frames > 0:
-                        # Reset - it was just noise
-                        buffer = np.zeros((0,), dtype=np.int16)
-                        speech_frames = 0
-            
-            # End of speech segment (only if we had a valid recording)
-            if is_recording and silence_frames > silence_limit and len(buffer) > 0:
-                duration = len(buffer) / self.record_sample_rate
-                rms = np.sqrt(np.mean(buffer.astype(np.float32)**2)) / 32768.0
-                
-                # Filter short/silent segments
-                if duration >= self.min_speech_duration and rms >= self.min_rms_threshold:
-                    # Audio callback
-                    if self.on_audio_callback:
-                        self.on_audio_callback(buffer.copy())
-                    
-                    # Queue for transcription
-                    if transcribe:
-                        self.audio_queue.put(buffer.copy())
-                else:
-                    # Rejected: too short or too quiet
-                    print(f"🔇 Rejected: {duration:.1f}s, RMS={rms:.3f} (noise/too short)")
-                
-                # Reset state
-                buffer = np.zeros((0,), dtype=np.int16)
-                silence_frames = 0
-                speech_frames = 0
-                is_recording = False
-        
+        print("🧠 Loading Whisper model '{}'...".format(self.whisper_model_name))
+        self._load_whisper()
         print("🎙️  Listening...")
-        with sd.InputStream(
-            channels=1,
-            samplerate=self.record_sample_rate,  # Record at 16kHz
-            dtype="float32",
-            callback=audio_callback,
-            blocksize=self.frame_size,
-            device=self.mic_index
-        ):
-            while not self.stop_event.is_set():
-                time.sleep(0.1)
         
-        self.is_listening = False
+        # Initialize sounddevice (this initializes PortAudio)
+        try:
+            import sounddevice as sd
+            # Force initialization by querying default device first
+            sd.default.device = sd.query_devices(kind='input')['index']
+            
+            # Now we can list all devices
+            print("\n[DEBUG] Available audio devices:")
+            devices = sd.query_devices()
+            for i, d in enumerate(devices):
+                if d['max_input_channels'] > 0:
+                    print(f"  [INPUT {i}] {d['name']}")
+            
+            # Get device to use
+            device_id = self.mic_index if self.mic_index is not None else sd.default.device[0]
+            device_info = sd.query_devices(device_id)
+            print(f"\n[INFO] Using input device {device_id}: {device_info['name']}")
+            
+        except Exception as e:
+            print(f"[ERROR] Could not initialize audio device: {e}")
+            self.is_listening = False
+            return
+        
+        # Start VAD recording
+        self.stop_event.clear()
+        self.whisper_thread = threading.Thread(target=self._whisper_worker, daemon=True)
+        self.whisper_thread.start()
+        
+        self._record_with_vad(device_id)
     
     def stop_listening(self):
-        """Stop listening"""
+        """Stop listening for speech"""
+        if not self.is_listening:
+            return
+        
         print("🛑 Stopping listener...")
+        self.is_listening = False
         self.stop_event.set()
+        
+        # Signal worker thread to exit
         self.audio_queue.put(None)
+        
+        # Wait for worker thread
+        if hasattr(self, 'whisper_thread') and self.whisper_thread.is_alive():
+            self.whisper_thread.join(timeout=2.0)
+        
+        print("✅ Listener stopped")
+    
+    def _record_with_vad(self, device_id):
+        """Record audio with Voice Activity Detection"""
+        sample_rate = self.record_sample_rate
+        frame_size = self.frame_size
+        
+        buffer = np.zeros(0, dtype=np.int16)
+        speech_active = False
+        silence_start = None
+        
+        try:
+            with sd.InputStream(
+                device=device_id,
+                channels=1,
+                samplerate=sample_rate,
+                blocksize=frame_size,
+                dtype=np.int16
+            ) as stream:
+                while self.is_listening:
+                    frame, overflowed = stream.read(frame_size)
+                    
+                    if overflowed:
+                        print("[WARN] Audio overflow")
+                    
+                    # Skip processing if playback is active (mic is muted)
+                    if self.is_playing:
+                        # Clear buffer during playback to avoid feedback
+                        if len(buffer) > 0:
+                            buffer = np.zeros(0, dtype=np.int16)
+                            speech_active = False
+                            silence_start = None
+                        continue
+                    
+                    frame_bytes = frame.tobytes()
+                    
+                    # VAD check
+                    is_speech = self.vad.is_speech(frame_bytes, sample_rate)
+                    
+                    if is_speech:
+                        speech_active = True
+                        silence_start = None
+                        buffer = np.concatenate([buffer, frame.flatten()])
+                    elif speech_active:
+                        buffer = np.concatenate([buffer, frame.flatten()])
+                        if silence_start is None:
+                            silence_start = time.time()
+                        elif time.time() - silence_start > self.silence_duration:
+                            # End of speech
+                            if len(buffer) / sample_rate > self.min_speech_duration:
+                                self.audio_queue.put(buffer.copy())
+                            buffer = np.zeros(0, dtype=np.int16)
+                            speech_active = False
+                            silence_start = None
+        
+        except Exception as e:
+            print(f"❌ Error in VAD recording: {e}")
+        finally:
+            self.is_listening = False
     
     def transcribe_buffer(self, audio_buffer: np.ndarray) -> tuple[str, str]:
         """
@@ -809,4 +863,74 @@ class SpeechAudioIO:
             print("✅ Whisper model unloaded")
         
         print("✅ Cleanup complete")
+    
+    def _play_audio_blocking(self, audio_data: np.ndarray, effect: dict = None):
+        """Play audio with pyo (blocking) and handle microphone muting"""
+        # Mute microphone during playback
+        self._increment_playback()
+        
+        try:
+            # Boot pyo if not already running
+            self._boot_pyo()
+            
+            if self.pyo_server is None or not self.pyo_server.getIsBooted():
+                print("❌ Playback failed: Server not booted")
+                return
+            
+            # Resample to 48kHz if needed
+            if len(audio_data.shape) > 1:
+                audio_data = audio_data[:, 0]  # mono
+            
+            current_sr = 22050  # Piper outputs at 22050 Hz
+            if current_sr != self.playback_sample_rate:
+                num_samples = int(len(audio_data) * self.playback_sample_rate / current_sr)
+                audio_data = np.interp(
+                    np.linspace(0, len(audio_data), num_samples),
+                    np.arange(len(audio_data)),
+                    audio_data
+                )
+            
+            # Normalize
+            audio_data = audio_data.astype(np.float32)
+            if np.max(np.abs(audio_data)) > 0:
+                audio_data = audio_data / np.max(np.abs(audio_data))
+            
+            # Create pyo table
+            audio_table = DataTable(size=len(audio_data), init=audio_data.tolist())
+            
+            # Apply effects
+            player = TableRead(table=audio_table, freq=audio_table.getRate(), loop=False)
+            
+            if effect:
+                if effect["effect"] == "echo":
+                    delay_time = effect.get("value", 0.3)
+                    player = Delay(player, delay=delay_time, feedback=0.5)
+                elif effect["effect"] == "pitch":
+                    pitch_factor = effect.get("value", 1.0)
+                    player = Harmonizer(player, transpo=pitch_factor)
+            
+            output = player.mix(1).out()
+            
+            # Calculate playback duration with extra buffer for room echo
+            duration = len(audio_data) / self.playback_sample_rate
+            extra_buffer = 0.5  # Extra 500ms for acoustic echo to decay
+            
+            # Wait for playback to complete
+            time.sleep(duration + extra_buffer)
+            
+            # Stop and clean up
+            output.stop()
+            player.stop()
+            audio_table.clear()
+            
+        except Exception as e:
+            print(f"❌ Playback failed: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Add extra delay before unmuting to let room echo settle
+            time.sleep(0.3)
+            
+            # Unmute microphone
+            self._decrement_playback()
 

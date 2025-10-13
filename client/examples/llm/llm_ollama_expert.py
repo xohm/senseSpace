@@ -35,40 +35,56 @@ import sys
 from senseSpaceLib.senseSpace import setup_paths
 setup_paths()
 
-from senseSpaceLib.senseSpace import MinimalClient  # Now from lib!
+from senseSpaceLib.senseSpace import MinimalClient
 from senseSpaceLib.senseSpace.llmClient import LLMClient
 from senseSpaceLib.senseSpace.llmFrameAnalyzer import LLMFrameAnalyzer
 
 
 def print_response(response: str):
-    """Simple response handler"""
+    """Simple response handler - prints expert system output"""
     if response:
-        print(f"\n[EXPERT]\n{response}\n")
+        print(f"[POSE] {response}")
+    else:
+        print("[ERROR] No response from model (may need more VRAM)")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SenseSpace LLM Expert System Example")
+    parser = argparse.ArgumentParser(
+        description="SenseSpace LLM Expert System Example",
+        epilog="Example: python llm_ollama_expert.py --viz --model llama3.2:1b"
+    )
     parser.add_argument("--server", "-s", default="localhost", help="Server IP")
     parser.add_argument("--port", "-p", type=int, default=12345, help="Server port")
     parser.add_argument("--viz", action="store_true", help="Enable visualization")
-    parser.add_argument("--model", "-m", default="phi4-mini:Q4_K_M", help="Ollama model name")
+    parser.add_argument('--model', type=str, default=None, help='Override model from config')
     parser.add_argument("--expert", "-e", default="../data/expert_pose_config.json", 
                        help="Path to expert configuration JSON")
     parser.add_argument("--confidence", "-c", type=float, default=70.0,
                        help="Minimum confidence threshold for person detection")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                       help="Show detailed debug output")
     args = parser.parse_args()
+    
+    # Model priority: command line arg > expert config > default
+    model_name = args.model if args.model else "llama3.2:1b"
     
     # Create LLM client with expert configuration
     llm_client = LLMClient(
-        model_name=args.model,
-        expert_json=args.expert,
-        auto_download=True
+        model_name=args.model,  # Will be None if not specified
+        expert_json="../data/expert_pose_config.json",
+        auto_download=True,
+        verbose=args.verbose
     )
+    
+    print(f"[INFO] Model: {llm_client.model_name}")
+    if args.viz:
+        print("[INFO] Press SPACE to analyze pose, R to reset context")
     
     # Create generic analyzer
     analyzer = LLMFrameAnalyzer(
         llm_client=llm_client,
-        confidence_threshold=args.confidence
+        confidence_threshold=args.confidence,
+        verbose=args.verbose  # Pass verbose flag
     )
     analyzer.set_response_callback(print_response)
     
@@ -79,7 +95,7 @@ def main():
         viz=args.viz,
         on_init=analyzer.on_init,
         on_frame=analyzer.on_frame,
-        on_connection_changed=lambda connected: 
+        on_connection_changed=lambda connected: None if not args.verbose else
             print(f"[CONNECTION] {'Connected' if connected else 'Disconnected'}")
     )
     
@@ -87,10 +103,13 @@ def main():
     def handle_keyboard(key: str):
         """Handle keyboard input for LLM analysis"""
         if key == ' ':
-            # analyze the current pose
-            analyzer.analyze_current_pose()
+            # print out current people for debugging
+            llmInput = analyzer.analyze_current_pose()
+            print(f"[DEBUG] LLM Input:\n{llmInput}\n")
         elif key == 'r':
             analyzer.reset_context()
+            if args.verbose:
+                print("[INFO] Context reset")
     
     if args.viz:
         client.llm_callback = handle_keyboard

@@ -204,22 +204,36 @@ def parse_effect_command(text: str, language: str):
 # Example usage
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
+    import argparse
+    
+    # Add command-line arguments
+    parser = argparse.ArgumentParser(description="Speech Audio I/O Example")
+    parser.add_argument("--mic", type=int, default=None, help="Microphone device ID")
+    parser.add_argument("--speaker", type=int, default=None, help="Speaker device ID")
+    parser.add_argument("--list-devices", action="store_true", help="List audio devices and exit")
+    args = parser.parse_args()
+    
+    # List devices if requested
+    if args.list_devices:
+        SpeechAudioIO.list_devices()
+        exit(0)
+    
     # List devices
     SpeechAudioIO.list_devices()
     
     # Create instance - models will auto-download to ./models/
     io = SpeechAudioIO(
-        whisper_model="small",  # "tiny", "base", "small", "medium"/GPU, "large"/GPU
-        piper_model_en="en_US-amy-medium",  # For English
-        piper_model_de="de_DE-thorsten_emotional-medium",  # For German
-        piper_model_fallback="en_US-lessac-medium",  # For unknown languages
-        auto_download_models=True,  # Auto-download missing models
-        
-        # 🎛️ Noise reduction settings:
-        vad_aggressiveness=2,        # 0-3: Higher = less sensitive to noise (3 = most aggressive)
-        silence_duration=1.0,        # Seconds of silence before ending capture (higher = more patient)
-        min_speech_duration=1.5,     # Minimum duration to process (filters short noises)
-        min_rms_threshold=0.02       # Minimum volume threshold (0.01-0.05, higher = louder required)
+        mic_index=args.mic,           # From command line
+        speaker_index=args.speaker,   # From command line
+        whisper_model="small",
+        piper_model_en="en_US-amy-medium",
+        piper_model_de="de_DE-thorsten_emotional-medium",
+        piper_model_fallback="en_US-lessac-medium",
+        auto_download_models=True,
+        vad_aggressiveness=2,
+        silence_duration=1.0,
+        min_speech_duration=1.5,
+        min_rms_threshold=0.02
     )
     
     # Speaker IDs for thorsten_emotional:

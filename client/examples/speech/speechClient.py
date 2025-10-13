@@ -49,7 +49,7 @@ from speechIO import SpeechAudioIO
 class LLMSpeechClient:
     """LLM integration with speech output using SpeechAudioIO and Expert System"""
     
-    def __init__(self, model_name="phi4-mini:Q4_K_M", expert_json=None, enable_speech=False, confidence_threshold=70.0):
+    def __init__(self, expert_json=None, enable_speech=False, confidence_threshold=70.0):
         self.persons = 0
         self.latest_frame = None
         self.cur_people = []
@@ -59,7 +59,6 @@ class LLMSpeechClient:
         
         # Initialize LLM client with expert system
         self.llm_client = LLMClient(
-            model_name=model_name,
             expert_json=expert_json,
             auto_download=True
         )
@@ -212,8 +211,6 @@ def main():
     parser.add_argument("--server", "-s", default="localhost", help="Server IP")
     parser.add_argument("--port", "-p", type=int, default=12345, help="Server port")
     parser.add_argument("--viz", action="store_true", help="Enable visualization")
-    parser.add_argument("--model", "-m", default="phi4-mini:Q4_K_M", 
-                       help="Ollama model name (default: phi4-mini for fast inference)")
     parser.add_argument("--expert", "-e", default="../data/expert_pose_config.json",
                        help="Path to expert configuration JSON")
     parser.add_argument("--no-speech", action="store_true", help="Disable speech (TTS + STT)")
@@ -223,7 +220,6 @@ def main():
     
     # Create LLM speech client with expert system
     llm_client = LLMSpeechClient(
-        model_name=args.model,
         expert_json=args.expert,
         enable_speech=not args.no_speech,
         confidence_threshold=args.confidence
