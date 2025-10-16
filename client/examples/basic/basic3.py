@@ -56,7 +56,7 @@ print("Age:", person["age"])
 # ============================================================================
 
 students = [
-    {"name": "Anna", "score": 92},
+    {"name": "Anna", "score": 92, "friend": ["Tom", "Lisa", "i"]},
     {"name": "Tom", "score": 88},
     {"name": "Lisa", "score": 76}
 ]

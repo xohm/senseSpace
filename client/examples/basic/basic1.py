@@ -20,7 +20,7 @@ print("The sum of", a, "and", b, "is", sum)
 
 # Define a function
 def greet(name):
-    print("Hello,", name + "!")
+    print("Hello ", name + "!")
 
 # Call the function
 greet("Alice")
