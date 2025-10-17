@@ -301,7 +301,7 @@ class SpeechAudioIO:
             # OS-specific audio backend
             platform_name = platform.system()
             if platform_name == "Darwin":  # macOS
-                audio_backend = "coreaudio"
+                audio_backend = "portaudio"
             elif platform_name == "Windows":
                 audio_backend = "portaudio"
             else:  # Linux
