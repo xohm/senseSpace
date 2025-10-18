@@ -123,3 +123,17 @@ python speech_audio_io.py  --mic 0 --speaker 5
 [AUDIO] Using specified output device 5: Microsoft Sound Mapper - Output
 ❌ Error in VAD recording: Unanticipated host error [PaErrorCode -9999]: 'There is no driver installed on your system.' [MME error 6]
 ```
+## Reactivating the Environment
+After closing the command line or restarting your computer, you need to reactivate the virtual environment:
+
+**Command Prompt:**
+```
+cd C:\path\to\senseSpace
+.venv\Scripts\activate.bat
+```
+
+**PowerShell:**
+```
+cd C:\path\to\senseSpace
+.venv\Scripts\Activate.ps1
+```
