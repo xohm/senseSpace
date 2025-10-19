@@ -6,6 +6,39 @@
 # IAD, Zurich University of the Arts / zhdk.ch
 # Max Rheiner
 # -----------------------------------------------------------------------------
+#
+# Features:
+# - Multi-model support with dropdown selection
+# - Vision models (e.g., moondream) for image analysis
+# - Text models (e.g., llama3.2, phi4) for conversation
+# - Image and text file attachments
+# - Conversation history with context sharing between models
+# - Real-time model downloading with progress indicator
+# - GPU/CPU system information display
+# - Markdown rendering for formatted responses
+# - Thinking animation during inference
+#
+# Usage:
+#   python chat.py                    # Start with default model (llama3.2:1b)
+#   python chat.py --model phi4       # Start with specific model
+#
+# Controls:
+#   📎 Attach    - Attach images or text files
+#   💬 Share Context - Toggle conversation history sharing between models
+#   Info         - Display system and model information
+#   Load Model   - Download new models from Ollama registry
+#   Refresh      - Refresh available models list
+#
+# Tips:
+#   - Use moondream with images, then switch to llama for questions
+#   - Keep "Share Context" enabled to maintain conversation across models
+#   - Attachments are auto-cleared when switching models
+#   - Text files are included in the prompt, images sent as base64
+#
+# Requirements:
+#   - Ollama server running (ollama serve)
+#   - PyQt5, requests, markdown
+# -----------------------------------------------------------------------------
 
 import sys
 import base64
@@ -124,9 +157,12 @@ class ChatWindow(QMainWindow):
         self.clear_attach_button.hide()
         input_layout.addWidget(self.clear_attach_button)
         
-        self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("Type your message and press Enter...")
-        self.input_field.returnPressed.connect(self.send_message)
+        # Replace QLineEdit with QTextEdit for multi-line input
+        self.input_field = QTextEdit()
+        self.input_field.setPlaceholderText("Type your message (Enter to send, Shift+Enter for new line)...")
+        self.input_field.setMaximumHeight(100)
+        self.input_field.setAcceptRichText(False)
+        self.input_field.installEventFilter(self)  # Install event filter for key handling
         input_layout.addWidget(self.input_field)
         
         self.send_button = QPushButton("Send")
@@ -137,6 +173,22 @@ class ChatWindow(QMainWindow):
         
         # Status display
         self.append_system("Initializing Ollama connection...")
+    
+    def eventFilter(self, obj, event):
+        """Handle key events for input field"""
+        if obj == self.input_field and event.type() == event.KeyPress:
+            from PyQt5.QtCore import Qt
+            
+            # Enter without Shift -> send message
+            if event.key() == Qt.Key_Return and not (event.modifiers() & Qt.ShiftModifier):
+                self.send_message()
+                return True  # Event handled
+            
+            # Shift+Enter -> insert new line (default behavior, just pass through)
+            elif event.key() == Qt.Key_Return and (event.modifiers() & Qt.ShiftModifier):
+                return False  # Let default handler insert newline
+        
+        return super().eventFilter(obj, event)
     
     def init_ollama(self):
         """Initialize Ollama connection"""
@@ -505,7 +557,7 @@ class ChatWindow(QMainWindow):
             self.append_error("Ollama not ready")
             return
         
-        message = self.input_field.text().strip()
+        message = self.input_field.toPlainText().strip()
         if not message and not self.attached_image_base64 and not self.attached_text_content:
             return
         
@@ -553,17 +605,24 @@ class ChatWindow(QMainWindow):
         # Prepare images list (only for image attachments)
         images = [self.attached_image_base64] if self.attached_image_base64 else None
         
-        # Build context-aware prompt if enabled
-        if self.use_context:
+        # Vision models don't handle context well - NEVER send context with images
+        if self.use_context and not self.attached_image_base64:
             prompt = self._build_context_prompt(full_prompt)
         else:
             prompt = full_prompt
+        
+        # Debug: log what we're sending
+        print(f"[DEBUG] Sending to {self.client.model_name}:")
+        print(f"[DEBUG] Prompt: {prompt[:100]}...")
+        print(f"[DEBUG] Has image: {images is not None}")
+        print(f"[DEBUG] Context used: {self.use_context and not self.attached_image_base64}")
         
         # Call async generate with callbacks
         self.client.generate_async(
             prompt=prompt,
             images=images,
-            max_tokens=1000,
+            max_tokens=2000,  # Increased from 1000
+            temperature=0.7,
             on_response=lambda resp: self.signals.response_received.emit(resp),
             on_error=lambda err: self.signals.error_occurred.emit(err)
         )
@@ -573,20 +632,33 @@ class ChatWindow(QMainWindow):
         if len(self.conversation_history) <= 1:
             return current_message
         
-        # Get last 5 exchanges (10 messages) - increased to capture more context
+        # Get last 10 exchanges (20 messages)
         recent = self.conversation_history[-20:]
         
-        # Build a clear context with both user and assistant messages
-        context = "Here is our previous conversation for reference:\n\n"
+        # Check if previous context had image descriptions
+        has_image_context = any(msg.get('has_image') for msg in recent if msg['role'] == 'user')
+        
+        # Build a clear context
+        if has_image_context:
+            context = "You have access to the following image analysis from a previous conversation:\n\n"
+        else:
+            context = "Previous conversation:\n\n"
+        
         for msg in recent[:-1]:  # Exclude current message
             if msg['role'] == 'user':
-                image_marker = " [attached image]" if msg.get('has_image') else ""
-                text_marker = " [attached text file]" if msg.get('has_text') else ""
-                context += f"User: {msg['content']}{image_marker}{text_marker}\n"
+                if msg.get('has_image'):
+                    context += f"Question about image: {msg['content']}\n"
+                else:
+                    context += f"User: {msg['content']}\n"
             else:
-                context += f"Assistant: {msg['content']}\n"
+                context += f"Analysis: {msg['content']}\n\n"
         
-        context += f"\nBased on the conversation above, please answer this question:\nUser: {current_message}\nAssistant:"
+        if has_image_context:
+            context += f"\nBased on the image analysis above, {current_message}\n"
+            context += "Answer directly using only the information provided above."
+        else:
+            context += f"\n{current_message}"
+        
         return context
     
     def on_response(self, response):
@@ -594,10 +666,16 @@ class ChatWindow(QMainWindow):
         # Stop thinking animation
         self.stop_thinking_animation()
         
+        # Debug: log response
+        print(f"[DEBUG] Response received. Length: {len(response) if response else 0}")
+        if response:
+            print(f"[DEBUG] Response preview: {response[:100]}...")
+        
         # Check if response is empty
         if not response or not response.strip():
             self.append_error("Model returned an empty response. Try rephrasing your question.")
-            print(f"[DEBUG] Empty response received. Response length: {len(response) if response else 0}")
+            self.append_system("💡 Tip: Try more descriptive questions like 'Describe how many people are visible'")
+            print(f"[DEBUG] Empty response received. Full response: '{response}'")
         else:
             # Store in conversation history
             self.conversation_history.append({
