@@ -12,7 +12,7 @@ import base64
 from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QTextEdit, QLineEdit, QPushButton, QHBoxLayout,
-                             QComboBox, QLabel, QFileDialog)
+                             QComboBox, QLabel, QFileDialog, QCheckBox)
 from PyQt5.QtCore import pyqtSignal, QObject, QTimer
 from PyQt5.QtGui import QTextCursor, QFont, QPixmap
 
@@ -45,9 +45,15 @@ class ChatWindow(QMainWindow):
         self.thinking_dots = 0
         self.thinking_message_pos = None
         
-        # Attached image
+        # Attached files
         self.attached_image_path = None
         self.attached_image_base64 = None
+        self.attached_text_content = None
+        self.attached_file_type = None  # 'image' or 'text'
+        
+        # Conversation history
+        self.conversation_history = []
+        self.use_context = True  # Default: enabled
         
         self.init_ui()
         self.init_ollama()
@@ -81,6 +87,13 @@ class ChatWindow(QMainWindow):
         self.load_button = QPushButton("Load Model")
         self.load_button.clicked.connect(self.load_new_model)
         model_layout.addWidget(self.load_button)
+        
+        # Context checkbox
+        self.context_checkbox = QCheckBox("💬 Share Context")
+        self.context_checkbox.setChecked(True)
+        self.context_checkbox.setToolTip("Send conversation history to new models")
+        self.context_checkbox.toggled.connect(self.on_context_toggled)
+        model_layout.addWidget(self.context_checkbox)
         
         model_layout.addStretch()
         layout.addLayout(model_layout)
@@ -158,16 +171,34 @@ class ChatWindow(QMainWindow):
         self.model_combo.blockSignals(False)
         self.append_system(f"📋 Found {len(models)} models")
     
+    def on_context_toggled(self, checked):
+        """Handle context sharing toggle"""
+        self.use_context = checked
+        status = "enabled" if checked else "disabled"
+        self.append_system(f"💬 Context sharing {status}")
+    
     def on_model_changed(self, model_name):
         """Handle model selection change"""
         if not model_name or model_name == self.client.model_name:
             return
         
-        self.append_system(f"🔄 Switching to model: {model_name}")
+        old_model = self.client.model_name
+        
+        self.append_system(f"🔄 Switching: {old_model} → {model_name}")
         self.client.model_name = model_name
         self.client.ready = True
         self.setWindowTitle(f"Ollama Chat - {model_name}")
-        self.append_system(f"✅ Now using: {model_name}\n")
+        self.append_system(f"✅ Now using: {model_name}")
+        
+        # Clear image attachment when switching models (text attachments stay)
+        if self.attached_image_base64:
+            self.clear_attachment()
+            self.append_system("📎 Image attachment cleared (model switched)")
+        
+        if self.use_context and len(self.conversation_history) > 0:
+            self.append_system(f"💬 Context shared: {len(self.conversation_history)//2} exchanges\n")
+        else:
+            self.append_system("💬 Fresh start (no context)\n")
     
     def show_model_info(self):
         """Show detailed information about current model and system"""
@@ -337,9 +368,10 @@ class ChatWindow(QMainWindow):
     def start_thinking_animation(self):
         """Start the 'thinking' animation"""
         self.thinking_dots = 0
-        # Add initial thinking message
+        # Add initial thinking message and track its start position
+        cursor = self.chat_display.textCursor()
+        self.thinking_start_pos = cursor.position()
         self.chat_display.append(f"\n[ASSISTANT] Thinking")
-        self.thinking_message_pos = self.chat_display.textCursor().position()
         self.chat_display.moveCursor(QTextCursor.End)
         # Start timer (update every 500ms)
         self.thinking_timer.start(500)
@@ -349,71 +381,119 @@ class ChatWindow(QMainWindow):
         self.thinking_dots = (self.thinking_dots + 1) % 4
         dots = "." * self.thinking_dots
         
-        # Move to thinking message and update it
+        # Replace entire thinking line
         cursor = self.chat_display.textCursor()
-        cursor.setPosition(self.thinking_message_pos)
+        cursor.setPosition(self.thinking_start_pos)
         cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
         cursor.removeSelectedText()
         
-        # Re-add the message with animated dots
-        self.chat_display.insertPlainText(f"Thinking{dots}")
+        # Re-add with animation
+        self.chat_display.insertPlainText(f"\n[ASSISTANT] Thinking{dots}")
         self.chat_display.moveCursor(QTextCursor.End)
     
     def stop_thinking_animation(self):
-        """Stop the thinking animation"""
+        """Stop the thinking animation and remove it completely"""
         self.thinking_timer.stop()
         
-        # Remove the thinking message
-        if self.thinking_message_pos:
+        # Remove the entire thinking message
+        if hasattr(self, 'thinking_start_pos'):
             cursor = self.chat_display.textCursor()
-            cursor.setPosition(self.thinking_message_pos)
+            cursor.setPosition(self.thinking_start_pos)
             cursor.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
             cursor.removeSelectedText()
-            self.thinking_message_pos = None
+            delattr(self, 'thinking_start_pos')
     
     def attach_file(self):
-        """Open file dialog to attach an image"""
+        """Open file dialog to attach a file (image or text)"""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select Image",
+            "Select File",
             "",
-            "Images (*.png *.jpg *.jpeg *.gif *.bmp);;All Files (*)"
+            "All Files (*);;Images (*.png *.jpg *.jpeg *.gif *.bmp);;Text Files (*.txt *.md *.py *.json *.csv)"
         )
         
         if file_path:
-            try:
-                # Read and encode image
-                with open(file_path, 'rb') as f:
-                    image_data = f.read()
-                    self.attached_image_base64 = base64.b64encode(image_data).decode('utf-8')
+            file_ext = Path(file_path).suffix.lower()
+            
+            # Check if it's an image
+            if file_ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
+                self._attach_image(file_path)
+            # Check if it's a text file
+            elif file_ext in ['.txt', '.md', '.py', '.js', '.json', '.csv', '.xml', '.html', '.css', '.yml', '.yaml']:
+                self._attach_text(file_path)
+            else:
+                # Try to detect if it's text or binary
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        f.read(1024)  # Try to read as text
+                    self._attach_text(file_path)
+                except:
+                    self.append_error(f"Unsupported file type: {file_ext}")
+    
+    def _attach_image(self, file_path):
+        """Attach an image file"""
+        try:
+            # Read and encode image
+            with open(file_path, 'rb') as f:
+                image_data = f.read()
+                self.attached_image_base64 = base64.b64encode(image_data).decode('utf-8')
+            
+            self.attached_image_path = file_path
+            self.attached_text_content = None
+            self.attached_file_type = 'image'
+            
+            # Show thumbnail with preserved aspect ratio
+            pixmap = QPixmap(file_path)
+            if not pixmap.isNull():
+                from PyQt5.QtCore import Qt
+                scaled_pixmap = pixmap.scaled(
+                    self.attachment_label.width(), 
+                    100, 
+                    Qt.KeepAspectRatio, 
+                    Qt.SmoothTransformation
+                )
+                self.attachment_label.setPixmap(scaled_pixmap)
+                self.attachment_label.setScaledContents(False)
+                self.attachment_label.show()
+                self.clear_attach_button.show()
+                self.append_system(f"📎 Attached image: {Path(file_path).name}")
+            else:
+                self.append_error(f"Could not load image: {file_path}")
                 
-                self.attached_image_path = file_path
-                
-                # Show thumbnail with preserved aspect ratio
-                pixmap = QPixmap(file_path)
-                if not pixmap.isNull():
-                    from PyQt5.QtCore import Qt
-                    scaled_pixmap = pixmap.scaled(
-                        self.attachment_label.width(), 
-                        100, 
-                        Qt.KeepAspectRatio, 
-                        Qt.SmoothTransformation
-                    )
-                    self.attachment_label.setPixmap(scaled_pixmap)
-                    self.attachment_label.setScaledContents(False)  # Don't stretch
-                    self.attachment_label.show()
-                    self.clear_attach_button.show()
-                    self.append_system(f"📎 Attached: {Path(file_path).name}")
-                else:
-                    self.append_error(f"Could not load image: {file_path}")
-                    
-            except Exception as e:
-                self.append_error(f"Error attaching file: {e}")
+        except Exception as e:
+            self.append_error(f"Error attaching image: {e}")
+    
+    def _attach_text(self, file_path):
+        """Attach a text file"""
+        try:
+            # Read text file
+            with open(file_path, 'r', encoding='utf-8') as f:
+                self.attached_text_content = f.read()
+            
+            self.attached_image_path = file_path
+            self.attached_image_base64 = None
+            self.attached_file_type = 'text'
+            
+            # Show text preview
+            preview = self.attached_text_content[:200]
+            if len(self.attached_text_content) > 200:
+                preview += "..."
+            
+            self.attachment_label.setText(f"📄 {Path(file_path).name}\n{len(self.attached_text_content)} chars\n---\n{preview}")
+            self.attachment_label.setWordWrap(True)
+            self.attachment_label.show()
+            self.clear_attach_button.show()
+            self.append_system(f"📎 Attached text file: {Path(file_path).name} ({len(self.attached_text_content)} chars)")
+            
+        except Exception as e:
+            self.append_error(f"Error attaching text file: {e}")
     
     def clear_attachment(self):
-        """Clear attached image"""
+        """Clear attached file"""
         self.attached_image_path = None
         self.attached_image_base64 = None
+        self.attached_text_content = None
+        self.attached_file_type = None
         self.attachment_label.clear()
         self.attachment_label.hide()
         self.clear_attach_button.hide()
@@ -426,19 +506,38 @@ class ChatWindow(QMainWindow):
             return
         
         message = self.input_field.text().strip()
-        if not message and not self.attached_image_base64:
+        if not message and not self.attached_image_base64 and not self.attached_text_content:
             return
         
-        # Default message if only image
-        if not message:
+        # Build the full prompt
+        full_prompt = message
+        
+        # Handle text attachments - include in prompt
+        if self.attached_text_content:
+            if not message:
+                message = "Please analyze this file:"
+            full_prompt = f"{message}\n\nFile content:\n```\n{self.attached_text_content}\n```"
+        elif not message and self.attached_image_base64:
+            # Default message if only image
             message = "What's in this image?"
+            full_prompt = message
+        
+        # Store in conversation history
+        self.conversation_history.append({
+            'role': 'user',
+            'content': message,
+            'has_image': bool(self.attached_image_base64),
+            'has_text': bool(self.attached_text_content)
+        })
         
         # Clear input
         self.input_field.clear()
         
         # Display user message
-        if self.attached_image_path:
+        if self.attached_image_path and self.attached_file_type == 'image':
             self.append_user(f"{message} [📷 {Path(self.attached_image_path).name}]")
+        elif self.attached_image_path and self.attached_file_type == 'text':
+            self.append_user(f"{message} [📄 {Path(self.attached_image_path).name}]")
         else:
             self.append_user(message)
         
@@ -451,26 +550,62 @@ class ChatWindow(QMainWindow):
         self.attach_button.setEnabled(False)
         self.model_combo.setEnabled(False)
         
-        # Prepare images list
+        # Prepare images list (only for image attachments)
         images = [self.attached_image_base64] if self.attached_image_base64 else None
         
-        # Clear attachment after sending
-        self.clear_attachment()
+        # Build context-aware prompt if enabled
+        if self.use_context:
+            prompt = self._build_context_prompt(full_prompt)
+        else:
+            prompt = full_prompt
         
         # Call async generate with callbacks
         self.client.generate_async(
-            prompt=message,
+            prompt=prompt,
             images=images,
+            max_tokens=1000,
             on_response=lambda resp: self.signals.response_received.emit(resp),
             on_error=lambda err: self.signals.error_occurred.emit(err)
         )
+    
+    def _build_context_prompt(self, current_message):
+        """Build prompt with conversation context"""
+        if len(self.conversation_history) <= 1:
+            return current_message
+        
+        # Get last 5 exchanges (10 messages) - increased to capture more context
+        recent = self.conversation_history[-20:]
+        
+        # Build a clear context with both user and assistant messages
+        context = "Here is our previous conversation for reference:\n\n"
+        for msg in recent[:-1]:  # Exclude current message
+            if msg['role'] == 'user':
+                image_marker = " [attached image]" if msg.get('has_image') else ""
+                text_marker = " [attached text file]" if msg.get('has_text') else ""
+                context += f"User: {msg['content']}{image_marker}{text_marker}\n"
+            else:
+                context += f"Assistant: {msg['content']}\n"
+        
+        context += f"\nBased on the conversation above, please answer this question:\nUser: {current_message}\nAssistant:"
+        return context
     
     def on_response(self, response):
         """Handle LLM response"""
         # Stop thinking animation
         self.stop_thinking_animation()
         
-        self.append_assistant(response)
+        # Check if response is empty
+        if not response or not response.strip():
+            self.append_error("Model returned an empty response. Try rephrasing your question.")
+            print(f"[DEBUG] Empty response received. Response length: {len(response) if response else 0}")
+        else:
+            # Store in conversation history
+            self.conversation_history.append({
+                'role': 'assistant',
+                'content': response
+            })
+            self.append_assistant(response)
+        
         self.input_field.setEnabled(True)
         self.send_button.setEnabled(True)
         self.attach_button.setEnabled(True)
