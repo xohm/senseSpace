@@ -1,5 +1,16 @@
 # Installation macOS
 
+## Table of Contents
+- [Setup Python](#setup-python)
+- [Download senseSpace](#download-sensespace)
+- [Setup the Environment](#setup-the-environment)
+- [Install Libraries](#install-libraries)
+  - [GPU Acceleration (Apple Silicon)](#gpu-acceleration-apple-silicon)
+- [Install Examples](#install-examples)
+  - [Speech](#speech)
+- [Install Ollama (Optional)](#install-ollama-optional)
+- [Reactivating the Environment](#reactivating-the-environment)
+
 ## Setup Python
 We use Python 3.11 because Pyo supports this version.
 

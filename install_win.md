@@ -1,5 +1,22 @@
 # Installation Win64
 
+## Table of Contents
+- [Setup Python](#setup-python)
+- [Download senseSpace](#download-sensespace)
+- [Setup the Environment](#setup-the-environment)
+- [Install Libraries](#install-libraries)
+  - [GPU Acceleration](#gpu-acceleration)
+- [Install Examples](#install-examples)
+  - [Speech](#speech)
+- [Install Ollama (Optional)](#install-ollama-optional)
+  - [Download and Install Ollama](#download-and-install-ollama)
+  - [Verify Installation](#verify-installation)
+  - [Download a Model](#download-a-model)
+  - [Test Ollama](#test-ollama)
+  - [GPU Acceleration](#gpu-acceleration-1)
+  - [Configure Ollama for senseSpace](#configure-ollama-for-sensespace)
+- [Reactivating the Environment](#reactivating-the-environment)
+
 ## Setup Python
 We use Python 3.11 because Pyo supports this version.
 Download [Python 3.11](https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe) and install it with activated PATH in the installer.
