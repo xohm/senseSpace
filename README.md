@@ -2,9 +2,19 @@
 
 SenseSpace is a distributed, interactive media art environment designed to gather, track, and transform human interactions. Within this container, the presence and movement of visitors are sensed and translated into a shared spatial experience. The work explores how bodies, data, and space intersect, creating an evolving choreography of participation where technology and perception merge.
 
+## Table of Contents
+- [Overview](#overview)
+- [Installation](#installation)
+- [Setup](#setup)
+- [Client](#client)
+- [Server](#server)
+- [Install Visual Studio Code](#install-visual-studio-code)
+- [Platform-Specific Installation Guides](#platform-specific-installation-guides)
+
+
 # Overview
 SenseSpace consists of a server and a client.
-The server connects to a ZED stereo camera and distributes people’s movement data over the network to connected clients. It must run on a system with an NVIDIA GPU, as it relies on CUDA for processing.
+The server connects to a ZED stereo camera and distributes people's movement data over the network to connected clients. It must run on a system with an NVIDIA GPU, as it relies on CUDA for processing.
 The clients, on the other hand, run with standard Python and only require basic libraries.
 
 Both the server and client require Python 3.12.
@@ -76,3 +86,11 @@ python3 senseSpace_fusion_main.py  --viz
 
 ## Install Visual Studio Code
 [Go to Setup Page](./setup.md)
+
+---
+
+## Platform-Specific Installation Guides
+For detailed installation instructions, see:
+- **Windows:** [install_win.md](install_win.md)
+- **macOS:** [install_mac.md](install_mac.md)
+- **Linux:** [install_linux.md](install_linux.md)
