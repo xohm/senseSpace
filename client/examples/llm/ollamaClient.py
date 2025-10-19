@@ -11,6 +11,7 @@ import requests
 import subprocess
 import time
 import platform
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Callable
 
@@ -350,3 +351,137 @@ class OllamaClient:
         except:
             pass
         return None
+    
+    def pull_model(self, model_name: str, on_progress: Optional[Callable[[str], None]] = None):
+        """
+        Download/pull an Ollama model (synchronous)
+        
+        Args:
+            model_name: Name of model to pull (e.g., 'llama3.2:1b')
+            on_progress: Optional callback for progress updates
+            
+        Returns:
+            tuple: (success: bool, error_message: str or None)
+        """
+        try:
+            if on_progress:
+                on_progress(f"Starting download of {model_name}...")
+            
+            # Use UTF-8 encoding and handle errors gracefully for Windows
+            process = subprocess.Popen(
+                ['ollama', 'pull', model_name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding='utf-8',
+                errors='replace',  # Replace problematic characters instead of failing
+                bufsize=1
+            )
+            
+            # Stream output in real-time
+            for line in process.stdout:
+                # Clean ANSI escape codes and special characters
+                clean_line = self._clean_progress_line(line.rstrip())
+                if clean_line:  # Only send non-empty lines
+                    if on_progress:
+                        on_progress(clean_line)
+                    else:
+                        print(clean_line, flush=True)
+            
+            process.wait()
+            
+            if process.returncode == 0:
+                if on_progress:
+                    on_progress(f"✅ Model '{model_name}' downloaded successfully")
+                return True, None
+            else:
+                error = f"Failed to download model (exit code: {process.returncode})"
+                if on_progress:
+                    on_progress(f"❌ {error}")
+                return False, error
+                
+        except FileNotFoundError:
+            error = "Ollama not found. Please install Ollama first."
+            if on_progress:
+                on_progress(f"❌ {error}")
+            return False, error
+        except Exception as e:
+            error = f"Download failed: {str(e)}"
+            if on_progress:
+                on_progress(f"❌ {error}")
+            return False, error
+    
+    def _clean_progress_line(self, line: str) -> str:
+        """
+        Clean progress line from ANSI codes and special characters
+        
+        Args:
+            line: Raw progress line from ollama
+            
+        Returns:
+            Cleaned line suitable for display
+        """
+        # Remove ANSI escape codes (colors, cursor movements, etc.)
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        line = ansi_escape.sub('', line)
+        
+        # Remove carriage returns and other control characters
+        line = line.replace('\r', '').replace('\x08', '')
+        
+        # Clean up multiple spaces
+        line = re.sub(r'\s+', ' ', line).strip()
+        
+        return line
+    
+    def pull_model_async(self,
+                        model_name: str,
+                        on_progress: Optional[Callable[[str], None]] = None,
+                        on_complete: Optional[Callable[[bool, Optional[str]], None]] = None):
+        """
+        Download/pull an Ollama model (asynchronous)
+        
+        Args:
+            model_name: Name of model to pull (e.g., 'llama3.2:1b')
+            on_progress: Optional callback for progress updates (str)
+            on_complete: Optional callback when done (success: bool, error: str or None)
+            
+        Returns:
+            Future object that can be used to cancel or check status
+        """
+        def _pull():
+            success, error = self.pull_model(model_name, on_progress)
+            if on_complete:
+                on_complete(success, error)
+        
+        return self.executor.submit(_pull)
+    
+    def delete_model(self, model_name: str):
+        """
+        Delete/remove an Ollama model
+        
+        Args:
+            model_name: Name of model to delete
+            
+        Returns:
+            tuple: (success: bool, error_message: str or None)
+        """
+        try:
+            result = subprocess.run(
+                ['ollama', 'rm', model_name],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                return True, None
+            else:
+                error = result.stderr or result.stdout or "Unknown error"
+                return False, error
+                
+        except FileNotFoundError:
+            return False, "Ollama not found"
+        except Exception as e:
+            return False, str(e)

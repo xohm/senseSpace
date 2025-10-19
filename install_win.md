@@ -123,6 +123,59 @@ python speech_audio_io.py  --mic 0 --speaker 5
 [AUDIO] Using specified output device 5: Microsoft Sound Mapper - Output
 ❌ Error in VAD recording: Unanticipated host error [PaErrorCode -9999]: 'There is no driver installed on your system.' [MME error 6]
 ```
+
+## Install Ollama (Optional)
+Ollama allows you to run Large Language Models locally on your machine. This is useful for the speech examples and AI-powered features.
+
+### Download and Install Ollama
+- Download Ollama for Windows from [https://ollama.com/download/windows](https://ollama.com/download/windows)
+- Run the installer and follow the installation wizard
+- Ollama will install as a Windows service and start automatically
+
+### Verify Installation
+Open a new command prompt or PowerShell window and check if Ollama is running:
+
+**Command Prompt + PowerShell:**
+```
+ollama --version
+```
+
+### Download a Model
+To use Ollama with senseSpace, download a language model. For example, to download the Llama 3.2 model:
+
+**Command Prompt + PowerShell:**
+```
+ollama pull llama3.2
+```
+
+Other recommended models:
+- `ollama pull llama3.2:1b` - Smaller, faster model (1B parameters)
+- `ollama pull llama3.2:3b` - Medium model (3B parameters)
+- `ollama pull mistral` - Alternative high-quality model
+
+### Test Ollama
+Test if Ollama is working correctly:
+
+**Command Prompt + PowerShell:**
+```
+ollama run llama3.2
+```
+
+Type a message and press Enter. Type `/bye` to exit.
+
+### GPU Acceleration
+If you have an NVIDIA GPU and installed CUDA (see GPU Acceleration section above), Ollama will automatically use your GPU for faster inference.
+
+To verify GPU usage, check the Ollama logs or use:
+```
+ollama ps
+```
+
+This will show running models and whether they're using GPU acceleration.
+
+### Configure Ollama for senseSpace
+The speech examples are configured to connect to Ollama on `localhost:11434` by default. No additional configuration is needed if Ollama is running on the same machine.
+
 ## Reactivating the Environment
 After closing the command line or restarting your computer, you need to reactivate the virtual environment:
 

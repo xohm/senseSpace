@@ -151,6 +151,65 @@ python speech_audio_io.py --mic 0 --speaker 3
 
 - Be careful with setting the devices, you might get errors if you set this wrong.
 
+## Install Ollama (Optional)
+Ollama allows you to run Large Language Models locally on your machine. This is useful for the speech examples and AI-powered features.
+
+### Download and Install Ollama
+- Download Ollama for macOS from [https://ollama.com/download/mac](https://ollama.com/download/mac)
+- Open the downloaded .dmg file and drag Ollama to your Applications folder
+- Launch Ollama from your Applications folder
+- Ollama will run in the menu bar and start automatically
+
+Alternatively, install via Homebrew:
+```
+brew install ollama
+```
+
+Then start the Ollama service:
+```
+ollama serve
+```
+
+### Verify Installation
+Open a new Terminal window and check if Ollama is running:
+```
+ollama --version
+```
+
+### Download a Model
+To use Ollama with senseSpace, download a language model. For example, to download the Llama 3.2 model:
+```
+ollama pull llama3.2
+```
+
+Other recommended models:
+- `ollama pull llama3.2:1b` - Smaller, faster model (1B parameters)
+- `ollama pull llama3.2:3b` - Medium model (3B parameters)
+- `ollama pull mistral` - Alternative high-quality model
+
+### Test Ollama
+Test if Ollama is working correctly:
+```
+ollama run llama3.2
+```
+
+Type a message and press Enter. Type `/bye` to exit.
+
+### GPU Acceleration
+**Apple Silicon (M1/M2/M3/M4):** Ollama will automatically use the Metal Performance Shaders (MPS) for GPU acceleration on Apple Silicon Macs.
+
+**Intel Macs:** Ollama will use CPU only.
+
+To verify a model is running:
+```
+ollama ps
+```
+
+This will show running models and their resource usage.
+
+### Configure Ollama for senseSpace
+The speech examples are configured to connect to Ollama on `localhost:11434` by default. No additional configuration is needed if Ollama is running on the same machine.
+
 ## Reactivating the Environment
 After closing Terminal or restarting your computer, you need to reactivate the virtual environment:
 ```

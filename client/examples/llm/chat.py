@@ -315,34 +315,12 @@ class ChatWindow(QMainWindow):
             self.input_field.setEnabled(False)
             self.send_button.setEnabled(False)
             
-            # Start download in background thread
-            def download_task():
-                try:
-                    import subprocess
-                    
-                    process = subprocess.Popen(
-                        ['ollama', 'pull', model_name],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1
-                    )
-                    
-                    output_lines = []
-                    for line in process.stdout:
-                        stripped = line.strip()
-                        output_lines.append(stripped)
-                        # Send progress updates via signal
-                        if stripped:
-                            self.signals.error_occurred.emit(f"PROGRESS:{stripped}")
-                    
-                    process.wait()
-                    return process.returncode == 0, '\n'.join(output_lines), ""
-                    
-                except Exception as e:
-                    return False, "", str(e)
+            # Progress callback
+            def on_progress(msg):
+                self.signals.error_occurred.emit(f"PROGRESS:{msg}")
             
-            def on_download_complete(result):
+            # Completion callback
+            def on_complete(success, error):
                 # Remove progress line
                 if hasattr(self, 'download_progress_pos'):
                     cursor = self.chat_display.textCursor()
@@ -351,38 +329,20 @@ class ChatWindow(QMainWindow):
                     cursor.removeSelectedText()
                     delattr(self, 'download_progress_pos')
                 
-                success, stdout, stderr = result
                 if success:
                     self.append_system(f"✅ Successfully downloaded: {model_name}")
                     self.append_system("Refreshing model list...")
                     self.refresh_models()
                 else:
-                    self.append_error(f"Failed to download model:\n{stderr if stderr else stdout}")
+                    self.append_error(f"Failed to download model:\n{error}")
                 
                 # Re-enable UI
                 self.load_button.setEnabled(True)
                 self.input_field.setEnabled(True)
                 self.send_button.setEnabled(True)
             
-            # Run download in executor
-            future = self.client.executor.submit(download_task)
-            
-            # Monitor completion (using a timer to check)
-            def check_download():
-                if future.done():
-                    timer.stop()
-                    try:
-                        result = future.result()
-                        on_download_complete(result)
-                    except Exception as e:
-                        self.append_error(f"Download error: {e}")
-                        self.load_button.setEnabled(True)
-                        self.input_field.setEnabled(True)
-                        self.send_button.setEnabled(True)
-            
-            timer = QTimer()
-            timer.timeout.connect(check_download)
-            timer.start(1000)  # Check every second
+            # Start async download
+            self.client.pull_model_async(model_name, on_progress, on_complete)
     
     def append_system(self, message):
         """Append system message to chat"""
