@@ -130,10 +130,11 @@ class OllamaClient:
             if images:
                 payload["images"] = images
             
+            timeoutSec = 240  # 4 minutes timeout
             response = requests.post(
                 f"{self.ollama_url}/api/generate",
                 json=payload,
-                timeout=60
+                timeout=timeoutSec
             )
             
             if response.status_code == 200:
@@ -166,7 +167,7 @@ class OllamaClient:
                 return None, full_error
                 
         except requests.exceptions.Timeout:
-            error = "Request timeout (>60s)"
+            error = f"Request timeout (>{timeoutSec}s)"
             print(f"[Ollama] {error}")
             return None, error
         except Exception as e:
