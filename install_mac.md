@@ -9,6 +9,7 @@
 - [Install Examples](#install-examples)
   - [Speech](#speech)
 - [Install Ollama (Optional)](#install-ollama-optional)
+  - [Install Python Dependencies](#install-python-dependencies)
 - [Reactivating the Environment](#reactivating-the-environment)
 
 ## Setup Python
@@ -188,9 +189,9 @@ ollama --version
 ```
 
 ### Download a Model
-To use Ollama with senseSpace, download a language model. For example, to download the Llama 3.2 model:
+To use Ollama with senseSpace, download a language model. For example, to download the Llama 3.2:1b model:
 ```
-ollama pull llama3.2
+ollama pull llama3.2:1b
 ```
 
 Other recommended models:
@@ -201,7 +202,7 @@ Other recommended models:
 ### Test Ollama
 Test if Ollama is working correctly:
 ```
-ollama run llama3.2
+ollama run llama3.2:1b
 ```
 
 Type a message and press Enter. Type `/bye` to exit.
@@ -220,6 +221,12 @@ This will show running models and their resource usage.
 
 ### Configure Ollama for senseSpace
 The speech examples are configured to connect to Ollama on `localhost:11434` by default. No additional configuration is needed if Ollama is running on the same machine.
+
+### Install Python Dependencies
+```
+cd ./senseSpace/client/examples/llm/
+pip install -r requirements.txt
+```
 
 ## Reactivating the Environment
 After closing Terminal or restarting your computer, you need to reactivate the virtual environment:

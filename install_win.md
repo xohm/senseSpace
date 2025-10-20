@@ -15,6 +15,7 @@
   - [Test Ollama](#test-ollama)
   - [GPU Acceleration](#gpu-acceleration-1)
   - [Configure Ollama for senseSpace](#configure-ollama-for-sensespace)
+  - [Install Python Dependencies](#install-python-dependencies)
 - [Reactivating the Environment](#reactivating-the-environment)
 
 ## Setup Python
@@ -99,6 +100,8 @@ This should output `CUDA available: True` if properly installed.
 ## Install Examples
 
 ### Speech
+
+- Install "Visual Studio Build Tools for C++": https://visualstudio.microsoft.com/visual-cpp-build-tools/
 - go to "senseSpace\client\examples\speech"
 ```
 cd .\client\examples\speech
@@ -162,7 +165,7 @@ To use Ollama with senseSpace, download a language model. For example, to downlo
 
 **Command Prompt + PowerShell:**
 ```
-ollama pull llama3.2
+ollama pull llama3.2:1b
 ```
 
 Other recommended models:
@@ -175,7 +178,7 @@ Test if Ollama is working correctly:
 
 **Command Prompt + PowerShell:**
 ```
-ollama run llama3.2
+ollama run llama3.2:1b
 ```
 
 Type a message and press Enter. Type `/bye` to exit.
@@ -192,6 +195,12 @@ This will show running models and whether they're using GPU acceleration.
 
 ### Configure Ollama for senseSpace
 The speech examples are configured to connect to Ollama on `localhost:11434` by default. No additional configuration is needed if Ollama is running on the same machine.
+
+### Install Python Dependencies
+```
+cd C:\path\to\senseSpace\client\examples\llm\
+pip install -r requirements.txt
+```
 
 ## Reactivating the Environment
 After closing the command line or restarting your computer, you need to reactivate the virtual environment:
