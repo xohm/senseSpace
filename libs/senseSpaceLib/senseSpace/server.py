@@ -17,15 +17,15 @@ from PyQt5.QtGui import QVector3D, QQuaternion
 
 # Import protocol classes
 try:
-    from .protocol import Frame, Person, Joint
+    from .protocol import Frame, Person, Joint, Position, Quaternion
 except ImportError:
     try:
-        from senseSpaceLib.senseSpace.protocol import Frame, Person, Joint
+        from senseSpaceLib.senseSpace.protocol import Frame, Person, Joint, Position, Quaternion
     except ImportError:
         # Fallback for development
         import sys
         sys.path.append(os.path.join(os.path.dirname(__file__)))
-        from protocol import Frame, Person, Joint
+        from protocol import Frame, Person, Joint, Position, Quaternion
 
 
 def get_local_ip():
@@ -283,19 +283,33 @@ class SenseSpaceServer:
                 pass
 
     def broadcast_frame(self, frame: Frame):
-        """Broadcast a frame to all connected clients"""
+        """Broadcast a frame to all connected clients.
+        
+        Optimized to serialize the frame ONCE, then send the same bytes to all clients.
+        This avoids redundant to_dict() and serialization calls per client.
+        """
         if not self.clients:
             return
-        # Enqueue the Frame object itself: sender worker will call to_dict() and json.dumps().
-        message = {"type": "frame", "data": frame}
+        
+        # OPTIMIZATION: Serialize frame ONCE for all clients
+        try:
+            frame_dict = frame.to_dict() if hasattr(frame, 'to_dict') else frame
+            message_dict = {"type": "frame", "data": frame_dict}
+            
+            # Use the communication module's serialize_message for MessagePack+zstd support
+            from .communication import serialize_message
+            serialized_bytes = serialize_message(message_dict, use_msgpack=True, use_compression=True)
+        except Exception as e:
+            print(f"[Server] Frame serialization failed: {e}")
+            return
+        
+        # Broadcast the SAME serialized bytes to all clients
         for client in list(self.clients):
             q = self._client_queues.get(client)
             if q is None:
-                # No queue: best-effort short-path; serialize minimally here
+                # No queue: send directly (legacy path for clients without queues)
                 try:
-                    payload = frame.to_dict() if hasattr(frame, 'to_dict') else frame
-                    text = json.dumps({"type": "frame", "data": payload}, default=lambda o: getattr(o, 'to_dict', lambda: str(o))())
-                    client.sendall((text + "\n").encode("utf-8"))
+                    client.sendall(serialized_bytes)
                 except Exception as e:
                     try:
                         if client in self.clients:
@@ -309,7 +323,8 @@ class SenseSpaceServer:
                 continue
 
             try:
-                q.put_nowait(message)
+                # Put the pre-serialized bytes in the queue (not the Frame object!)
+                q.put_nowait(serialized_bytes)
             except queue.Full:
                 # drop message for this slow client
                 continue
@@ -1197,7 +1212,7 @@ class SenseSpaceServer:
 
             joints = []
             for i, kp in enumerate(keypoints):
-                pos = {"x": float(kp[0]), "y": float(kp[1]), "z": float(kp[2])}
+                pos_obj = Position(x=float(kp[0]), y=float(kp[1]), z=float(kp[2]))
 
                 # Handle orientations
                 if orientations is not None:
@@ -1206,14 +1221,14 @@ class SenseSpaceServer:
                             ori = orientations[i] if i < len(orientations) else orientations[0]
                         else:
                             ori = orientations
-                        ori_dict = {"x": float(ori[0]), "y": float(ori[1]), "z": float(ori[2]), "w": float(ori[3])}
+                        ori_obj = Quaternion(x=float(ori[0]), y=float(ori[1]), z=float(ori[2]), w=float(ori[3]))
                     except (IndexError, AttributeError):
-                        ori_dict = {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
+                        ori_obj = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
                 else:
-                    ori_dict = {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
+                    ori_obj = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
 
                 conf = float(confidences[i]) if i < len(confidences) else 0.0
-                joints.append(Joint(i=i, pos=pos, ori=ori_dict, conf=conf))
+                joints.append(Joint(i=i, pos=pos_obj, ori=ori_obj, conf=conf))
 
             people.append(Person(
                 id=person.id,
@@ -1280,7 +1295,7 @@ class SenseSpaceServer:
 
             joints = []
             for i, kp in enumerate(keypoints):
-                pos = {"x": float(kp[0]), "y": float(kp[1]), "z": float(kp[2])}
+                pos_obj = Position(x=float(kp[0]), y=float(kp[1]), z=float(kp[2]))
 
                 # Handle orientations
                 if orientations is not None:
@@ -1289,14 +1304,14 @@ class SenseSpaceServer:
                             ori = orientations[i] if i < len(orientations) else orientations[0]
                         else:
                             ori = orientations
-                        ori_dict = {"x": float(ori[0]), "y": float(ori[1]), "z": float(ori[2]), "w": float(ori[3])}
+                        ori_obj = Quaternion(x=float(ori[0]), y=float(ori[1]), z=float(ori[2]), w=float(ori[3]))
                     except (IndexError, AttributeError):
-                        ori_dict = {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
+                        ori_obj = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
                 else:
-                    ori_dict = {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
+                    ori_obj = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
 
                 conf = float(confidences[i]) if i < len(confidences) else 0.0
-                joints.append(Joint(i=i, pos=pos, ori=ori_dict, conf=conf))
+                joints.append(Joint(i=i, pos=pos_obj, ori=ori_obj, conf=conf))
 
             people.append(Person(
                 id=person.id,

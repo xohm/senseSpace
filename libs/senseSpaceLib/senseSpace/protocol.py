@@ -5,11 +5,66 @@ from typing import Optional
 import numpy as np
 
 
+# Lightweight data structures for network efficiency
+@dataclass
+class Position:
+    """3D position with reduced memory footprint via __slots__"""
+    __slots__ = ("x", "y", "z")
+    x: float
+    y: float
+    z: float
+
+    def to_dict(self) -> Dict[str, float]:
+        """Convert to dict for JSON serialization"""
+        return {"x": float(self.x), "y": float(self.y), "z": float(self.z)}
+    
+    def to_list(self) -> List[float]:
+        """Convert to list for compact JSON serialization"""
+        return [float(self.x), float(self.y), float(self.z)]
+
+    @staticmethod
+    def from_dict(d: Union[Dict[str, float], List[float], tuple]) -> "Position":
+        """Create from dict or list/tuple"""
+        if isinstance(d, (list, tuple)):
+            return Position(x=float(d[0]), y=float(d[1]), z=float(d[2]))
+        return Position(x=float(d.get("x", 0.0)), y=float(d.get("y", 0.0)), z=float(d.get("z", 0.0)))
+
+
+@dataclass
+class Quaternion:
+    """Quaternion orientation with reduced memory footprint via __slots__"""
+    __slots__ = ("x", "y", "z", "w")
+    x: float
+    y: float
+    z: float
+    w: float
+
+    def to_dict(self) -> Dict[str, float]:
+        """Convert to dict for JSON serialization"""
+        return {"x": float(self.x), "y": float(self.y), "z": float(self.z), "w": float(self.w)}
+    
+    def to_list(self) -> List[float]:
+        """Convert to list for compact JSON serialization"""
+        return [float(self.x), float(self.y), float(self.z), float(self.w)]
+
+    @staticmethod
+    def from_dict(d: Union[Dict[str, float], List[float], tuple]) -> "Quaternion":
+        """Create from dict or list/tuple"""
+        if isinstance(d, (list, tuple)):
+            return Quaternion(x=float(d[0]), y=float(d[1]), z=float(d[2]), w=float(d[3]))
+        return Quaternion(
+            x=float(d.get("x", 0.0)),
+            y=float(d.get("y", 0.0)),
+            z=float(d.get("z", 0.0)),
+            w=float(d.get("w", 1.0))
+        )
+
+
 @dataclass
 class Joint:
     i: int                        # raw index from server (0..17 or 0..33)
-    pos: Dict[str, float]         # {"x":..,"y":..,"z":..}
-    ori: Dict[str, float]         # quaternion {"x":..,"y":..,"z":..,"w":..}
+    pos: Position                 # 3D position (was dict, now lightweight dataclass)
+    ori: Quaternion               # quaternion orientation (was dict, now lightweight dataclass)
     conf: float                   # confidence 0..1
 
     def as_enum(self, body_model: str) -> Union[Body18Joint, Body34Joint]:
@@ -24,14 +79,19 @@ class Joint:
     def to_dict(self):
         return {
             "i": self.i,
-            "pos": self.pos,
-            "ori": self.ori,
+            "pos": self.pos.to_dict(),
+            "ori": self.ori.to_dict(),
             "conf": self.conf
         }
 
     @staticmethod
     def from_dict(d):
-        return Joint(i=d["i"], pos=d["pos"], ori=d["ori"], conf=d["conf"])
+        return Joint(
+            i=d["i"],
+            pos=Position.from_dict(d["pos"]),
+            ori=Quaternion.from_dict(d["ori"]),
+            conf=d["conf"]
+        )
 
 
 @dataclass
@@ -75,7 +135,11 @@ class Person:
             if not joint or not joint.pos:
                 return None
             pos = joint.pos
-            return np.array([pos['x'], pos['y'], pos['z']], dtype=float) / 1000.0
+            # Support both Position object and dict
+            if hasattr(pos, 'x'):
+                return np.array([pos.x, pos.y, pos.z], dtype=float) / 1000.0
+            else:
+                return np.array([pos['x'], pos['y'], pos['z']], dtype=float) / 1000.0
 
         def get_joint_by_enum(joint_enum: Union[Body18Joint, Body34Joint]) -> Optional[np.ndarray]:
             """Get joint position by enum."""
@@ -477,22 +541,22 @@ class Person:
 @dataclass
 class Camera:
     serial: str
-    position: Dict[str, float]     # {'x':..,'y':..,'z':..}
-    orientation: Dict[str, float]  # quaternion {'x':..,'y':..,'z':..,'w':..}
+    position: Position             # 3D position (was dict, now lightweight dataclass)
+    orientation: Quaternion        # quaternion orientation (was dict, now lightweight dataclass)
 
     def to_dict(self):
         return {
             'serial': self.serial,
-            'position': self.position,
-            'orientation': self.orientation
+            'position': self.position.to_dict(),
+            'orientation': self.orientation.to_dict()
         }
 
     @staticmethod
     def from_dict(d):
         return Camera(
-            serial=d.get('serial', ''), 
-            position=d.get('position', {}), 
-            orientation=d.get('orientation', {})
+            serial=d.get('serial', ''),
+            position=Position.from_dict(d.get('position', {'x': 0, 'y': 0, 'z': 0})),
+            orientation=Quaternion.from_dict(d.get('orientation', {'x': 0, 'y': 0, 'z': 0, 'w': 1}))
         )
 
 

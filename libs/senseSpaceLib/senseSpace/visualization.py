@@ -328,17 +328,21 @@ def draw_camera(position, orientation, up=(0.0, 1.0, 0.0), fov_deg=45.0, aspect=
     :param scale: scale multiplier for visualization size
     :param flip: flip the forward direction
     """
-    # Convert position to tuple if it's a dict
+    # Convert position to tuple if it's a dict or Position object
     if isinstance(position, dict):
         pos = (position['x'], position['y'], position['z'])
+    elif hasattr(position, 'x'):
+        pos = (position.x, position.y, position.z)
     else:
         pos = position
     
     # Convert quaternion to rotation matrix and extract basis vectors
     def quaternion_to_matrix(quat):
-        """Convert quaternion {'x':..,'y':..,'z':..,'w':..} to 3x3 rotation matrix"""
+        """Convert quaternion {'x':..,'y':..,'z':..,'w':..} or Quaternion object to 3x3 rotation matrix"""
         if isinstance(quat, dict):
             x, y, z, w = quat['x'], quat['y'], quat['z'], quat['w']
+        elif hasattr(quat, 'x'):
+            x, y, z, w = quat.x, quat.y, quat.z, quat.w
         else:
             x, y, z, w = quat[0], quat[1], quat[2], quat[3]
         

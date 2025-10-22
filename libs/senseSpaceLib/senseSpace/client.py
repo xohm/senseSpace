@@ -101,7 +101,7 @@ class SenseSpaceClient:
         while self.running and self.connected:
             try:
                 # Receive data
-                data = self.socket.recv(4096).decode('utf-8')
+                data = self.socket.recv(65536).decode('utf-8')
                 if not data:
                     print("[WARNING] Server closed connection")
                     break
@@ -190,7 +190,11 @@ class CommandLineClient(SenseSpaceClient):
                     # Print a few key joint positions
                     for i, joint in enumerate(person.skeleton[:5]):  # First 5 joints only
                         pos = joint.pos
-                        print(f"    Joint {i}: ({pos['x']:.1f}, {pos['y']:.1f}, {pos['z']:.1f})")
+                        # Support both Position object and dict
+                        if hasattr(pos, 'x'):
+                            print(f"    Joint {i}: ({pos.x:.1f}, {pos.y:.1f}, {pos.z:.1f})")
+                        else:
+                            print(f"    Joint {i}: ({pos['x']:.1f}, {pos['y']:.1f}, {pos['z']:.1f})")
     
     def _on_connection_changed(self, connected: bool):
         """Handle connection status changes"""

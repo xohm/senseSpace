@@ -137,3 +137,4 @@ Thumbs.db
 *.onnx
 *.onnx.json
 client/examples/speech/models/
+client/fun/
