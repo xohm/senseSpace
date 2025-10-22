@@ -48,10 +48,11 @@ def get_local_ip():
 class SenseSpaceServer:
     """Main server class for ZED SDK body tracking and TCP broadcasting"""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 12345):
+    def __init__(self, host: str = "0.0.0.0", port: int = 12345, use_udp: bool = False):
         self.host = host
         self.port = port
         self.local_ip = get_local_ip()
+        self.use_udp = use_udp
         
         # Server state
         self.running = True
@@ -62,6 +63,10 @@ class SenseSpaceServer:
         self.clients = []
         self._client_queues = {}
         self._client_sender_threads = {}
+        
+        # UDP broadcast attributes
+        self.udp_socket = None
+        self.udp_clients = set()  # Set of (ip, port) tuples
         
         # Camera instances
         self.camera = None
@@ -91,6 +96,48 @@ class SenseSpaceServer:
         self.update_callback = callback
 
     def start_tcp_server(self):
+        """Start the server (TCP or UDP based on configuration)"""
+        if self.use_udp:
+            self._start_udp_server()
+        else:
+            self._start_tcp_server()
+    
+    def _start_udp_server(self):
+        """Start UDP broadcast server"""
+        try:
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.udp_socket.bind((self.host, self.port))
+            print(f"[INFO] UDP server listening on {self.host}:{self.port}")
+            if self.host == "0.0.0.0":
+                print(f"[INFO] Clients connect to: {self.local_ip}:{self.port}")
+            
+            # Start thread to listen for client handshakes
+            def udp_listener():
+                while self.running:
+                    try:
+                        data, addr = self.udp_socket.recvfrom(1024)
+                        if data == b"HELLO":
+                            # Client handshake - add to broadcast list
+                            if addr not in self.udp_clients:
+                                self.udp_clients.add(addr)
+                                print(f"[INFO] UDP client registered from {addr}")
+                            # Send acknowledgment
+                            self.udp_socket.sendto(b"HELLO", addr)
+                    except socket.timeout:
+                        continue
+                    except Exception as e:
+                        if self.running:
+                            print(f"[WARNING] UDP listener error: {e}")
+                        break
+            
+            self.server_thread = threading.Thread(target=udp_listener, daemon=True)
+            self.server_thread.start()
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to start UDP server: {e}")
+    
+    def _start_tcp_server(self):
         """Start the TCP server"""
         # Pre-populate camera pose cache when TCP server starts
         try:
@@ -283,13 +330,17 @@ class SenseSpaceServer:
                 pass
 
     def broadcast_frame(self, frame: Frame):
-        """Broadcast a frame to all connected clients.
+        """Broadcast a frame to all connected clients (TCP or UDP).
         
         Optimized to serialize the frame ONCE, then send the same bytes to all clients.
         This avoids redundant to_dict() and serialization calls per client.
         """
-        if not self.clients:
-            return
+        if self.use_udp:
+            if not self.udp_clients:
+                return
+        else:
+            if not self.clients:
+                return
         
         # OPTIMIZATION: Serialize frame ONCE for all clients
         try:
@@ -299,35 +350,52 @@ class SenseSpaceServer:
             # Use the communication module's serialize_message for MessagePack+zstd support
             from .communication import serialize_message
             serialized_bytes = serialize_message(message_dict, use_msgpack=True, use_compression=True)
+            
+            # Check size limit for UDP (max ~65KB)
+            if self.use_udp and len(serialized_bytes) > 65000:
+                print(f"[WARNING] Frame too large for UDP ({len(serialized_bytes)} bytes), dropping")
+                return
+                
         except Exception as e:
             print(f"[Server] Frame serialization failed: {e}")
             return
         
-        # Broadcast the SAME serialized bytes to all clients
-        for client in list(self.clients):
-            q = self._client_queues.get(client)
-            if q is None:
-                # No queue: send directly (legacy path for clients without queues)
+        # Broadcast based on protocol
+        if self.use_udp:
+            # UDP: Send to all registered clients
+            for client_addr in list(self.udp_clients):
                 try:
-                    client.sendall(serialized_bytes)
+                    self.udp_socket.sendto(serialized_bytes, client_addr)
                 except Exception as e:
+                    # Remove dead client
+                    print(f"[WARNING] Failed to send to UDP client {client_addr}: {e}")
+                    self.udp_clients.discard(client_addr)
+        else:
+            # TCP: Send via queues (existing code)
+            for client in list(self.clients):
+                q = self._client_queues.get(client)
+                if q is None:
+                    # No queue: send directly (legacy path for clients without queues)
                     try:
-                        if client in self.clients:
-                            self.clients.remove(client)
-                    except Exception:
-                        pass
-                    try:
-                        client.close()
-                    except Exception:
-                        pass
-                continue
+                        client.sendall(serialized_bytes)
+                    except Exception as e:
+                        try:
+                            if client in self.clients:
+                                self.clients.remove(client)
+                        except Exception:
+                            pass
+                        try:
+                            client.close()
+                        except Exception:
+                            pass
+                    continue
 
-            try:
-                # Put the pre-serialized bytes in the queue (not the Frame object!)
-                q.put_nowait(serialized_bytes)
-            except queue.Full:
-                # drop message for this slow client
-                continue
+                try:
+                    # Put the pre-serialized bytes in the queue (not the Frame object!)
+                    q.put_nowait(serialized_bytes)
+                except queue.Full:
+                    # drop message for this slow client
+                    pass
 
     def find_floor_plane(self, cam=None):
         """Detect floor plane using ZED SDK - works for both fusion and single camera mode"""

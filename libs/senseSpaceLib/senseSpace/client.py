@@ -26,6 +26,7 @@ class SenseSpaceClient:
         self.socket = None
         self.connected = False
         self.latest_frame: Optional[Frame] = None
+        self.latest_timestamp: float = 0.0  # Track latest frame timestamp for dropping old frames
         self.running = True
         
         # Callbacks
@@ -44,24 +45,31 @@ class SenseSpaceClient:
         self.connection_callback = callback
     
     def connect(self) -> bool:
-        """Connect to the senseSpace server"""
+        """Connect to the senseSpace server via UDP"""
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(5.0)  # 5 second connection timeout
-            self.socket.connect((self.server_ip, self.server_port))
-            self.socket.settimeout(None)  # Remove timeout for normal operation
+            # Use UDP (datagram) instead of TCP (stream)
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.socket.settimeout(5.0)  # 5 second timeout for receiving
+            
+            # UDP doesn't "connect" in the TCP sense, but we can bind and start receiving
+            # Send a small handshake packet to let server know we exist
+            try:
+                handshake = b"HELLO"
+                self.socket.sendto(handshake, (self.server_ip, self.server_port))
+            except Exception as e:
+                print(f"[WARNING] Failed to send UDP handshake: {e}")
             
             self.connected = True
             self.running = True
             
             # Start receiving frames in background thread
-            self.receive_thread = threading.Thread(target=self._receive_frames, daemon=True)
+            self.receive_thread = threading.Thread(target=self._receive_frames_udp, daemon=True)
             self.receive_thread.start()
             
             if self.connection_callback:
                 self.connection_callback(True)
                 
-            print(f"[INFO] Connected to server at {self.server_ip}:{self.server_port}")
+            print(f"[INFO] Connected to server at {self.server_ip}:{self.server_port} (UDP)")
             return True
             
         except Exception as e:
@@ -96,57 +104,48 @@ class SenseSpaceClient:
         """Get the most recently received frame"""
         return self.latest_frame
     
-    def _receive_frames(self):
-        """Background thread to receive frames from server"""
-        json_buffer = ""
+    def _receive_frames_udp(self):
+        """Background thread to receive frames from server via UDP"""
         
         while self.running and self.connected:
             try:
-                # Receive data
-                data = self.socket.recv(65536)
-                if not data:
-                    print("[WARNING] Server closed connection")
-                    break
+                # Receive UDP datagram (max 65KB)
+                data, addr = self.socket.recvfrom(65536)
                 
-                # Try to detect protocol: check first byte
-                # JSON starts with '{' (0x7b), MessagePack magic is 0x9f
-                if data[0:1] == b'{':
-                    # JSON protocol (legacy)
-                    try:
-                        json_buffer += data.decode('utf-8')
-                        
-                        # Process complete messages (newline-delimited JSON)
-                        while '\n' in json_buffer:
-                            line, json_buffer = json_buffer.split('\n', 1)
-                            if line.strip():
-                                try:
-                                    message = json.loads(line)
-                                    self._handle_message(message)
-                                except json.JSONDecodeError as e:
-                                    print(f"[WARNING] Failed to parse JSON: {e}")
-                    except UnicodeDecodeError:
-                        print(f"[WARNING] Received binary data but failed to decode as UTF-8")
-                        continue
-                        
-                elif data[0:2] == b'\x9f\xd0' or data[0:2] == b'\x9f\xd1':
+                if not data:
+                    continue
+                
+                # Parse message based on protocol
+                if data[0:2] == b'\x9f\xd0' or data[0:2] == b'\x9f\xd1':
                     # MessagePack protocol (binary)
-                    # Format: [magic:2][length:4][payload]
-                    if len(data) < 6:
-                        print(f"[WARNING] Incomplete MessagePack header")
-                        continue
-                    
                     try:
                         message = deserialize_message(data)
                         if message:
                             self._handle_message(message)
                     except Exception as e:
                         print(f"[WARNING] Failed to deserialize MessagePack: {e}")
+                        
+                elif data[0:1] == b'{':
+                    # JSON protocol (legacy)
+                    try:
+                        line = data.decode('utf-8').strip()
+                        if line:
+                            message = json.loads(line)
+                            self._handle_message(message)
+                    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                        print(f"[WARNING] Failed to parse JSON: {e}")
                 else:
+                    # Unknown protocol, might be handshake response
+                    if data == b"HELLO":
+                        continue
                     print(f"[WARNING] Unknown protocol magic bytes: {data[0:2].hex()}")
                     
+            except socket.timeout:
+                # Normal timeout, continue
+                continue
             except Exception as e:
                 if self.running:
-                    print(f"[ERROR] Error receiving data: {e}")
+                    print(f"[ERROR] Error receiving UDP data: {e}")
                 break
         
         # Connection lost
@@ -155,14 +154,20 @@ class SenseSpaceClient:
             self.connection_callback(False)
     
     def _handle_message(self, message: dict):
-        """Handle received message from server"""
+        """Handle received message from server with frame dropping for old frames"""
         if message.get("type") == "frame":
             frame_data = message.get("data")
             if frame_data:
                 try:
-
                     frame = Frame.from_dict(frame_data)
-
+                    
+                    # DROP OLD FRAMES: Only process if timestamp is newer than last frame
+                    if frame.timestamp <= self.latest_timestamp:
+                        # This is an old frame that arrived late, drop it
+                        return
+                    
+                    # Update latest timestamp and frame
+                    self.latest_timestamp = frame.timestamp
                     self.latest_frame = frame
                     
                     # Call frame callback if set
