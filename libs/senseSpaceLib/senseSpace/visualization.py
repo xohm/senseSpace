@@ -2,6 +2,11 @@ from OpenGL.GL import *
 from OpenGL.GLU import *
 from .enums import Body34Joint, Body18Joint
 
+# Global variables for floor height stabilization
+_floor_height_history = []
+_stable_floor_height = None
+_floor_height_samples = 30  # Number of samples to keep for moving average
+
 def _person_to_dict(person):
     """Normalize a person entry to a dict with 'skeleton' being a list of joint dicts.
     Accepts either a dataclass `Person` (with .skeleton list of Joint objects) or a dict
@@ -157,8 +162,15 @@ class SkeletonVisualizer3D:
                 if bone[0] < len(skeleton) and bone[1] < len(skeleton):
                     j1 = skeleton[bone[0]]["pos"]
                     j2 = skeleton[bone[1]]["pos"]
-                    glVertex3f(j1["x"], j1["y"], j1["z"])
-                    glVertex3f(j2["x"], j2["y"], j2["z"])
+                    # Handle both Position object and dict
+                    if hasattr(j1, 'x'):
+                        glVertex3f(j1.x, j1.y, j1.z)
+                    else:
+                        glVertex3f(j1["x"], j1["y"], j1["z"])
+                    if hasattr(j2, 'x'):
+                        glVertex3f(j2.x, j2.y, j2.z)
+                    else:
+                        glVertex3f(j2["x"], j2["y"], j2["z"])
             
             glEnd()
             
@@ -170,7 +182,11 @@ class SkeletonVisualizer3D:
                 pos = j['pos'] if isinstance(j, dict) else getattr(j, 'pos', None)
                 if pos is None:
                     continue
-                glVertex3f(pos["x"], pos["y"], pos["z"])
+                # Handle both Position object and dict
+                if hasattr(pos, 'x'):
+                    glVertex3f(pos.x, pos.y, pos.z)
+                else:
+                    glVertex3f(pos["x"], pos["y"], pos["z"])
             glEnd()
 
         glDisable(GL_BLEND)            
