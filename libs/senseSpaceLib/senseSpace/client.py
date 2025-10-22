@@ -9,9 +9,11 @@ import json
 import socket
 import threading
 import time
+import struct
 from typing import Optional, Callable
 
 from .protocol import Frame
+from .communication import deserialize_message
 
 
 class SenseSpaceClient:
@@ -96,28 +98,52 @@ class SenseSpaceClient:
     
     def _receive_frames(self):
         """Background thread to receive frames from server"""
-        buffer = ""
+        json_buffer = ""
         
         while self.running and self.connected:
             try:
                 # Receive data
-                data = self.socket.recv(65536).decode('utf-8')
+                data = self.socket.recv(65536)
                 if not data:
                     print("[WARNING] Server closed connection")
                     break
-                    
-                buffer += data
                 
-                # Process complete messages (newline-delimited JSON)
-                while '\n' in buffer:
-                    line, buffer = buffer.split('\n', 1)
-                    if line.strip():
-                        try:
-                            message = json.loads(line)
+                # Try to detect protocol: check first byte
+                # JSON starts with '{' (0x7b), MessagePack magic is 0x9f
+                if data[0:1] == b'{':
+                    # JSON protocol (legacy)
+                    try:
+                        json_buffer += data.decode('utf-8')
+                        
+                        # Process complete messages (newline-delimited JSON)
+                        while '\n' in json_buffer:
+                            line, json_buffer = json_buffer.split('\n', 1)
+                            if line.strip():
+                                try:
+                                    message = json.loads(line)
+                                    self._handle_message(message)
+                                except json.JSONDecodeError as e:
+                                    print(f"[WARNING] Failed to parse JSON: {e}")
+                    except UnicodeDecodeError:
+                        print(f"[WARNING] Received binary data but failed to decode as UTF-8")
+                        continue
+                        
+                elif data[0:2] == b'\x9f\xd0' or data[0:2] == b'\x9f\xd1':
+                    # MessagePack protocol (binary)
+                    # Format: [magic:2][length:4][payload]
+                    if len(data) < 6:
+                        print(f"[WARNING] Incomplete MessagePack header")
+                        continue
+                    
+                    try:
+                        message = deserialize_message(data)
+                        if message:
                             self._handle_message(message)
-                        except json.JSONDecodeError as e:
-                            print(f"[WARNING] Failed to parse JSON: {e}")
-                            
+                    except Exception as e:
+                        print(f"[WARNING] Failed to deserialize MessagePack: {e}")
+                else:
+                    print(f"[WARNING] Unknown protocol magic bytes: {data[0:2].hex()}")
+                    
             except Exception as e:
                 if self.running:
                     print(f"[ERROR] Error receiving data: {e}")
