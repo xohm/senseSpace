@@ -91,6 +91,7 @@ def main():
     parser.add_argument("--port", type=int, default=12345, help="Server port (default: 12345)")
     parser.add_argument("--tcp", action="store_true", help="Use TCP instead of UDP for broadcasting (default: UDP)")
     parser.add_argument("--no-cameras", action="store_true", help="Skip ZED camera initialization and start server only (debug)")
+    parser.add_argument("--viz", action="store_true", help="Enable visualization (alternative to --mode viz)")
     
     args = parser.parse_args()
     
