@@ -1091,8 +1091,8 @@ class SenseSpaceServer:
                     # Update UI if callback is set (provide detected floor height or None)
                     if self.update_callback:
                         try:
-                            # Run UI update in separate thread so Qt rendering doesn't block capture
-                            threading.Thread(target=self.update_callback, args=(frame.people, self.detected_floor_height), daemon=True).start()
+                            # Call directly without creating new threads - callback should be fast
+                            self.update_callback(frame.people, self.detected_floor_height)
                         except Exception:
                             pass
 
@@ -1150,7 +1150,8 @@ class SenseSpaceServer:
                     # Update UI if callback is set
                     if self.update_callback:
                         try:
-                            threading.Thread(target=self.update_callback, args=(frame.people, self.detected_floor_height), daemon=True).start()
+                            # Call directly without creating new threads - callback should be fast
+                            self.update_callback(frame.people, self.detected_floor_height)
                         except Exception:
                             pass
 
