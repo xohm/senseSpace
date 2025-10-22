@@ -45,31 +45,28 @@ class SenseSpaceClient:
         self.connection_callback = callback
     
     def connect(self) -> bool:
-        """Connect to the senseSpace server via UDP"""
+        """Connect to the senseSpace server via TCP"""
         try:
-            # Use UDP (datagram) instead of TCP (stream)
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.settimeout(5.0)  # 5 second timeout for receiving
+            # Use TCP (stream) for reliable connection
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.settimeout(10.0)  # 10 second timeout for connection
             
-            # UDP doesn't "connect" in the TCP sense, but we can bind and start receiving
-            # Send a small handshake packet to let server know we exist
-            try:
-                handshake = b"HELLO"
-                self.socket.sendto(handshake, (self.server_ip, self.server_port))
-            except Exception as e:
-                print(f"[WARNING] Failed to send UDP handshake: {e}")
+            # Connect to server
+            self.socket.connect((self.server_ip, self.server_port))
+            self.socket.settimeout(None)  # No timeout for receiving (blocking)
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # Disable Nagle's algorithm
             
             self.connected = True
             self.running = True
             
             # Start receiving frames in background thread
-            self.receive_thread = threading.Thread(target=self._receive_frames_udp, daemon=True)
+            self.receive_thread = threading.Thread(target=self._receive_frames_tcp, daemon=True)
             self.receive_thread.start()
             
             if self.connection_callback:
                 self.connection_callback(True)
                 
-            print(f"[INFO] Connected to server at {self.server_ip}:{self.server_port} (UDP)")
+            print(f"[INFO] Connected to server at {self.server_ip}:{self.server_port} (TCP)")
             return True
             
         except Exception as e:
@@ -104,48 +101,70 @@ class SenseSpaceClient:
         """Get the most recently received frame"""
         return self.latest_frame
     
-    def _receive_frames_udp(self):
-        """Background thread to receive frames from server via UDP"""
+    def _receive_frames_tcp(self):
+        """Background thread to receive frames from server via TCP"""
+        buffer = b""
         
         while self.running and self.connected:
             try:
-                # Receive UDP datagram (max 65KB)
-                data, addr = self.socket.recvfrom(65536)
+                # Receive data from TCP stream
+                data = self.socket.recv(8192)
                 
                 if not data:
-                    continue
+                    # Connection closed
+                    break
                 
-                # Parse message based on protocol
-                if data[0:2] == b'\x9f\xd0' or data[0:2] == b'\x9f\xd1':
-                    # MessagePack protocol (binary)
-                    try:
-                        message = deserialize_message(data)
-                        if message:
-                            self._handle_message(message)
-                    except Exception as e:
-                        print(f"[WARNING] Failed to deserialize MessagePack: {e}")
+                buffer += data
+                
+                # Process complete messages in buffer
+                while True:
+                    # Check for MessagePack protocol (binary)
+                    if len(buffer) >= 6 and (buffer[0:2] == b'\x9f\xd0' or buffer[0:2] == b'\x9f\xd1'):
+                        # MessagePack format: [magic:2 bytes][length:4 bytes][payload]
+                        magic = buffer[0:2]
+                        length = struct.unpack('>I', buffer[2:6])[0]
                         
-                elif data[0:1] == b'{':
-                    # JSON protocol (legacy)
-                    try:
-                        line = data.decode('utf-8').strip()
-                        if line:
-                            message = json.loads(line)
-                            self._handle_message(message)
-                    except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                        print(f"[WARNING] Failed to parse JSON: {e}")
-                else:
-                    # Unknown protocol, might be handshake response
-                    if data == b"HELLO":
-                        continue
-                    print(f"[WARNING] Unknown protocol magic bytes: {data[0:2].hex()}")
+                        # Check if we have complete message
+                        if len(buffer) < 6 + length:
+                            break  # Wait for more data
+                        
+                        # Extract complete message
+                        message_bytes = buffer[0:6+length]
+                        buffer = buffer[6+length:]
+                        
+                        # Deserialize
+                        try:
+                            message = deserialize_message(message_bytes)
+                            if message:
+                                self._handle_message(message)
+                        except Exception as e:
+                            print(f"[WARNING] Failed to deserialize MessagePack: {e}")
+                    
+                    # Check for JSON protocol (legacy)
+                    elif b'\n' in buffer:
+                        # JSON messages are newline-delimited
+                        newline_pos = buffer.index(b'\n')
+                        line = buffer[:newline_pos]
+                        buffer = buffer[newline_pos+1:]
+                        
+                        try:
+                            line_str = line.decode('utf-8').strip()
+                            if line_str:
+                                message = json.loads(line_str)
+                                self._handle_message(message)
+                        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                            print(f"[WARNING] Failed to parse JSON: {e}")
+                    
+                    else:
+                        # No complete message yet
+                        break
                     
             except socket.timeout:
                 # Normal timeout, continue
                 continue
             except Exception as e:
                 if self.running:
-                    print(f"[ERROR] Error receiving UDP data: {e}")
+                    print(f"[ERROR] Error receiving TCP data: {e}")
                 break
         
         # Connection lost

@@ -89,7 +89,7 @@ def main():
                        help="Run in server (headless) or viz (Qt OpenGL) mode")
     parser.add_argument("--host", default="0.0.0.0", help="Server host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=12345, help="Server port (default: 12345)")
-    parser.add_argument("--tcp", action="store_true", help="Use TCP instead of UDP for broadcasting (default: UDP)")
+    parser.add_argument("--udp", action="store_true", help="Use UDP instead of TCP for broadcasting")
     parser.add_argument("--no-cameras", action="store_true", help="Skip ZED camera initialization and start server only (debug)")
     parser.add_argument("--viz", action="store_true", help="Enable visualization (alternative to --mode viz)")
     
@@ -99,8 +99,8 @@ def main():
     if args.viz:
         args.mode = "viz"
     
-    # Create server instance (UDP by default, TCP if --tcp flag is set)
-    server = SenseSpaceServer(host=args.host, port=args.port, use_udp=not args.tcp)
+    # Create server instance (TCP by default, UDP if --udp flag is set)
+    server = SenseSpaceServer(host=args.host, port=args.port, use_udp=args.udp)
     
     try:
         if args.mode == "viz":

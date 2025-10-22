@@ -53,7 +53,7 @@ class ClientSkeletonGLWidget(QGLWidget):
         # UI update timer
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update)
-        self.update_timer.start(33)  # ~30 FPS
+        self.update_timer.start(16)  # ~60 FPS to match server
 
         # Connection status
         self.last_frame_time = 0
