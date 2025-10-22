@@ -102,69 +102,56 @@ class SenseSpaceClient:
         return self.latest_frame
     
     def _receive_frames_tcp(self):
-        """Background thread to receive frames from server via TCP"""
-        buffer = b""
+        """Background thread to receive frames from server"""
+        json_buffer = ""
         
         while self.running and self.connected:
             try:
-                # Receive data from TCP stream
-                data = self.socket.recv(8192)
-                
+                # Receive data
+                data = self.socket.recv(65536)
                 if not data:
-                    # Connection closed
+                    print("[WARNING] Server closed connection")
                     break
                 
-                buffer += data
-                
-                # Process complete messages in buffer
-                while True:
-                    # Check for MessagePack protocol (binary)
-                    if len(buffer) >= 6 and (buffer[0:2] == b'\x9f\xd0' or buffer[0:2] == b'\x9f\xd1'):
-                        # MessagePack format: [magic:2 bytes][length:4 bytes][payload]
-                        magic = buffer[0:2]
-                        length = struct.unpack('>I', buffer[2:6])[0]
+                # Try to detect protocol: check first byte
+                # JSON starts with '{' (0x7b), MessagePack magic is 0x9f
+                if data[0:1] == b'{':
+                    # JSON protocol (legacy)
+                    try:
+                        json_buffer += data.decode('utf-8')
                         
-                        # Check if we have complete message
-                        if len(buffer) < 6 + length:
-                            break  # Wait for more data
+                        # Process complete messages (newline-delimited JSON)
+                        while '\n' in json_buffer:
+                            line, json_buffer = json_buffer.split('\n', 1)
+                            if line.strip():
+                                try:
+                                    message = json.loads(line)
+                                    self._handle_message(message)
+                                except json.JSONDecodeError as e:
+                                    print(f"[WARNING] Failed to parse JSON: {e}")
+                    except UnicodeDecodeError:
+                        print(f"[WARNING] Received binary data but failed to decode as UTF-8")
+                        continue
                         
-                        # Extract complete message
-                        message_bytes = buffer[0:6+length]
-                        buffer = buffer[6+length:]
-                        
-                        # Deserialize
-                        try:
-                            message = deserialize_message(message_bytes)
-                            if message:
-                                self._handle_message(message)
-                        except Exception as e:
-                            print(f"[WARNING] Failed to deserialize MessagePack: {e}")
+                elif data[0:2] == b'\x9f\xd0' or data[0:2] == b'\x9f\xd1':
+                    # MessagePack protocol (binary)
+                    # Format: [magic:2][length:4][payload]
+                    if len(data) < 6:
+                        print(f"[WARNING] Incomplete MessagePack header")
+                        continue
                     
-                    # Check for JSON protocol (legacy)
-                    elif b'\n' in buffer:
-                        # JSON messages are newline-delimited
-                        newline_pos = buffer.index(b'\n')
-                        line = buffer[:newline_pos]
-                        buffer = buffer[newline_pos+1:]
-                        
-                        try:
-                            line_str = line.decode('utf-8').strip()
-                            if line_str:
-                                message = json.loads(line_str)
-                                self._handle_message(message)
-                        except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                            print(f"[WARNING] Failed to parse JSON: {e}")
+                    try:
+                        message = deserialize_message(data)
+                        if message:
+                            self._handle_message(message)
+                    except Exception as e:
+                        print(f"[WARNING] Failed to deserialize MessagePack: {e}")
+                else:
+                    print(f"[WARNING] Unknown protocol magic bytes: {data[0:2].hex()}")
                     
-                    else:
-                        # No complete message yet
-                        break
-                    
-            except socket.timeout:
-                # Normal timeout, continue
-                continue
             except Exception as e:
                 if self.running:
-                    print(f"[ERROR] Error receiving TCP data: {e}")
+                    print(f"[ERROR] Error receiving data: {e}")
                 break
         
         # Connection lost
@@ -173,20 +160,12 @@ class SenseSpaceClient:
             self.connection_callback(False)
     
     def _handle_message(self, message: dict):
-        """Handle received message from server with frame dropping for old frames"""
+        """Handle received message from server"""
         if message.get("type") == "frame":
             frame_data = message.get("data")
             if frame_data:
                 try:
                     frame = Frame.from_dict(frame_data)
-                    
-                    # DROP OLD FRAMES: Only process if timestamp is newer than last frame
-                    if frame.timestamp <= self.latest_timestamp:
-                        # This is an old frame that arrived late, drop it
-                        return
-                    
-                    # Update latest timestamp and frame
-                    self.latest_timestamp = frame.timestamp
                     self.latest_frame = frame
                     
                     # Call frame callback if set
