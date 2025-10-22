@@ -673,11 +673,11 @@ class SenseSpaceServer:
         try:
             self.camera = sl.Camera()
 
-            # Set initialization parameters
+            # Set initialization parameters (optimized for performance)
             init_params = sl.InitParameters()
-            init_params.camera_resolution = sl.RESOLUTION.HD1080
-            init_params.camera_fps = 30
-            init_params.depth_mode = sl.DEPTH_MODE.NEURAL
+            init_params.camera_resolution = sl.RESOLUTION.VGA  # 672x376 for better performance
+            init_params.camera_fps = 60  # Higher FPS for smoother tracking
+            init_params.depth_mode = sl.DEPTH_MODE.PERFORMANCE  # Faster depth processing
             init_params.coordinate_units = sl.UNIT.MILLIMETER
             init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
 
@@ -695,13 +695,13 @@ class SenseSpaceServer:
                 self.camera.close()
                 return False
 
-            # Enable body tracking if requested
+            # Enable body tracking if requested (optimized for performance)
             if enable_body_tracking:
                 body_params = sl.BodyTrackingParameters()
                 body_params.enable_tracking = True
                 body_params.enable_body_fitting = True
                 body_params.body_format = sl.BODY_FORMAT.BODY_34
-                body_params.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE
+                body_params.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_FAST  # Faster model
 
                 status = self.camera.enable_body_tracking(body_params)
                 if status != sl.ERROR_CODE.SUCCESS:
@@ -837,13 +837,13 @@ class SenseSpaceServer:
 
             print(f"[INFO] Found {len(fusion_configurations)} cameras in configuration")
 
-            # Common parameters
+            # Common parameters (optimized for performance)
             init_params = sl.InitParameters()
             init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
             init_params.coordinate_units = sl.UNIT.MILLIMETER
-            init_params.depth_mode = sl.DEPTH_MODE.NEURAL
-            init_params.camera_resolution = sl.RESOLUTION.HD720
-            init_params.camera_fps = 30
+            init_params.depth_mode = sl.DEPTH_MODE.PERFORMANCE  # Faster depth processing
+            init_params.camera_resolution = sl.RESOLUTION.VGA  # 672x376 for better performance
+            init_params.camera_fps = 60  # Higher FPS for smoother tracking
 
             communication_parameters = sl.CommunicationParameters()
             communication_parameters.set_for_shared_memory()
@@ -852,7 +852,7 @@ class SenseSpaceServer:
             positional_tracking_parameters.set_as_static = True
 
             body_tracking_parameters = sl.BodyTrackingParameters()
-            body_tracking_parameters.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE
+            body_tracking_parameters.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_FAST  # Faster model
             body_tracking_parameters.body_format = sl.BODY_FORMAT.BODY_34
             body_tracking_parameters.enable_body_fitting = False
             body_tracking_parameters.enable_tracking = True
@@ -902,7 +902,7 @@ class SenseSpaceServer:
                 return False
 
             # Warmup - grab a few frames from each sender
-            print("[INFO] Senders started, warming up...")
+            print("[INFO] Senders started")
             bodies = sl.Bodies()
             for serial, cam in senders.items():
                 for _ in range(3):
@@ -1100,7 +1100,7 @@ class SenseSpaceServer:
         """Body tracking loop for fusion mode"""
         bodies = sl.Bodies()
 
-        MAX_FPS = 30
+        MAX_FPS = 60  # Match camera FPS
         FRAME_INTERVAL = 1.0 / MAX_FPS
         last_time = time.time()
 
@@ -1112,7 +1112,8 @@ class SenseSpaceServer:
                 time.sleep(FRAME_INTERVAL - (now - last_time))
             last_time = time.time()
 
-            # Grab frames from local senders first (essential for fusion to work)
+            # Grab frames from local senders sequentially (essential for fusion to work)
+            # Note: Sequential is required to avoid USB bandwidth conflicts
             try:
                 if hasattr(self, '_fusion_senders'):
                     for serial, zed in self._fusion_senders.items():
