@@ -34,13 +34,26 @@ This space provides students with:
 
 ```
 students/
-├── your_project_name/
-│   ├── README.md          # Describe your project
-│   ├── main.py            # Your main code
-│   ├── requirements.txt   # Additional dependencies
-│   └── ...                # Other files
-└── README.md              # This file
+├── example_student/       # Reference examples (DO NOT MODIFY)
+│   ├── proj1/            # Example: Thick skeleton lines
+│   ├── proj2/            # Example: Detection sphere
+│   └── proj3/            # Example: Raised arm detection
+├── your_project_name/    # Your project folder
+│   ├── README.md         # Describe your project
+│   ├── main.py           # Your main code
+│   ├── requirements.txt  # Additional dependencies
+│   └── ...               # Other files
+└── README.md             # This file
 ```
+
+## Example Projects
+
+The `example_student/` folder contains reference implementations:
+- **proj1**: Custom skeleton visualization with thick lines and custom colors
+- **proj2**: Detection sphere at camera center using QVector3D
+- **proj3**: Raised arm detection with interactive sphere size toggle (SPACE key)
+
+**Note**: These examples are for reference only. **Do not modify them**. Instead, create your own project folder and use these as inspiration.
 
 ## Guidelines
 
