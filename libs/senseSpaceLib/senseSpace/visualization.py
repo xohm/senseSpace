@@ -106,7 +106,6 @@ class SkeletonVisualizer3D:
             glColor3f(*bone_color)
             glColor4f(bone_color[0], bone_color[1], bone_color[2], alpha)
 
-            glLineWidth(2.0)
             glBegin(GL_LINES)
             
             # BODY_34 bone connections using enum values for clarity

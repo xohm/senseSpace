@@ -11,7 +11,8 @@ import sys
 import time
 from typing import Callable, Optional
 
-from senseSpaceLib.senseSpace.client import SenseSpaceClient, CommandLineClient
+from senseSpaceLib.senseSpace.client import CommandLineClient
+from senseSpaceLib.senseSpace.vizClient import VisualizationClient
 from senseSpaceLib.senseSpace.protocol import Frame
 
 
@@ -82,80 +83,31 @@ class MinimalClient:
         """Run in visualization mode"""
         try:
             from PyQt5 import QtWidgets, QtCore
-            from qt_client_viewer import ClientSkeletonGLWidget
+            from senseSpaceLib.senseSpace.vizWidget import SkeletonGLWidget
         except ImportError as e:
             print(f"[ERROR] Visualization requires PyQt5: {e}")
             return False
         
-        # Create Qt app
-        self.qt_app = QtWidgets.QApplication(sys.argv)
-        
-        # Create client
-        self.client = SenseSpaceClient(
+        # Create visualization client
+        self.client = VisualizationClient(
+            viewer_class=SkeletonGLWidget,
             server_ip=self.server_ip,
-            server_port=self.server_port
+            server_port=self.server_port,
+            window_title=f"SenseSpace - {self.server_ip}:{self.server_port}"
         )
         
-        # Set up callbacks
-        self.client.set_frame_callback(self._on_frame_wrapper)
+        # Override frame callback to call both viewer update and user callback
+        original_on_frame = self.client._on_frame_received
+        def combined_callback(frame):
+            original_on_frame(frame)  # Update viewer
+            self._on_frame(frame)      # Call user callback
+        self.client.set_frame_callback(combined_callback)
+        
+        # Set connection callback
         self.client.set_connection_callback(self._on_connection_changed)
         
-        # Connect
-        if not self.client.connect():
-            print("[ERROR] Failed to connect")
-            return False
-        
-        # Create viewer
-        main_window = QtWidgets.QMainWindow()
-        main_window.setWindowTitle(f"SenseSpace - {self.server_ip}:{self.server_port}")
-        main_window.resize(800, 600)
-        
-        self.qt_viewer = ClientSkeletonGLWidget()
-        main_window.setCentralWidget(self.qt_viewer)
-        
-        # Install event filter for keyboard input
-        if self.llm_callback:
-            main_window.keyPressEvent = self._handle_key_press
-        
-        main_window.show()
-        
-        # Call init callback
+        # Call init callback before running
         self._on_init()
         
-        print("[INFO] Running in visualization mode. Close window to exit...")
-        
-        # Run Qt event loop
-        try:
-            exit_code = self.qt_app.exec_()
-            return exit_code == 0
-        finally:
-            self.client.disconnect()
-    
-    def _handle_key_press(self, event):
-        """Handle keyboard events"""
-        if self.llm_callback:
-            # Convert Qt key to string character
-            key_text = event.text()  # Get the character as string
-            if not key_text:
-                # For special keys (Space, Enter, etc), use key name
-                from PyQt5 import QtCore
-                key_map = {
-                    QtCore.Qt.Key_Space: ' ',
-                    QtCore.Qt.Key_Return: '\n',
-                    QtCore.Qt.Key_Enter: '\n',
-                    QtCore.Qt.Key_Escape: 'ESC',
-                }
-                key_text = key_map.get(event.key(), '')
-            
-            if key_text:
-                self.llm_callback(key_text)
-        
-        event.accept()
-    
-    def _on_frame_wrapper(self, frame: Frame):
-        """Internal wrapper for viz mode - updates viewer and calls user callback"""
-        # Update viewer
-        if self.qt_viewer:
-            self.qt_viewer.update_frame(frame)
-        # Call user callback
-        self._on_frame(frame)
+        # Run (blocking) - this handles Qt app creation and event loop
+        return self.client.run()

@@ -10,10 +10,8 @@ Usage:
 
 import argparse
 import sys
-import time
-from typing import Optional
+import os
 
-import os, sys
 # Ensure local 'libs' folder is on sys.path when running from repo
 # repo structure: <repo_root>/client/senseSpaceClient.py and <repo_root>/libs/senseSpaceLib
 # so the repo root is one level up from the client folder.
@@ -26,71 +24,9 @@ elif repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
 # Import from our shared library
-from senseSpaceLib.senseSpace.client import SenseSpaceClient, CommandLineClient
-from senseSpaceLib.senseSpace.protocol import Frame
-
-
-class VisualizationClient(SenseSpaceClient):
-    """Client with Qt OpenGL visualization"""
-    
-    def __init__(self, server_ip="localhost", server_port=12345):
-        super().__init__(server_ip, server_port)
-        
-        # Qt components
-        self.qt_app = None
-        self.qt_viewer = None
-        
-        # Set up callbacks
-        self.set_frame_callback(self._on_frame_received)
-        self.set_connection_callback(self._on_connection_changed)
-    
-    def _on_frame_received(self, frame: Frame):
-        """Update Qt viewer with new frame"""
-        if self.qt_viewer:
-            self.qt_viewer.update_frame(frame)
-    
-    def _on_connection_changed(self, connected: bool):
-        """Handle connection status changes"""
-        if connected:
-            print(f"[INFO] Connected to {self.server_ip}:{self.server_port}")
-        else:
-            print(f"[INFO] Disconnected from {self.server_ip}:{self.server_port}")
-    
-    def run(self) -> bool:
-        """Run client in visualization mode"""
-        try:
-            from PyQt5 import QtWidgets, QtCore
-            from qt_client_viewer import ClientSkeletonGLWidget
-        except ImportError as e:
-            print(f"[ERROR] PyQt5 not available for visualization mode: {e}")
-            print("[INFO] Install PyQt5 and PyOpenGL: pip install PyQt5 PyOpenGL")
-            return False
-        
-        if not self.connect():
-            return False
-        
-        # Create Qt application
-        self.qt_app = QtWidgets.QApplication(sys.argv)
-        
-        # Create main window
-        main_window = QtWidgets.QMainWindow()
-        main_window.setWindowTitle(f"SenseSpace Client - {self.server_ip}:{self.server_port}")
-        main_window.resize(800, 600)
-        
-        # Create OpenGL viewer widget
-        self.qt_viewer = ClientSkeletonGLWidget()
-        main_window.setCentralWidget(self.qt_viewer)
-        
-        # Show window
-        main_window.show()
-        
-        print("[INFO] Running in visualization mode. Close window to exit...")
-        
-        try:
-            exit_code = self.qt_app.exec_()
-            return exit_code == 0
-        finally:
-            self.disconnect()
+from senseSpaceLib.senseSpace.client import CommandLineClient
+from senseSpaceLib.senseSpace.vizClient import VisualizationClient
+from senseSpaceLib.senseSpace.vizWidget import SkeletonGLWidget
 
 
 def main():
@@ -105,8 +41,10 @@ def main():
     # Create appropriate client type
     if args.viz:
         client = VisualizationClient(
+            viewer_class=SkeletonGLWidget,  # Use default viewer
             server_ip=args.server,
-            server_port=args.port
+            server_port=args.port,
+            window_title=f"SenseSpace Client - {args.server}:{args.port}"
         )
     else:
         client = CommandLineClient(
