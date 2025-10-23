@@ -4,9 +4,6 @@
 # But keep this .gitignore file itself
 !.gitignore
 
-# And keep the README
-!README.md
-
 # Keep the example student project folder
 !example_student/
 !example_student/**
