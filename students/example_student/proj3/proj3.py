@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Example: Raised arm detection - draws arms in red when raised
+Example: Raised arm detection with universal joint enum
 """
 
 import argparse
@@ -15,148 +15,116 @@ if os.path.isdir(libs_path) and libs_path not in sys.path:
 
 # Import from shared library
 from senseSpaceLib.senseSpace.vizClient import VisualizationClient
-from senseSpaceLib.senseSpace.protocol import Frame
+from senseSpaceLib.senseSpace.protocol import Frame, Person
 from senseSpaceLib.senseSpace.vizWidget import SkeletonGLWidget
-from senseSpaceLib.senseSpace.enums import Body34Joint, Body18Joint
+from senseSpaceLib.senseSpace.enums import UniversalJoint
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QVector3D
 from OpenGL.GL import *
 from OpenGL.GLU import *
 
-from PyQt5.QtCore import Qt
 
-def check_raised_arm(person, body_format="BODY_34"):
-    """Check which arms are raised for a person
+def check_raised_arm(person: Person, body_model: str = "BODY_34") -> tuple[bool, bool]:
+    """Check if person's arms are raised above shoulders
     
     Args:
         person: Person object with skeleton data
-        body_format: "BODY_34" or "BODY_18" skeleton format
+        body_model: "BODY_18" or "BODY_34"
         
     Returns:
-        tuple: (left_raised, right_raised) - boolean flags for each arm
+        (left_raised, right_raised) tuple of booleans
     """
-    if not person.skeleton:
-        return False, False
+    # Get joint positions using universal joint enum
+    left_shoulder_data = person.get_joint(UniversalJoint.LEFT_SHOULDER, body_model)
+    left_wrist_data = person.get_joint(UniversalJoint.LEFT_WRIST, body_model)
+    right_shoulder_data = person.get_joint(UniversalJoint.RIGHT_SHOULDER, body_model)
+    right_wrist_data = person.get_joint(UniversalJoint.RIGHT_WRIST, body_model)
     
-    # Select the appropriate joint enum based on body format
-    if body_format == "BODY_18":
-        J = Body18Joint
-        min_joints = 18
-    else:  # BODY_34
-        J = Body34Joint
-        min_joints = 34
+    left_raised = False
+    right_raised = False
     
-    skeleton = person.skeleton
-    
-    # Check if we have enough joints
-    if len(skeleton) < min_joints:
-        return False, False
-    
-    left_arm_raised = False
-    right_arm_raised = False
-    
-    # Check left arm - wrist higher than shoulder (higher Y value = higher position)
-    left_shoulder_idx = J.LEFT_SHOULDER.value
-    left_wrist_idx = J.LEFT_WRIST.value
-    if left_shoulder_idx < len(skeleton) and left_wrist_idx < len(skeleton):
-        shoulder_y = skeleton[left_shoulder_idx].pos.y
-        wrist_y = skeleton[left_wrist_idx].pos.y
-        if wrist_y > shoulder_y + 100:  # 100mm threshold - wrist ABOVE shoulder
-            left_arm_raised = True
+    # Check left arm
+    if left_shoulder_data and left_wrist_data:
+        shoulder_pos, _ = left_shoulder_data
+        wrist_pos, _ = left_wrist_data
+        # Arm is raised if wrist is 100mm or more above shoulder
+        if wrist_pos.y > shoulder_pos.y + 100:
+            left_raised = True
     
     # Check right arm
-    right_shoulder_idx = J.RIGHT_SHOULDER.value
-    right_wrist_idx = J.RIGHT_WRIST.value
-    if right_shoulder_idx < len(skeleton) and right_wrist_idx < len(skeleton):
-        shoulder_y = skeleton[right_shoulder_idx].pos.y
-        wrist_y = skeleton[right_wrist_idx].pos.y
-        if wrist_y > shoulder_y + 100:  # 100mm threshold - wrist ABOVE shoulder
-            right_arm_raised = True
+    if right_shoulder_data and right_wrist_data:
+        shoulder_pos, _ = right_shoulder_data
+        wrist_pos, _ = right_wrist_data
+        # Arm is raised if wrist is 100mm or more above shoulder
+        if wrist_pos.y > shoulder_pos.y + 100:
+            right_raised = True
     
-    return left_arm_raised, right_arm_raised
+    return left_raised, right_raised
 
 
 class CustomSkeletonWidget(SkeletonGLWidget):
-    """Custom visualization that shows red spheres at raised hands"""
-
+    """Custom visualization with raised arm detection"""
+    
     def onInit(self):
-        print("[INFO] Initializing CustomSkeletonWidget")
-        self.sphere_radius = 40.0  # Normal size
-        self.sphere_size_large = False
-        self.custom_data = []
-        # Create quadric once for efficiency
-        self.quadric = gluNewQuadric()
-
+        """Initialize custom state"""
+        self.sphere_radius = 80.0  # Normal size
+        self.sphere_size_large = False  # Track size state
+        self.quadric = gluNewQuadric()  # Create quadric once
+    
     def onClose(self):
-        print("[INFO] Closing CustomSkeletonWidget")
-        # Clean up quadric
+        """Cleanup resources"""
         if hasattr(self, 'quadric') and self.quadric:
             gluDeleteQuadric(self.quadric)
-            self.quadric = None
     
     def keyPressEvent(self, event):
-        """Handle key press events"""
+        """Handle keyboard input"""
         if event.key() == Qt.Key_Space:
             # Toggle sphere size
             self.sphere_size_large = not self.sphere_size_large
             if self.sphere_size_large:
-                self.sphere_radius = 80.0  # 2x bigger
+                self.sphere_radius = 160.0  # 2x bigger
                 print("[INFO] Sphere size: LARGE (160mm)")
             else:
-                self.sphere_radius = 40.0  # Normal size
+                self.sphere_radius = 80.0  # Normal
                 print("[INFO] Sphere size: NORMAL (80mm)")
         else:
             # Pass other keys to parent
             super().keyPressEvent(event)
-
+       
     def draw_custom(self, frame: Frame):
-        """Draw red spheres at hands when arms are raised"""
+        """Draw red spheres at raised hands"""
         if not hasattr(frame, 'people') or not frame.people:
             return
         
-        # Get body model from frame (defaults to BODY_34)
+        # Get body model from frame
         body_model = frame.body_model if frame.body_model else "BODY_34"
         
-        # Select the appropriate joint enum based on body model
-        if body_model == "BODY_18":
-            J = Body18Joint
-        else:  # BODY_34
-            J = Body34Joint
-        
+        # Check each person
         for person in frame.people:
-            # Check which arms are raised (pass body model)
             left_raised, right_raised = check_raised_arm(person, body_model)
             
-            if not person.skeleton:
-                continue
-            
-            skeleton = person.skeleton
-            
-            # Draw red sphere at left hand if raised
+            # Draw sphere at left hand if raised
             if left_raised:
-                left_hand_idx = J.LEFT_HAND.value
-                if left_hand_idx < len(skeleton):
-                    hand_pos = skeleton[left_hand_idx].pos
-                    
+                wrist_data = person.get_joint(UniversalJoint.LEFT_WRIST, body_model)
+                if wrist_data:
+                    wrist_pos, _ = wrist_data
                     glPushMatrix()
-                    glTranslatef(hand_pos.x, hand_pos.y, hand_pos.z)
-                    glColor4f(1.0, 0.0, 0.0, 0.7)  # Red semi-transparent
-                    gluSphere(self.quadric, self.sphere_radius, 16, 16)
+                    glTranslatef(wrist_pos.x, wrist_pos.y, wrist_pos.z)
+                    glColor4f(1.0, 0.0, 0.0, 0.6)  # Semi-transparent red
+                    gluSphere(self.quadric, self.sphere_radius, 32, 32)
                     glPopMatrix()
             
-            # Draw red sphere at right hand if raised
+            # Draw sphere at right hand if raised
             if right_raised:
-                right_hand_idx = J.RIGHT_HAND.value
-                if right_hand_idx < len(skeleton):
-                    hand_pos = skeleton[right_hand_idx].pos
-                    
+                wrist_data = person.get_joint(UniversalJoint.RIGHT_WRIST, body_model)
+                if wrist_data:
+                    wrist_pos, _ = wrist_data
                     glPushMatrix()
-                    glTranslatef(hand_pos.x, hand_pos.y, hand_pos.z)
-                    glColor4f(1.0, 0.0, 0.0, 0.7)  # Red semi-transparent
-                    gluSphere(self.quadric, self.sphere_radius, 16, 16)
+                    glTranslatef(wrist_pos.x, wrist_pos.y, wrist_pos.z)
+                    glColor4f(1.0, 0.0, 0.0, 0.6)  # Semi-transparent red
+                    gluSphere(self.quadric, self.sphere_radius, 32, 32)
                     glPopMatrix()
-
-
 
 
 def main():
@@ -171,7 +139,7 @@ def main():
         viewer_class=CustomSkeletonWidget,
         server_ip=args.server,
         server_port=args.port,
-        window_title="Raised Arm Detection Example"
+        window_title="Raised Arm Detection - Press SPACE to toggle sphere size"
     )
     
     success = client.run()

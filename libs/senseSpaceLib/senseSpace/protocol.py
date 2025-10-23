@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import List, Dict, Union
-from .enums import Body18Joint, Body34Joint, SkeletonAngle
+from .enums import Body18Joint, Body34Joint, SkeletonAngle, UniversalJoint
 from typing import Optional
 import numpy as np
 
@@ -101,6 +101,39 @@ class Person:
     confidence: float
     skeleton: List[Joint]
 
+    def get_joint(self, joint_id: UniversalJoint, body_model: str = "BODY_34") -> Optional[tuple[Position, Quaternion]]:
+        """Get joint position and orientation by universal joint ID
+        
+        Args:
+            joint_id: UniversalJoint enum value
+            body_model: "BODY_18" or "BODY_34" (default: "BODY_34")
+            
+        Returns:
+            tuple of (Position, Quaternion) if joint exists, None otherwise
+            
+        Example:
+            pos, quat = person.get_joint(UniversalJoint.LEFT_WRIST, frame.body_model)
+            if pos and quat:
+                print(f"Left wrist at ({pos.x}, {pos.y}, {pos.z})")
+        """
+        # Map universal joint to format-specific index
+        if body_model == "BODY_18":
+            index = joint_id.to_body18_index()
+        elif body_model == "BODY_34":
+            index = joint_id.to_body34_index()
+        else:
+            return None
+        
+        if index is None:
+            return None  # Joint not available in this format
+        
+        # Find joint in skeleton
+        for joint in self.skeleton:
+            if joint.i == index:
+                return (joint.pos, joint.ori)
+        
+        return None  # Joint not found in skeleton data
+    
     def to_dict(self):
         return {
             "id": self.id,
