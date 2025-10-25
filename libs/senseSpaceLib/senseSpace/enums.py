@@ -2,25 +2,25 @@ from enum import Enum
 from typing import Optional
 
 class Body18Joint(Enum):
-    """ZED SDK BODY_18 joint indices"""
-    PELVIS = 0
-    NAVAL_SPINE = 1
-    CHEST_SPINE = 2
-    NECK = 3
-    LEFT_CLAVICLE = 4
+    """ZED SDK BODY_18 joint indices (COCO18 format)"""
+    NOSE = 0
+    NECK = 1
+    RIGHT_SHOULDER = 2
+    RIGHT_ELBOW = 3
+    RIGHT_WRIST = 4
     LEFT_SHOULDER = 5
     LEFT_ELBOW = 6
     LEFT_WRIST = 7
-    LEFT_HAND = 8
-    LEFT_HANDTIP = 9
-    LEFT_THUMB = 10
-    RIGHT_CLAVICLE = 11
-    RIGHT_SHOULDER = 12
-    RIGHT_ELBOW = 13
-    RIGHT_WRIST = 14
-    RIGHT_HAND = 15
-    RIGHT_HANDTIP = 16
-    RIGHT_THUMB = 17
+    RIGHT_HIP = 8
+    RIGHT_KNEE = 9
+    RIGHT_ANKLE = 10
+    LEFT_HIP = 11
+    LEFT_KNEE = 12
+    LEFT_ANKLE = 13
+    RIGHT_EYE = 14
+    LEFT_EYE = 15
+    RIGHT_EAR = 16
+    LEFT_EAR = 17
 
 class Body34Joint(Enum):
     """ZED SDK BODY_34 joint indices"""
@@ -144,7 +144,14 @@ class UniversalJoint(Enum):
     RIGHT_HEEL = 34
     
     def to_body18_index(self) -> Optional[int]:
-        """Map to BODY_18 joint index (None if not available)"""
+        """Map to BODY_18 joint index (None if not available)
+        
+        BODY_18 follows COCO18 format:
+        0=NOSE, 1=NECK, 2=R_SHOULDER, 3=R_ELBOW, 4=R_WRIST,
+        5=L_SHOULDER, 6=L_ELBOW, 7=L_WRIST, 8=R_HIP, 9=R_KNEE,
+        10=R_ANKLE, 11=L_HIP, 12=L_KNEE, 13=L_ANKLE, 
+        14=R_EYE, 15=L_EYE, 16=R_EAR, 17=L_EAR
+        """
         mapping = {
             UniversalJoint.NOSE: 0,
             UniversalJoint.NECK: 1,
@@ -168,7 +175,11 @@ class UniversalJoint(Enum):
         return mapping.get(self, None)
     
     def to_body34_index(self) -> Optional[int]:
-        """Map to BODY_34 joint index (None if not available)"""
+        """Map to BODY_34 joint index (None if not available)
+        
+        BODY_34 extends BODY_18 with additional joints:
+        Pelvis, Naval/Chest spine, Clavicles, Hands, Heels, Head
+        """
         mapping = {
             UniversalJoint.PELVIS: 0,
             UniversalJoint.NAVAL_SPINE: 1,
@@ -185,16 +196,16 @@ class UniversalJoint(Enum):
             UniversalJoint.LEFT_HIP: 18,
             UniversalJoint.LEFT_KNEE: 19,
             UniversalJoint.LEFT_ANKLE: 20,
-            UniversalJoint.LEFT_HEEL: 21,
             UniversalJoint.RIGHT_HIP: 22,
             UniversalJoint.RIGHT_KNEE: 23,
             UniversalJoint.RIGHT_ANKLE: 24,
-            UniversalJoint.RIGHT_HEEL: 25,
-            UniversalJoint.NOSE: 26,
-            UniversalJoint.LEFT_EYE: 27,
-            UniversalJoint.RIGHT_EYE: 28,
+            UniversalJoint.NOSE: 27,
+            UniversalJoint.LEFT_EYE: 28,
             UniversalJoint.LEFT_EAR: 29,
-            UniversalJoint.RIGHT_EAR: 30,
+            UniversalJoint.RIGHT_EYE: 30,
+            UniversalJoint.RIGHT_EAR: 31,
+            UniversalJoint.LEFT_HEEL: 32,
+            UniversalJoint.RIGHT_HEEL: 33,
         }
         return mapping.get(self, None)
 
