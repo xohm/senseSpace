@@ -25,6 +25,20 @@ dependencies = [
 server = [
     # ZED SDK dependencies (if any pip-installable)
 ]
+segmentation = [
+    # MediaPipe-based segmentation server dependencies
+    # Note: Install mediapipe with --no-deps to avoid numpy conflict with pyzed
+    # Installation: pip install --no-deps mediapipe && pip install -e .[segmentation]
+    "absl-py",
+    "attrs>=19.1.0",
+    "flatbuffers>=2.0",
+    "jax",
+    "jaxlib",
+    "matplotlib",
+    "opencv-contrib-python",
+    "protobuf>=4.25.3,<5",
+    "sentencepiece",
+]
 
 [tool.setuptools.packages.find]
 where = ["libs"]

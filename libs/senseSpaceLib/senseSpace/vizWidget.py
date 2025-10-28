@@ -5,6 +5,7 @@ Qt OpenGL viewer widget for SenseSpace client
 
 import math
 import time
+import numpy as np
 from typing import Optional, List
 
 from PyQt5 import QtWidgets, QtCore, QtOpenGL
@@ -50,6 +51,14 @@ class SkeletonGLWidget(QGLWidget):
         # Connection status
         self.last_frame_time = 0
 
+        # Point cloud rendering (VBO for performance)
+        self.point_cloud_vbo = None  # Vertex Buffer Object
+        self.point_cloud_color_vbo = None  # Color Buffer Object
+        self.point_cloud_count = 0  # Current number of points
+        self.point_cloud_capacity = 0  # VBO capacity (allocated size)
+        self.point_cloud_lock = QtCore.QMutex()
+        self.point_cloud_enabled = True  # Toggle point cloud rendering
+
         # Make sure widget receives mouse events and focus
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -71,6 +80,9 @@ class SkeletonGLWidget(QGLWidget):
         if hasattr(self, 'update_timer'):
             self.update_timer.stop()
 
+        # Cleanup VBOs
+        self._cleanup_point_cloud_vbo()
+
         self.onClose()
 
         super().close()
@@ -87,6 +99,33 @@ class SkeletonGLWidget(QGLWidget):
         with QtCore.QMutexLocker(self.frame_lock):
             return self.current_frame
     
+    def update_point_cloud(self, points: np.ndarray, colors: np.ndarray):
+        """
+        Update point cloud data (called from network thread).
+        
+        Args:
+            points: Nx3 numpy array of float32 (x, y, z positions in mm)
+            colors: Nx3 numpy array of uint8 (r, g, b colors 0-255)
+        """
+        with QtCore.QMutexLocker(self.point_cloud_lock):
+            num_points = len(points)
+            
+            if num_points == 0:
+                self.point_cloud_count = 0
+                return
+            
+            # Ensure correct data types
+            points = points.astype(np.float32)
+            colors = colors.astype(np.uint8)
+            
+            # Check if we need to reallocate VBO (only if new size is bigger)
+            if num_points > self.point_cloud_capacity:
+                self._allocate_point_cloud_vbo(num_points)
+            
+            # Update VBO data
+            self._update_point_cloud_vbo(points, colors, num_points)
+            self.point_cloud_count = num_points
+    
     # =========================================================================
     # OpenGL Initialization & Setup (override these for custom setup)
     # =========================================================================
@@ -98,7 +137,10 @@ class SkeletonGLWidget(QGLWidget):
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glClearColor(0.1, 0.1, 0.1, 1.0)
         glLineWidth(2.0)
-        glPointSize(8.0)
+        glPointSize(2.0)  # Point cloud point size
+        
+        # Initialize VBOs for point cloud
+        self._init_point_cloud_vbo()
     
     def resizeGL(self, width, height):
         """Handle window resize"""
@@ -147,6 +189,7 @@ class SkeletonGLWidget(QGLWidget):
 
         # Draw scene components (override individual methods for custom viz)
         self.draw_floor(frame)
+        self.draw_point_cloud()  # Draw point cloud before skeletons
         self.draw_skeletons(frame)
         self.draw_cameras(frame)
         self.draw_custom(frame)  # Student custom drawing in 3D space
@@ -173,6 +216,38 @@ class SkeletonGLWidget(QGLWidget):
             people_data=frame.people if hasattr(frame, 'people') else [],
             zed_floor_height=floor_height
         )
+    
+    def draw_point_cloud(self):
+        """
+        Draw point cloud using VBO for maximum performance.
+        Override to customize point cloud rendering.
+        """
+        if not self.point_cloud_enabled:
+            return
+        
+        with QtCore.QMutexLocker(self.point_cloud_lock):
+            if self.point_cloud_count == 0 or self.point_cloud_vbo is None:
+                return
+            
+            # Enable client states for VBO rendering
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glEnableClientState(GL_COLOR_ARRAY)
+            
+            # Bind vertex VBO
+            glBindBuffer(GL_ARRAY_BUFFER, self.point_cloud_vbo)
+            glVertexPointer(3, GL_FLOAT, 0, None)
+            
+            # Bind color VBO
+            glBindBuffer(GL_ARRAY_BUFFER, self.point_cloud_color_vbo)
+            glColorPointer(3, GL_UNSIGNED_BYTE, 0, None)
+            
+            # Draw points
+            glDrawArrays(GL_POINTS, 0, self.point_cloud_count)
+            
+            # Cleanup
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glDisableClientState(GL_VERTEX_ARRAY)
+            glDisableClientState(GL_COLOR_ARRAY)
     
     def draw_skeletons(self, frame: Frame):
         """Draw skeleton data - override to customize skeleton visualization"""
@@ -382,6 +457,11 @@ class SkeletonGLWidget(QGLWidget):
             people_count = len(frame.people) if (frame and frame.people) else 0
             self.renderText(35, 22, f"{status_text}")
             self.renderText(35, 40, f"People: {people_count}")
+            
+            # Show point cloud info
+            with QtCore.QMutexLocker(self.point_cloud_lock):
+                if self.point_cloud_count > 0:
+                    self.renderText(35, 58, f"Points: {self.point_cloud_count:,}")
         except Exception:
             pass
         
@@ -449,4 +529,92 @@ class SkeletonGLWidget(QGLWidget):
         factor = 1.1 if delta > 0 else 0.9
         self.camera_distance = max(100.0, min(10000.0, self.camera_distance * factor))
         self.update()
+    
+    def keyPressEvent(self, event):
+        """Handle keyboard input - override for custom key handling"""
+        # Toggle point cloud rendering with 'P' key
+        if event.key() == Qt.Key_P:
+            self.point_cloud_enabled = not self.point_cloud_enabled
+            print(f"[INFO] Point cloud rendering: {'enabled' if self.point_cloud_enabled else 'disabled'}")
+            self.update()
+        else:
+            super().keyPressEvent(event)
+    
+    # =========================================================================
+    # VBO Management for Point Cloud (high-performance rendering)
+    # =========================================================================
+    
+    def _init_point_cloud_vbo(self):
+        """Initialize VBO buffers for point cloud rendering"""
+        # VBOs will be created on first point cloud update
+        self.point_cloud_vbo = None
+        self.point_cloud_color_vbo = None
+        self.point_cloud_capacity = 0
+        self.point_cloud_count = 0
+    
+    def _allocate_point_cloud_vbo(self, num_points: int):
+        """
+        Allocate or reallocate VBO to fit num_points.
+        Only called when current capacity is insufficient.
+        
+        Args:
+            num_points: Number of points to allocate space for
+        """
+        # Add 20% overhead to reduce frequent reallocations
+        new_capacity = int(num_points * 1.2)
+        
+        # Delete old VBOs if they exist
+        self._cleanup_point_cloud_vbo()
+        
+        # Generate new VBOs
+        self.point_cloud_vbo = glGenBuffers(1)
+        self.point_cloud_color_vbo = glGenBuffers(1)
+        
+        # Allocate vertex buffer (3 floats per point)
+        glBindBuffer(GL_ARRAY_BUFFER, self.point_cloud_vbo)
+        glBufferData(GL_ARRAY_BUFFER, new_capacity * 3 * 4, None, GL_DYNAMIC_DRAW)  # 4 bytes per float
+        
+        # Allocate color buffer (3 uint8 per point)
+        glBindBuffer(GL_ARRAY_BUFFER, self.point_cloud_color_vbo)
+        glBufferData(GL_ARRAY_BUFFER, new_capacity * 3 * 1, None, GL_DYNAMIC_DRAW)  # 1 byte per uint8
+        
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        
+        self.point_cloud_capacity = new_capacity
+        print(f"[INFO] Allocated VBO for {new_capacity:,} points ({new_capacity * 3 * 4 / 1024 / 1024:.1f} MB vertices, {new_capacity * 3 / 1024:.1f} KB colors)")
+    
+    def _update_point_cloud_vbo(self, points: np.ndarray, colors: np.ndarray, num_points: int):
+        """
+        Update VBO data without reallocation.
+        
+        Args:
+            points: Nx3 float32 array
+            colors: Nx3 uint8 array
+            num_points: Number of points to update
+        """
+        if self.point_cloud_vbo is None or self.point_cloud_color_vbo is None:
+            return
+        
+        # Update vertex buffer (subdata is faster than full buffer update)
+        glBindBuffer(GL_ARRAY_BUFFER, self.point_cloud_vbo)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, points.nbytes, points)
+        
+        # Update color buffer
+        glBindBuffer(GL_ARRAY_BUFFER, self.point_cloud_color_vbo)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, colors.nbytes, colors)
+        
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+    
+    def _cleanup_point_cloud_vbo(self):
+        """Delete VBO buffers to free GPU memory"""
+        if self.point_cloud_vbo is not None:
+            glDeleteBuffers(1, [self.point_cloud_vbo])
+            self.point_cloud_vbo = None
+        
+        if self.point_cloud_color_vbo is not None:
+            glDeleteBuffers(1, [self.point_cloud_color_vbo])
+            self.point_cloud_color_vbo = None
+        
+        self.point_cloud_capacity = 0
+        self.point_cloud_count = 0
 

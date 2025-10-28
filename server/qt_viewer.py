@@ -57,6 +57,20 @@ class SkeletonGLWidget(QGLWidget):
         # Mouse state
         self._dragging = False
         self._last_pos = None
+        
+        # Point cloud data
+        self.point_cloud_points = None  # Nx3 numpy array
+        self.point_cloud_colors = None  # Nx3 numpy array (uint8 RGB)
+        self.show_point_cloud = True
+        self._last_pc_update = 0  # Throttle updates
+        
+        # OpenGL VBO handles (allocated in initializeGL)
+        self.vbo_vertices = None
+        self.vbo_colors = None
+        self.vbo_capacity = 0
+        
+        # Enable keyboard focus
+        self.setFocusPolicy(Qt.StrongFocus)
 
     # ------------------------
     # Data setters
@@ -72,14 +86,43 @@ class SkeletonGLWidget(QGLWidget):
     def set_floor_height(self, height):
         self.zed_floor_height = height
         self.update()
+    
+    def set_point_cloud(self, points, colors):
+        """
+        Optional: Set point cloud data for visualization.
+        Throttled to 30 FPS to avoid overwhelming the renderer.
+        
+        Args:
+            points: Nx3 numpy array of xyz positions (float32)
+            colors: Nx3 numpy array of rgb colors (uint8)
+        """
+        import time
+        now = time.time()
+        
+        # Throttle to ~30 FPS (0.033 seconds)
+        if now - self._last_pc_update < 0.033:
+            return
+        
+        self._last_pc_update = now
+        self.point_cloud_points = points
+        self.point_cloud_colors = colors
+        self.update()
 
     # ------------------------
     # OpenGL setup
     # ------------------------
     def initializeGL(self):
         glEnable(GL_DEPTH_TEST)
-        glPointSize(8.0)
+        glPointSize(2.0)  # Smaller points for point clouds
         glClearColor(0.1, 0.1, 0.1, 1.0)
+        
+        # Initialize VBOs for point cloud (if needed)
+        try:
+            self.vbo_vertices = glGenBuffers(1)
+            self.vbo_colors = glGenBuffers(1)
+        except Exception:
+            # VBOs not available or error - will fall back to immediate mode
+            pass
 
     def resizeGL(self, w, h):
         glViewport(0, 0, w, h)
@@ -153,12 +196,83 @@ class SkeletonGLWidget(QGLWidget):
         if event.key() == Qt.Key_C:
             self._camera_flip = not self._camera_flip
             self.update()
+        # Toggle point cloud with 'p'
+        elif event.key() == Qt.Key_P:
+            self.show_point_cloud = not self.show_point_cloud
+            print(f"[INFO] Point cloud display: {'ON' if self.show_point_cloud else 'OFF'}")
+            self.update()
+        # Save debug images with Space
+        elif event.key() == Qt.Key_Space:
+            if hasattr(self, 'server') and self.server:
+                self.server._save_debug_image = True
+                print("[INFO] Debug image save triggered - will save on next frame")
+            else:
+                print("[WARNING] Server not available for debug image save")
         else:
             super().keyPressEvent(event)
 
     # ------------------------
     # Rendering
     # ------------------------
+    def _draw_point_cloud(self):
+        """Draw point cloud using VBOs (fallback to immediate mode if VBOs unavailable)"""
+        if self.point_cloud_points is None or len(self.point_cloud_points) == 0:
+            return
+        
+        num_points = len(self.point_cloud_points)
+        
+        # Use VBOs if available
+        if self.vbo_vertices is not None and self.vbo_colors is not None:
+            try:
+                # Allocate or resize VBO if needed (only when capacity exceeded)
+                if num_points > self.vbo_capacity:
+                    self.vbo_capacity = int(num_points * 1.2)  # 20% headroom
+                    
+                    glBindBuffer(GL_ARRAY_BUFFER, self.vbo_vertices)
+                    glBufferData(GL_ARRAY_BUFFER, self.vbo_capacity * 12, None, GL_STREAM_DRAW)
+                    
+                    glBindBuffer(GL_ARRAY_BUFFER, self.vbo_colors)
+                    glBufferData(GL_ARRAY_BUFFER, self.vbo_capacity * 3, None, GL_STREAM_DRAW)
+                
+                # Update VBO data (STREAM_DRAW optimized for frequent updates)
+                glBindBuffer(GL_ARRAY_BUFFER, self.vbo_vertices)
+                glBufferSubData(GL_ARRAY_BUFFER, 0, num_points * 12, self.point_cloud_points)
+                
+                glBindBuffer(GL_ARRAY_BUFFER, self.vbo_colors)
+                glBufferSubData(GL_ARRAY_BUFFER, 0, num_points * 3, self.point_cloud_colors)
+                
+                # Draw using vertex arrays (more efficient)
+                glEnableClientState(GL_VERTEX_ARRAY)
+                glEnableClientState(GL_COLOR_ARRAY)
+                
+                glBindBuffer(GL_ARRAY_BUFFER, self.vbo_vertices)
+                glVertexPointer(3, GL_FLOAT, 0, None)
+                
+                glBindBuffer(GL_ARRAY_BUFFER, self.vbo_colors)
+                glColorPointer(3, GL_UNSIGNED_BYTE, 0, None)
+                
+                glDrawArrays(GL_POINTS, 0, num_points)
+                
+                glDisableClientState(GL_VERTEX_ARRAY)
+                glDisableClientState(GL_COLOR_ARRAY)
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                
+                return
+            except Exception as e:
+                # VBO failed, fall back to immediate mode
+                print(f"[WARNING] VBO rendering failed: {e}")
+        
+        # Fallback: immediate mode (slower but compatible)
+        glBegin(GL_POINTS)
+        for i in range(num_points):
+            glColor3ub(self.point_cloud_colors[i][0], 
+                      self.point_cloud_colors[i][1], 
+                      self.point_cloud_colors[i][2])
+            glVertex3f(self.point_cloud_points[i][0],
+                      self.point_cloud_points[i][1],
+                      self.point_cloud_points[i][2])
+        glEnd()
+    
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glLoadIdentity()
@@ -254,6 +368,10 @@ class SkeletonGLWidget(QGLWidget):
         draw_floor_grid(size=5000, spacing=200, height=0,
                         color=(0.2, 0.2, 0.2), people_data=self.people_data,
                         zed_floor_height=self.zed_floor_height)
+        
+        # Draw point cloud if available (optional feature)
+        if self.show_point_cloud and self.point_cloud_points is not None:
+            self._draw_point_cloud()
 
         draw_skeletons_with_bones(self.people_data,
                                   joint_color=(0.2, 0.8, 1.0),
@@ -317,12 +435,17 @@ class SkeletonGLWidget(QGLWidget):
 
             # Build lines of text
             clients = len(getattr(server_obj, "clients", [])) if server_obj else 0
+            pc_count = len(self.point_cloud_points) if self.point_cloud_points is not None else 0
             lines = [
                 f"Server: {server_ip}:{server_port}",
                 f"People: {people_count}",
+                f"Points: {pc_count:,}" if pc_count > 0 else None,
                 (f"Floor: {floor_height:.0f}mm" if floor_height is not None else "Floor: detecting..."),
                 f"Clients: {clients}"
             ]
+            
+            # Filter out None entries
+            lines = [line for line in lines if line is not None]
 
             # Background box size based on number of lines (fixed width)
             line_h = 14
@@ -357,7 +480,7 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 800, 600)
         # Pass server object into GL widget so it can query camera poses
         self.server = server
-        self.glWidget = SkeletonGLWidget(self)
+        self.glWidget = SkeletonGLWidget(server_instance=server)
         self.setCentralWidget(self.glWidget)
         self.server_ip = server_ip
         self.server_port = server_port

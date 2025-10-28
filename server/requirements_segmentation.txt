@@ -1,0 +1,19 @@
+# Requirements for MediaPipe-based Segmentation Point Cloud Server
+# Install with: pip install -r requirements_segmentation.txt
+
+# MediaPipe segmentation (installed without deps to avoid numpy conflict)
+# Note: Install MediaPipe first with --no-deps, then install dependencies separately
+# Command: pip install --no-deps mediapipe
+
+# MediaPipe dependencies (compatible with numpy 2.x from pyzed)
+absl-py
+attrs>=19.1.0
+flatbuffers>=2.0
+jax
+jaxlib
+matplotlib
+opencv-contrib-python
+protobuf>=4.25.3,<5
+sentencepiece
+
+# Note: numpy will come from pyzed (>=2.0), which is compatible with these packages
