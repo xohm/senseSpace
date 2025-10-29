@@ -313,6 +313,122 @@ class SkeletonGLWidget(QGLWidget):
     def draw_overlay(self, frame: Frame):
         """Draw 2D overlay (status, info, etc) - override to customize overlay"""
         self.draw_connection_status(frame)
+        self.draw_recording_indicator()
+        self.draw_playback_indicator()
+    
+    def draw_recording_indicator(self):
+        """Draw red circle indicator when recording"""
+        # Check if we're recording
+        if not hasattr(self, 'client') or self.client is None:
+            return
+        
+        # Check if client has a recorder and is recording
+        is_recording = False
+        if hasattr(self.client, 'recorder') and self.client.recorder is not None:
+            is_recording = self.client.recorder.is_recording()
+        
+        if not is_recording:
+            return
+        
+        # Switch to 2D overlay mode
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+        glOrtho(0, self.width(), self.height(), 0, -1, 1)
+        
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+        
+        glDisable(GL_DEPTH_TEST)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        
+        # Draw red circle (top-right corner)
+        center_x = self.width() - 30
+        center_y = 30
+        radius = 15
+        
+        glColor4f(1.0, 0.0, 0.0, 0.9)  # Red with slight transparency
+        glBegin(GL_TRIANGLE_FAN)
+        glVertex2f(center_x, center_y)
+        for i in range(361):
+            angle = i * 3.14159 / 180.0
+            x = center_x + radius * math.cos(angle)
+            y = center_y + radius * math.sin(angle)
+            glVertex2f(x, y)
+        glEnd()
+        
+        # Draw text "REC" next to the circle
+        glColor4f(1.0, 1.0, 1.0, 1.0)
+        try:
+            self.renderText(self.width() - 80, 35, "REC")
+        except Exception:
+            pass
+        
+        # Restore 3D mode
+        glDisable(GL_BLEND)
+        glEnable(GL_DEPTH_TEST)
+        glPopMatrix()
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
+    
+    def draw_playback_indicator(self):
+        """Draw green play triangle indicator when playing back recording"""
+        # Check if we're in playback mode
+        if not hasattr(self, 'client') or self.client is None:
+            return
+        
+        # Check if client has a player and is playing
+        is_playing = False
+        if hasattr(self.client, 'player') and self.client.player is not None:
+            is_playing = self.client.player.is_playing()
+        
+        if not is_playing:
+            return
+        
+        # Switch to 2D overlay mode
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+        glOrtho(0, self.width(), self.height(), 0, -1, 1)
+        
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+        
+        glDisable(GL_DEPTH_TEST)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        
+        # Draw green play triangle (top-right corner)
+        center_x = self.width() - 30
+        center_y = 30
+        size = 20
+        
+        glColor4f(0.0, 1.0, 0.0, 0.9)  # Green with slight transparency
+        glBegin(GL_TRIANGLES)
+        # Right-pointing triangle
+        glVertex2f(center_x - size/2, center_y - size/2)  # Top left
+        glVertex2f(center_x + size/2, center_y)           # Right middle
+        glVertex2f(center_x - size/2, center_y + size/2)  # Bottom left
+        glEnd()
+        
+        # Draw text "PLAY" next to the triangle
+        glColor4f(1.0, 1.0, 1.0, 1.0)
+        try:
+            self.renderText(self.width() - 85, 35, "PLAY")
+        except Exception:
+            pass
+        
+        # Restore 3D mode
+        glDisable(GL_BLEND)
+        glEnable(GL_DEPTH_TEST)
+        glPopMatrix()
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
     
     # =========================================================================
     # Helper Methods for Camera Drawing (can be overridden)
