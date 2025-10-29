@@ -174,9 +174,16 @@ class FrameRecorder:
                 # Convert frame to dict
                 frame_dict = frame.to_dict() if hasattr(frame, 'to_dict') else frame
                 
+                # Use current time for recording timestamp
+                # NOTE: We use time.time() here instead of frame.timestamp because:
+                # 1. Frame timestamp from ZED may not be precise (often rounded to seconds)
+                # 2. Network delays mean frame.timestamp != when we receive it
+                # 3. time.time() gives us accurate inter-frame timing for playback
+                record_timestamp = time.time()
+                
                 # Prepare frame record
                 record = {
-                    'timestamp': time.time(),
+                    'timestamp': record_timestamp,
                     'frame_number': self.frame_count,
                     'frame': frame_dict,
                     'has_pointcloud': self.record_pointcloud and pointcloud_data is not None and len(pointcloud_data) > 0
@@ -502,17 +509,12 @@ class FramePlayer:
     
     def _process_frame_record(self, record: dict, reader, start_ts: float, playback_start: float):
         """Process a single frame record with timing"""
-        # Calculate timing
+        # Calculate when this frame should be displayed
         record_ts = record.get('timestamp', 0)
         relative_time = (record_ts - start_ts) / self.speed
         target_time = playback_start + relative_time
         
-        # Wait until target time
-        sleep_duration = target_time - time.time()
-        if sleep_duration > 0:
-            time.sleep(sleep_duration)
-        
-        # Send frame via callback
+        # Send frame via callback FIRST
         frame_data = record.get('frame')
         if frame_data and self.frame_callback:
             try:
@@ -526,10 +528,18 @@ class FramePlayer:
         if record.get('has_pointcloud') and self.pointcloud_callback:
             try:
                 pointcloud_data = self._deserialize_pointcloud(reader)
-                if pointcloud_data:
-                    self.pointcloud_callback(pointcloud_data)
+                self.pointcloud_callback(pointcloud_data)
             except Exception as e:
                 print(f"[WARNING] Failed to load point cloud: {e}")
+        
+        # NOW wait until target time (after processing)
+        # This accounts for the time spent processing the frame
+        sleep_duration = target_time - time.time()
+        if sleep_duration > 0:
+            time.sleep(sleep_duration)
+        elif sleep_duration < -0.5:  # More than 500ms behind
+            # We're significantly behind - processing is too slow
+            pass  # Just continue without sleeping
     
     def _deserialize_pointcloud(self, reader) -> List[Dict]:
         """
