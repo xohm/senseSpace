@@ -1,5 +1,14 @@
 # Speech-Enabled LLM Examples
 
+## Table of Contents
+- [Overview](#overview)
+- [Installation](#installation)
+  - [Python Dependencies](#python-dependencies)
+  - [Speech Dependencies](#speech-dependencies)
+- [Examples](#examples)
+- [Troubleshooting](#troubleshooting)
+- [Voice Model Gallery](#voice-model-gallery)
+
 ## Overview
 These examples use Large Language Models with voice interaction capabilities for pose analysis. Combine skeleton tracking with speech recognition (Whisper) and text-to-speech (Piper) for natural voice-controlled pose analysis.
 

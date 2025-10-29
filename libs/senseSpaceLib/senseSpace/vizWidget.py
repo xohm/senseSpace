@@ -58,6 +58,9 @@ class SkeletonGLWidget(QGLWidget):
         self.point_cloud_capacity = 0  # VBO capacity (allocated size)
         self.point_cloud_lock = QtCore.QMutex()
         self.point_cloud_enabled = True  # Toggle point cloud rendering
+        
+        # Client reference for recording control
+        self.client = None
 
         # Make sure widget receives mouse events and focus
         self.setMouseTracking(True)
@@ -73,6 +76,10 @@ class SkeletonGLWidget(QGLWidget):
     def onClose(self):
         """Additional cleanup - override in subclass if needed"""
         pass
+    
+    def set_client(self, client):
+        """Set reference to client for recording control"""
+        self.client = client
 
     
     def close(self):
@@ -537,6 +544,16 @@ class SkeletonGLWidget(QGLWidget):
             self.point_cloud_enabled = not self.point_cloud_enabled
             print(f"[INFO] Point cloud rendering: {'enabled' if self.point_cloud_enabled else 'disabled'}")
             self.update()
+        # Toggle recording with 'R' key
+        elif event.key() == Qt.Key_R:
+            if self.client:
+                self.client.toggle_recording()
+                if self.client.is_recording():
+                    print("[INFO] Started recording frames (press 'R' again to stop)")
+                else:
+                    print("[INFO] Stopped recording")
+            else:
+                print("[WARNING] No client available for recording")
         else:
             super().keyPressEvent(event)
     

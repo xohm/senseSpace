@@ -10,16 +10,18 @@ import socket
 import threading
 import time
 import struct
+import os
 from typing import Optional, Callable
 
 from .protocol import Frame
 from .communication import deserialize_message
+from .recorder import FrameRecorder, FramePlayer
 
 
 class SenseSpaceClient:
     """Client for connecting to SenseSpace server and receiving body tracking data"""
     
-    def __init__(self, server_ip="localhost", server_port=12345):
+    def __init__(self, server_ip="localhost", server_port=12345, playback_file: Optional[str] = None):
         self.server_ip = server_ip
         self.server_port = server_port
         
@@ -36,6 +38,12 @@ class SenseSpaceClient:
         # Threading
         self.receive_thread = None
         
+        # Recording/Playback
+        self.recorder: Optional[FrameRecorder] = None
+        self.player: Optional[FramePlayer] = None
+        self.playback_mode = playback_file is not None
+        self.playback_file = playback_file
+        
     def set_frame_callback(self, callback: Callable[[Frame], None]):
         """Set callback function to be called when a new frame is received"""
         self.frame_callback = callback
@@ -45,7 +53,12 @@ class SenseSpaceClient:
         self.connection_callback = callback
     
     def connect(self) -> bool:
-        """Connect to the senseSpace server via TCP"""
+        """Connect to the senseSpace server via TCP or start playback"""
+        # Playback mode - no server connection needed
+        if self.playback_mode:
+            return self._start_playback()
+        
+        # Normal server connection
         try:
             # Use TCP (stream) for reliable connection
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -168,12 +181,98 @@ class SenseSpaceClient:
                     frame = Frame.from_dict(frame_data)
                     self.latest_frame = frame
                     
+                    # Record frame if recording is active
+                    if self.recorder and self.recorder.is_recording():
+                        self.recorder.record_frame(frame)
+                    
                     # Call frame callback if set
                     if self.frame_callback:
                         self.frame_callback(frame)
                         
                 except Exception as e:
                     print(f"[WARNING] Failed to parse frame data: {e}")
+    
+    def _start_playback(self) -> bool:
+        """Start playback from recorded file"""
+        try:
+            self.player = FramePlayer(self.playback_file, loop=True, speed=1.0)
+            
+            if not self.player.load_header():
+                print(f"[ERROR] Failed to load recording: {self.playback_file}")
+                return False
+            
+            # Set up playback callback to handle frames
+            def on_playback_frame(frame: Frame):
+                self.latest_frame = frame
+                if self.frame_callback:
+                    self.frame_callback(frame)
+            
+            self.player.set_frame_callback(on_playback_frame)
+            
+            # Start playback
+            if not self.player.start():
+                return False
+            
+            self.connected = True
+            self.running = True
+            
+            if self.connection_callback:
+                self.connection_callback(True)
+            
+            print(f"[INFO] Playing back recording: {self.playback_file}")
+            info = self.player.get_info()
+            if 'frame_count' in info:
+                print(f"[INFO] {info['frame_count']} frames, {info['duration']:.1f}s duration")
+            
+            return True
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to start playback: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def start_recording(self, filepath: Optional[str] = None):
+        """
+        Start recording frames to file.
+        
+        Args:
+            filepath: Path to save recording (default: recordings/recording_TIMESTAMP.ssrec)
+        """
+        if self.playback_mode:
+            print("[WARNING] Cannot record while in playback mode")
+            return False
+        
+        if self.recorder and self.recorder.is_recording():
+            print("[WARNING] Already recording")
+            return False
+        
+        # Generate default filename if not provided
+        if filepath is None:
+            recordings_dir = os.path.join(os.getcwd(), 'recordings')
+            os.makedirs(recordings_dir, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filepath = os.path.join(recordings_dir, f"recording_{timestamp}.ssrec")
+        
+        self.recorder = FrameRecorder(filepath)
+        return self.recorder.start()
+    
+    def stop_recording(self):
+        """Stop recording frames"""
+        if self.recorder:
+            self.recorder.stop()
+            self.recorder = None
+    
+    def toggle_recording(self, filepath: Optional[str] = None):
+        """Toggle recording on/off"""
+        if self.recorder and self.recorder.is_recording():
+            self.stop_recording()
+        else:
+            self.start_recording(filepath)
+    
+    def is_recording(self) -> bool:
+        """Check if currently recording"""
+        return self.recorder is not None and self.recorder.is_recording()
     
     def wait_for_connection(self, timeout: float = 10.0) -> bool:
         """Wait for connection to be established with timeout"""
@@ -196,8 +295,8 @@ class SenseSpaceClient:
 class CommandLineClient(SenseSpaceClient):
     """Client that prints frame information to console"""
     
-    def __init__(self, server_ip="localhost", server_port=12345, verbose=False):
-        super().__init__(server_ip, server_port)
+    def __init__(self, server_ip="localhost", server_port=12345, verbose=False, playback_file=None):
+        super().__init__(server_ip, server_port, playback_file=playback_file)
         self.verbose = verbose
         self.set_frame_callback(self._on_frame_received)
         self.set_connection_callback(self._on_connection_changed)

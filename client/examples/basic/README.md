@@ -2,6 +2,12 @@
 
 A step-by-step introduction to Python programming.
 
+## Table of Contents
+- [Installing Python](#installing-python)
+- [Setting Up a Virtual Environment (venv)](#setting-up-a-virtual-environment-venv)
+- [Running the Examples](#running-the-examples)
+- [Example Files](#example-files)
+
 ---
 
 ## Installing Python

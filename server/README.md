@@ -2,6 +2,16 @@
 
 This directory contains the point cloud and skeleton tracking servers for senseSpace.
 
+## Table of Contents
+- [Available Servers](#available-servers)
+- [Debug Screenshots](#debug-screenshots)
+- [Recording and Playback](#recording-and-playback)
+- [Qt Viewer Keyboard Controls](#qt-viewer-keyboard-controls)
+- [Server Comparison](#server-comparison)
+- [Room Calibration (Multi-Camera Fusion)](#room-calibration-multi-camera-fusion)
+- [Network Ports](#network-ports)
+- [Troubleshooting](#troubleshooting)
+
 ## Available Servers
 
 ### 1. `senseSpace_fusion_main.py` - Multi-Camera Fusion Server
@@ -62,6 +72,14 @@ python seg_pointcloud_server.py --viz --quality 1  # 720p @ 30fps (better perfor
 python seg_pointcloud_server.py --viz --quality 2  # VGA @ 60fps (faster, lower quality)
 python seg_pointcloud_server.py --viz --quality 3  # VGA @ 30fps (fastest)
 python seg_pointcloud_server.py --viz --quality 4  # 1080p @ 30fps (highest quality, slower)
+
+# Recording mode - records camera streams to SVO files
+python seg_pointcloud_server.py --viz
+# Press 'r' to start/stop recording (saves to server/tmp/)
+
+# Playback mode - replay recorded SVO files in endless loop
+python seg_pointcloud_server.py --rec tmp/recording_12345.svo --viz  # Single camera
+python seg_pointcloud_server.py --rec tmp/ --viz  # Fusion mode (auto-detects all SVO files)
 ```
 
 **Quality Settings:**
@@ -81,6 +99,82 @@ Both point cloud servers support debug screenshot functionality:
    - `debug_camera_{person_id}_{timestamp}.png` - Original camera image
    - `debug_mask_*_{person_id}_{timestamp}.png` - Segmentation mask
    - `debug_overlay_{person_id}_{timestamp}.png` - Camera with mask overlay
+
+## Recording and Playback
+
+The `seg_pointcloud_server.py` supports recording camera streams to SVO (Stereolabs Video) files and playing them back in an endless loop.
+
+### Recording
+
+**Interactive Recording:**
+1. Start the server with `--viz` flag
+2. Press **'r'** key to start recording
+3. Press **'r'** again to stop recording
+4. Files are saved to `server/tmp/` directory
+
+**File Naming:**
+- Single camera: `recording_{timestamp}.svo`
+- Fusion mode: `recording_cam{serial}_{timestamp}.svo` (one file per camera)
+
+**Example:**
+```bash
+# Start server with visualization
+python seg_pointcloud_server.py --viz
+
+# Press 'r' to start recording
+# Press 'r' again to stop recording
+# Files saved to: server/tmp/recording_*.svo
+```
+
+### Playback
+
+Playback mode allows you to replay recorded SVO files in an endless loop (when the file ends, it automatically restarts from the beginning).
+
+**Single Camera Playback:**
+```bash
+python seg_pointcloud_server.py --rec tmp/recording_1234567890.svo --viz
+```
+
+**Playback:**
+```bash
+# Point to directory containing recording_cam*.svo files
+python seg_pointcloud_server.py --rec tmp/ --viz
+
+# The server automatically:
+# 1. Discovers all SVO files in the directory
+# 2. Extracts camera serial numbers from filenames
+# 3. Initializes fusion mode with the recordings
+# 4. **Note**: Fusion mode playback plays once and stops (looping not supported due to timestamp issues)
+```
+
+**Important Limitation**: SVO looping with fusion mode is not supported by the ZED SDK due to timestamp management in the fusion module. When SVO files restart, their timestamps reset to 0, which the fusion module interprets as old data. Fusion mode playback will play the recording once and then stop. For looping playback, use single-camera mode.
+
+**Single Camera Playback** (supports looping):
+```bash
+python seg_pointcloud_server.py --rec tmp/recording_1234567890.svo --viz
+```
+
+**Use Cases:**
+- Testing without physical cameras  
+- Debugging specific scenarios repeatedly (**single-camera mode only**)
+- Sharing reproducible test cases
+- Offline development and algorithm testing
+
+**Looping Behavior:**
+- **Single camera**: Loops endlessly automatically ✓
+- **Fusion mode**: Plays once then stops (ZED SDK limitation)
+  - **Manual restart**: Press 'L' key to restart playback from the beginning
+  - **Alternative**: Restart the server with `Ctrl+C` and run again
+
+## Qt Viewer Keyboard Controls
+
+When running with `--viz` flag, the Qt viewer supports these keyboard shortcuts:
+
+- **Space**: Save debug images (camera, depth, segmentation masks)
+- **'r'**: Toggle recording on/off
+- **'l'**: Restart SVO playback (loop back to beginning - useful for fusion mode)
+- **'p'**: Toggle point cloud display on/off
+- **'c'**: Toggle camera frustum flip
 
 ## Server Comparison
 

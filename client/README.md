@@ -2,6 +2,13 @@
 
 The SenseSpace client connects to a SenseSpace server and receives body tracking data.
 
+## Table of Contents
+- [Usage](#usage)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Network Protocol](#network-protocol)
+
 ## Usage
 
 ### Command Line Mode (Default)

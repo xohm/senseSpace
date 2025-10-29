@@ -50,6 +50,7 @@ class PointCloudClient:
         
         # Callbacks
         self.on_pointcloud_received = None  # Callback(points, colors, timestamp)
+        self.on_pointcloud_perperson_received = None  # Callback(pointcloud_data: list[dict], timestamp)
         self.on_connection_changed = None   # Callback(connected: bool)
         
         # Latest point cloud (thread-safe)
@@ -211,6 +212,7 @@ class PointCloudClient:
                         try:
                             all_points = []
                             all_colors = []
+                            per_person_data = []  # For recording callback
                             offset = 0
                             
                             for _ in range(person_count):
@@ -234,8 +236,19 @@ class PointCloudClient:
                                 
                                 all_points.append(points)
                                 all_colors.append(colors)
+                                
+                                # Store per-person data for recording
+                                per_person_data.append({
+                                    'person_id': person_id,
+                                    'points': points,
+                                    'colors': colors
+                                })
                             
-                            # Merge all people
+                            # Call per-person callback (for recording)
+                            if self.on_pointcloud_perperson_received and per_person_data:
+                                self.on_pointcloud_perperson_received(per_person_data, timestamp)
+                            
+                            # Merge all people (for visualization)
                             if all_points:
                                 merged_points = np.vstack(all_points)
                                 merged_colors = np.vstack(all_colors)

@@ -208,6 +208,21 @@ class SkeletonGLWidget(QGLWidget):
                 print("[INFO] Debug image save triggered - will save on next frame")
             else:
                 print("[WARNING] Server not available for debug image save")
+        # Toggle recording with 'r'
+        elif event.key() == Qt.Key_R:
+            if hasattr(self, 'server') and self.server:
+                self.server.toggle_recording()
+            else:
+                print("[WARNING] Server not available for recording toggle")
+        # Restart SVO playback with 'l' (loop)
+        elif event.key() == Qt.Key_L:
+            if hasattr(self, 'server') and self.server:
+                if hasattr(self.server, 'restart_svo_playback'):
+                    self.server.restart_svo_playback()
+                else:
+                    print("[WARNING] SVO playback restart not available (not in playback mode)")
+            else:
+                print("[WARNING] Server not available")
         else:
             super().keyPressEvent(event)
 

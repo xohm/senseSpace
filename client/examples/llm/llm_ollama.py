@@ -268,6 +268,7 @@ def main():
     parser.add_argument("--model", "-m", default="llama3.2", help="Ollama model name")
     parser.add_argument("--confidence", "-c", type=float, default=70.0,
                        help="Minimum confidence threshold for person detection")
+    parser.add_argument("--rec", type=str, default=None, help="Playback mode: path to .ssrec recording file")
     args = parser.parse_args()
     
     if not args.viz:
@@ -285,6 +286,7 @@ def main():
         server_ip=args.server,
         server_port=args.port,
         viz=args.viz,
+        playback_file=args.rec,
         on_init=llm_client.on_init,
         on_frame=llm_client.on_frame,
         on_connection_changed=llm_client.on_connection_changed

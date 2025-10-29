@@ -23,18 +23,24 @@ class VisualizationClient(SenseSpaceClient):
         client.run()
     """
     
-    def __init__(self, viewer_class=None, server_ip="localhost", server_port=12345, window_title=None):
+    def __init__(self, viewer_class=None, server_ip="localhost", server_port=12345, window_title=None, playback_file=None):
         """
         Args:
             viewer_class: Custom SkeletonGLWidget subclass (default: SkeletonGLWidget)
             server_ip: Server IP address
             server_port: Server port
             window_title: Custom window title (default: auto-generated)
+            playback_file: Path to recording file for playback mode
         """
-        super().__init__(server_ip, server_port)
+        super().__init__(server_ip, server_port, playback_file=playback_file)
         
         self.viewer_class = viewer_class or SkeletonGLWidget
-        self.window_title = window_title or f"SenseSpace Viewer - {server_ip}:{server_port}"
+        
+        # Update window title for playback mode
+        if playback_file:
+            self.window_title = window_title or f"SenseSpace Viewer - Playback: {playback_file}"
+        else:
+            self.window_title = window_title or f"SenseSpace Viewer - {server_ip}:{server_port}"
         
         # Qt components
         self.qt_app = None
@@ -87,6 +93,11 @@ class VisualizationClient(SenseSpaceClient):
         
         # Create viewer widget (custom or default)
         self.qt_viewer = self.viewer_class()
+        
+        # Pass client reference to viewer for recording control
+        if hasattr(self.qt_viewer, 'set_client'):
+            self.qt_viewer.set_client(self)
+        
         self.main_window.setCentralWidget(self.qt_viewer)
         
         # Show window

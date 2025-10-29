@@ -35,6 +35,7 @@ def main():
     parser.add_argument("--port", "-p", type=int, default=12345, help="Server port (default: 12345)")
     parser.add_argument("--viz", "--visualization", action="store_true", help="Enable visualization mode (Qt OpenGL)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output in command line mode")
+    parser.add_argument("--rec", type=str, default=None, help="Playback mode: path to .ssrec recording file")
     
     args = parser.parse_args()
     
@@ -44,9 +45,14 @@ def main():
             viewer_class=SkeletonGLWidget,  # Use default viewer
             server_ip=args.server,
             server_port=args.port,
-            window_title=f"SenseSpace Client - {args.server}:{args.port}"
+            window_title=f"SenseSpace Client - {args.server}:{args.port}",
+            playback_file=args.rec
         )
     else:
+        if args.rec:
+            print("[ERROR] Playback mode (--rec) requires visualization (--viz)")
+            sys.exit(1)
+        
         client = CommandLineClient(
             server_ip=args.server,
             server_port=args.port,

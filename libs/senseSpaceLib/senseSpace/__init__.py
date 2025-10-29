@@ -14,10 +14,12 @@ visualization, communication, and server modules lazily from application entrypo
 
 from .protocol import Frame, Person, Joint
 from .enums import Body18Joint, Body34Joint
+from .recorder import FrameRecorder, FramePlayer
 
 __all__ = [
 	'Frame', 'Person', 'Joint',
-	'Body18Joint', 'Body34Joint'
+	'Body18Joint', 'Body34Joint',
+	'FrameRecorder', 'FramePlayer'
 ]
 
 

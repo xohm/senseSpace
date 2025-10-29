@@ -24,6 +24,7 @@ class MinimalClient:
         server_ip="localhost", 
         server_port=12345, 
         viz=False,
+        playback_file=None,
         on_init: Optional[Callable[[], None]] = None,
         on_frame: Optional[Callable[[Frame], None]] = None,
         on_connection_changed: Optional[Callable[[bool], None]] = None
@@ -31,6 +32,7 @@ class MinimalClient:
         self.server_ip = server_ip
         self.server_port = server_port
         self.viz = viz
+        self.playback_file = playback_file
         self.client = None
         self.qt_app = None
         self.qt_viewer = None
@@ -93,7 +95,8 @@ class MinimalClient:
             viewer_class=SkeletonGLWidget,
             server_ip=self.server_ip,
             server_port=self.server_port,
-            window_title=f"SenseSpace - {self.server_ip}:{self.server_port}"
+            window_title=f"SenseSpace - {self.server_ip}:{self.server_port}",
+            playback_file=self.playback_file
         )
         
         # Override frame callback to call both viewer update and user callback
