@@ -59,6 +59,9 @@ class SkeletonGLWidget(QGLWidget):
         self.point_cloud_lock = QtCore.QMutex()
         self.point_cloud_enabled = True  # Toggle point cloud rendering
         
+        # Orientation visualization toggle
+        self.show_orientation = False  # Toggle joint orientation axes (press 'O' to toggle)
+        
         # Client reference for recording control
         self.client = None
 
@@ -262,7 +265,8 @@ class SkeletonGLWidget(QGLWidget):
             draw_skeletons_with_bones(
                 frame.people, 
                 joint_color=(0.2, 0.8, 1.0), 
-                bone_color=(0.8, 0.2, 0.2)
+                bone_color=(0.8, 0.2, 0.2),
+                show_orientation=self.show_orientation
             )
     
     def draw_cameras(self, frame: Frame):
@@ -655,8 +659,13 @@ class SkeletonGLWidget(QGLWidget):
     
     def keyPressEvent(self, event):
         """Handle keyboard input - override for custom key handling"""
+        # Toggle joint orientation visualization with 'O' key
+        if event.key() == Qt.Key_O:
+            self.show_orientation = not self.show_orientation
+            print(f"[INFO] Joint orientation visualization: {'enabled' if self.show_orientation else 'disabled'}")
+            self.update()
         # Toggle playback pause with 'P' key (if in playback mode), otherwise toggle point cloud
-        if event.key() == Qt.Key_P:
+        elif event.key() == Qt.Key_P:
             # Check if in playback mode
             if self.client and hasattr(self.client, 'playback_mode') and self.client.playback_mode:
                 is_playing = self.client.toggle_playback_pause()

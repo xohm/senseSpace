@@ -1278,11 +1278,14 @@ class SenseSpaceServer:
             # Handle per-joint orientations (local_orientation_per_joint)
             local_orientations = getattr(person, 'local_orientation_per_joint', None)
             
+            # Get global root orientation for pelvis (joint 0)
+            global_root_ori = getattr(person, 'global_root_orientation', None)
+            
             # Fallback to global root orientation if per-joint not available
             if local_orientations is None:
                 global_ori = getattr(person, 'global_orientation', None)
                 if global_ori is None:
-                    global_ori = getattr(person, 'global_root_orientation', None)
+                    global_ori = global_root_ori
                 local_orientations = global_ori
 
             joints = []
@@ -1294,7 +1297,11 @@ class SenseSpaceServer:
                     try:
                         if len(local_orientations.shape) == 2:
                             # Array of quaternions, one per joint
-                            ori = local_orientations[i] if i < len(local_orientations) else local_orientations[0]
+                            # For joint 0 (PELVIS/root), use global_root_orientation if available
+                            if i == 0 and global_root_ori is not None:
+                                ori = global_root_ori
+                            else:
+                                ori = local_orientations[i] if i < len(local_orientations) else local_orientations[0]
                         else:
                             # Single quaternion (global root) - use for all joints
                             ori = local_orientations
@@ -1367,12 +1374,14 @@ class SenseSpaceServer:
 
             # Handle per-joint orientations (local_orientation_per_joint)
             local_orientations = getattr(person, 'local_orientation_per_joint', None)
+            # Get global root orientation for joint 0 (PELVIS)
+            global_root_ori = getattr(person, 'global_root_orientation', None)
             
             # Fallback to global root orientation if per-joint not available
             if local_orientations is None:
                 global_ori = getattr(person, 'global_orientation', None)
                 if global_ori is None:
-                    global_ori = getattr(person, 'global_root_orientation', None)
+                    global_ori = global_root_ori
                 local_orientations = global_ori
 
             joints = []
@@ -1384,7 +1393,11 @@ class SenseSpaceServer:
                     try:
                         if len(local_orientations.shape) == 2:
                             # Array of quaternions, one per joint
-                            ori = local_orientations[i] if i < len(local_orientations) else local_orientations[0]
+                            # Use global_root_orientation for joint 0 (PELVIS), local for others
+                            if i == 0 and global_root_ori is not None:
+                                ori = global_root_ori
+                            else:
+                                ori = local_orientations[i] if i < len(local_orientations) else local_orientations[0]
                         else:
                             # Single quaternion (global root) - use for all joints
                             ori = local_orientations

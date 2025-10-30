@@ -64,6 +64,9 @@ class SkeletonGLWidget(QGLWidget):
         self.show_point_cloud = True
         self._last_pc_update = 0  # Throttle updates
         
+        # Orientation visualization toggle
+        self.show_orientation = False  # Toggle joint orientation axes (press 'O' to toggle)
+        
         # OpenGL VBO handles (allocated in initializeGL)
         self.vbo_vertices = None
         self.vbo_colors = None
@@ -192,8 +195,13 @@ class SkeletonGLWidget(QGLWidget):
         self.update()
 
     def keyPressEvent(self, event):
+        # Toggle joint orientation visualization with 'o'
+        if event.key() == Qt.Key_O:
+            self.show_orientation = not self.show_orientation
+            print(f"[INFO] Joint orientation visualization: {'enabled' if self.show_orientation else 'disabled'}")
+            self.update()
         # Toggle camera frustum flip with 'c'
-        if event.key() == Qt.Key_C:
+        elif event.key() == Qt.Key_C:
             self._camera_flip = not self._camera_flip
             self.update()
         # Toggle point cloud with 'p'
@@ -390,7 +398,8 @@ class SkeletonGLWidget(QGLWidget):
 
         draw_skeletons_with_bones(self.people_data,
                                   joint_color=(0.2, 0.8, 1.0),
-                                  bone_color=(0.8, 0.2, 0.2))
+                                  bone_color=(0.8, 0.2, 0.2),
+                                  show_orientation=self.show_orientation)
 
         # Draw connection status overlay
         people_count = len(self.people_data) if self.people_data else 0
