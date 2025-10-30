@@ -90,12 +90,18 @@ class MinimalClient:
             print(f"[ERROR] Visualization requires PyQt5: {e}")
             return False
         
+        # Set window title based on mode (playback has priority)
+        if self.playback_file:
+            window_title = f"SenseSpace - Playback: {self.playback_file}"
+        else:
+            window_title = f"SenseSpace - {self.server_ip}:{self.server_port}"
+        
         # Create visualization client
         self.client = VisualizationClient(
             viewer_class=SkeletonGLWidget,
             server_ip=self.server_ip,
             server_port=self.server_port,
-            window_title=f"SenseSpace - {self.server_ip}:{self.server_port}",
+            window_title=window_title,
             playback_file=self.playback_file
         )
         
