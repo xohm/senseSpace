@@ -329,6 +329,48 @@ def draw_floor_grid(size=2000, spacing=100, height=0, color=(0.3, 0.3, 0.3), peo
     glEnd()
 
 
+def draw_coordinate_axes(origin, length=50.0, line_width=3.0):
+    """
+    Draw RGB coordinate axes at a given origin point.
+    :param origin: Origin point as QVector3D, tuple (x,y,z), or dict with x,y,z keys
+    :param length: Length of each axis in mm (default 50mm)
+    :param line_width: Width of the axis lines (default 3.0)
+    """
+    # Convert origin to tuple
+    if hasattr(origin, 'x'):  # QVector3D
+        ox, oy, oz = origin.x(), origin.y(), origin.z()
+    elif isinstance(origin, dict):
+        ox, oy, oz = origin['x'], origin['y'], origin['z']
+    else:
+        ox, oy, oz = origin
+    
+    # Disable depth test to ensure axes are always visible
+    glDisable(GL_DEPTH_TEST)
+    
+    glLineWidth(line_width)
+    glBegin(GL_LINES)
+    
+    # X-axis (red)
+    glColor3f(1.0, 0.0, 0.0)
+    glVertex3f(ox, oy, oz)
+    glVertex3f(ox + length, oy, oz)
+    
+    # Y-axis (green)
+    glColor3f(0.0, 1.0, 0.0)
+    glVertex3f(ox, oy, oz)
+    glVertex3f(ox, oy + length, oz)
+    
+    # Z-axis (blue)
+    glColor3f(0.0, 0.0, 1.0)
+    glVertex3f(ox, oy, oz)
+    glVertex3f(ox, oy, oz + length)
+    
+    glEnd()
+    
+    # Re-enable depth test
+    glEnable(GL_DEPTH_TEST)
+
+
 def draw_camera(position, orientation, up=(0.0, 1.0, 0.0), fov_deg=45.0, aspect=16.0/9.0, near=200.0, far=800.0, color=(1.0, 1.0, 0.0), scale=1.0, flip=False):
     """
     Draw a simple camera frustum and axes using lines.

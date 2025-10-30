@@ -140,5 +140,9 @@ client/examples/speech/models/
 client/fun/
 client/recordings/
 
+# Exclude all recordings folders in examples
+client/examples/**/recordings/
+*.ssrec
+
 server/tmp/
 server/calib/*.json
