@@ -922,7 +922,7 @@ class SenseSpaceServer:
             body_tracking_parameters = sl.BodyTrackingParameters()
             body_tracking_parameters.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_FAST  # Faster model
             body_tracking_parameters.body_format = sl.BODY_FORMAT.BODY_34
-            body_tracking_parameters.enable_body_fitting = False
+            body_tracking_parameters.enable_body_fitting = True  # Enable to get local_orientation_per_joint
             body_tracking_parameters.enable_tracking = True
 
             # Start local senders
@@ -1027,7 +1027,7 @@ class SenseSpaceServer:
             if enable_body_tracking:
                 body_tracking_fusion_params = sl.BodyTrackingFusionParameters()
                 body_tracking_fusion_params.enable_tracking = True
-                body_tracking_fusion_params.enable_body_fitting = False
+                body_tracking_fusion_params.enable_body_fitting = True  # Enable to get local_orientation_per_joint
 
                 status = self.fusion.enable_body_tracking(body_tracking_fusion_params)
                 if status != sl.FUSION_ERROR_CODE.SUCCESS:
@@ -1275,22 +1275,29 @@ class SenseSpaceServer:
                 conf_attr = getattr(person, 'keypoint_confidences', None)
             confidences = conf_attr if conf_attr is not None else []
 
-            # Handle orientations
-            orientations = getattr(person, 'global_orientation', None)
-            if orientations is None:
-                orientations = getattr(person, 'global_root_orientation', None)
+            # Handle per-joint orientations (local_orientation_per_joint)
+            local_orientations = getattr(person, 'local_orientation_per_joint', None)
+            
+            # Fallback to global root orientation if per-joint not available
+            if local_orientations is None:
+                global_ori = getattr(person, 'global_orientation', None)
+                if global_ori is None:
+                    global_ori = getattr(person, 'global_root_orientation', None)
+                local_orientations = global_ori
 
             joints = []
             for i, kp in enumerate(keypoints):
                 pos_obj = Position(x=float(kp[0]), y=float(kp[1]), z=float(kp[2]))
 
-                # Handle orientations
-                if orientations is not None:
+                # Handle orientations - use per-joint if available
+                if local_orientations is not None:
                     try:
-                        if len(orientations.shape) == 2:
-                            ori = orientations[i] if i < len(orientations) else orientations[0]
+                        if len(local_orientations.shape) == 2:
+                            # Array of quaternions, one per joint
+                            ori = local_orientations[i] if i < len(local_orientations) else local_orientations[0]
                         else:
-                            ori = orientations
+                            # Single quaternion (global root) - use for all joints
+                            ori = local_orientations
                         ori_obj = Quaternion(x=float(ori[0]), y=float(ori[1]), z=float(ori[2]), w=float(ori[3]))
                     except (IndexError, AttributeError):
                         ori_obj = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
@@ -1358,22 +1365,29 @@ class SenseSpaceServer:
                 conf_attr = getattr(person, 'keypoint_confidences', None)
             confidences = conf_attr if conf_attr is not None else []
 
-            # Handle orientations
-            orientations = getattr(person, 'global_orientation', None)
-            if orientations is None:
-                orientations = getattr(person, 'global_root_orientation', None)
+            # Handle per-joint orientations (local_orientation_per_joint)
+            local_orientations = getattr(person, 'local_orientation_per_joint', None)
+            
+            # Fallback to global root orientation if per-joint not available
+            if local_orientations is None:
+                global_ori = getattr(person, 'global_orientation', None)
+                if global_ori is None:
+                    global_ori = getattr(person, 'global_root_orientation', None)
+                local_orientations = global_ori
 
             joints = []
             for i, kp in enumerate(keypoints):
                 pos_obj = Position(x=float(kp[0]), y=float(kp[1]), z=float(kp[2]))
 
-                # Handle orientations
-                if orientations is not None:
+                # Handle orientations - use per-joint if available
+                if local_orientations is not None:
                     try:
-                        if len(orientations.shape) == 2:
-                            ori = orientations[i] if i < len(orientations) else orientations[0]
+                        if len(local_orientations.shape) == 2:
+                            # Array of quaternions, one per joint
+                            ori = local_orientations[i] if i < len(local_orientations) else local_orientations[0]
                         else:
-                            ori = orientations
+                            # Single quaternion (global root) - use for all joints
+                            ori = local_orientations
                         ori_obj = Quaternion(x=float(ori[0]), y=float(ori[1]), z=float(ori[2]), w=float(ori[3]))
                     except (IndexError, AttributeError):
                         ori_obj = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)

@@ -28,11 +28,13 @@ def main():
     args = parser.parse_args()
     
     # Create visualization client
+    title = "Recording Example - R:record | P:pause/play (playback)"
     client = VisualizationClient(
         viewer_class=SkeletonGLWidget,
         server_ip=args.server,
         server_port=args.port,
-        playback_file=args.rec
+        playback_file=args.rec,
+        window_title=title
     )
     
     # Auto-record mode

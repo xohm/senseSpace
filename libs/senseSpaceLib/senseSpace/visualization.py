@@ -85,12 +85,15 @@ class SkeletonVisualizer3D:
             return 1.0
 
 
-    def draw_skeleton_with_bones(self, people_data, joint_color=(0.2, 0.8, 1.0), bone_color=(0.8, 0.2, 0.2)):
+    def draw_skeleton_with_bones(self, people_data, joint_color=(0.2, 0.8, 1.0), bone_color=(0.8, 0.2, 0.2), 
+                                 show_orientation=True, orientation_length=100.0):
         """
         Draws skeleton with bone connections for BODY_34 model.
         :param people_data: List of people data (serialized format)
         :param joint_color: RGB tuple for joint points
         :param bone_color: RGB tuple for bone lines
+        :param show_orientation: If True, draw RGB coordinate axes at each joint showing orientation (default True)
+        :param orientation_length: Length of orientation axes in mm (default 100mm)
         """
 
         glEnable(GL_BLEND)
@@ -187,8 +190,104 @@ class SkeletonVisualizer3D:
                 else:
                     glVertex3f(pos["x"], pos["y"], pos["z"])
             glEnd()
+            
+            # Draw orientation axes if requested
+            if show_orientation:
+                self._draw_joint_orientations(skeleton, orientation_length)
 
-        glDisable(GL_BLEND)            
+        glDisable(GL_BLEND)
+    
+    def _draw_joint_orientations(self, skeleton, axis_length=100.0):
+        """
+        Draw RGB coordinate axes showing orientation of each joint.
+        :param skeleton: List of joint data (dict or objects with pos and ori)
+        :param axis_length: Length of each axis in mm
+        """
+        import math
+        
+        # Disable depth test to ensure axes are always visible
+        glDisable(GL_DEPTH_TEST)
+        
+        glLineWidth(2.0)
+        
+        for joint in skeleton:
+            # Get position
+            pos = joint['pos'] if isinstance(joint, dict) else getattr(joint, 'pos', None)
+            if pos is None:
+                continue
+            
+            # Get orientation (quaternion)
+            ori = joint.get('ori') if isinstance(joint, dict) else getattr(joint, 'ori', None)
+            if ori is None:
+                continue
+            
+            # Convert position to tuple
+            if hasattr(pos, 'x'):
+                px, py, pz = pos.x, pos.y, pos.z
+            else:
+                px, py, pz = pos["x"], pos["y"], pos["z"]
+            
+            # Convert quaternion to rotation matrix
+            if isinstance(ori, dict):
+                qx, qy, qz, qw = ori.get('x', 0), ori.get('y', 0), ori.get('z', 0), ori.get('w', 1)
+            elif hasattr(ori, 'x'):
+                qx, qy, qz, qw = ori.x, ori.y, ori.z, ori.w
+            else:
+                continue
+            
+            # Normalize quaternion
+            norm = math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw)
+            if norm == 0:
+                continue
+            qx, qy, qz, qw = qx/norm, qy/norm, qz/norm, qw/norm
+            
+            # Convert quaternion to rotation matrix
+            # Matrix columns are the rotated basis vectors (X, Y, Z axes)
+            # X-axis (right) - column 0
+            x_axis = [
+                (1 - 2*(qy*qy + qz*qz)) * axis_length,
+                (2*(qx*qy + qz*qw)) * axis_length,
+                (2*(qx*qz - qy*qw)) * axis_length
+            ]
+            
+            # Y-axis (up) - column 1
+            y_axis = [
+                (2*(qx*qy - qz*qw)) * axis_length,
+                (1 - 2*(qx*qx + qz*qz)) * axis_length,
+                (2*(qy*qz + qx*qw)) * axis_length
+            ]
+            
+            # Z-axis (forward) - column 2
+            z_axis = [
+                (2*(qx*qz + qy*qw)) * axis_length,
+                (2*(qy*qz - qx*qw)) * axis_length,
+                (1 - 2*(qx*qx + qy*qy)) * axis_length
+            ]
+            
+            # Draw the three axes
+            glBegin(GL_LINES)
+            
+            # X-axis in red
+            glColor3f(1.0, 0.0, 0.0)
+            glVertex3f(px, py, pz)
+            glVertex3f(px + x_axis[0], py + x_axis[1], pz + x_axis[2])
+            
+            # Y-axis in green
+            glColor3f(0.0, 1.0, 0.0)
+            glVertex3f(px, py, pz)
+            glVertex3f(px + y_axis[0], py + y_axis[1], pz + y_axis[2])
+            
+            # Z-axis in blue
+            glColor3f(0.0, 0.0, 1.0)
+            glVertex3f(px, py, pz)
+            glVertex3f(px + z_axis[0], py + z_axis[1], pz + z_axis[2])
+            
+            glEnd()
+        
+        # Re-enable depth test
+        glEnable(GL_DEPTH_TEST)
+        glLineWidth(1.0)
+            
 
 
 def draw_skeleton(person, color=(0.2, 0.8, 1.0)):
@@ -199,12 +298,19 @@ def draw_skeleton(person, color=(0.2, 0.8, 1.0)):
     v.draw_person(person, color=color)
 
 
-def draw_skeletons_with_bones(people_data, joint_color=(0.2, 0.8, 1.0), bone_color=(0.8, 0.2, 0.2)):
+def draw_skeletons_with_bones(people_data, joint_color=(0.2, 0.8, 1.0), bone_color=(0.8, 0.2, 0.2), 
+                              show_orientation=True, orientation_length=100.0):
     """
     Helper function to draw skeletons with bone connections.
+    :param people_data: List of people data
+    :param joint_color: RGB tuple for joint points
+    :param bone_color: RGB tuple for bone lines
+    :param show_orientation: If True, draw RGB coordinate axes at each joint (default True)
+    :param orientation_length: Length of orientation axes in mm (default 100mm)
     """
     v = SkeletonVisualizer3D()
-    v.draw_skeleton_with_bones(people_data, joint_color=joint_color, bone_color=bone_color)
+    v.draw_skeleton_with_bones(people_data, joint_color=joint_color, bone_color=bone_color,
+                                show_orientation=show_orientation, orientation_length=orientation_length)
 
 
 def estimate_floor_height(people_data):

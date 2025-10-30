@@ -471,7 +471,7 @@ def main():
         server_ip=args.server,
         server_port=args.port,
         playback_file=args.rec,
-        window_title="Floor Projection - SPACE:toggle | R:record | Arrows:move | Shift+Arrows:rotate"
+        window_title="Floor Projection - SPACE:toggle | R:record | P:pause/play | Arrows:move | Shift+Arrows:rotate"
     )
     
     success = client.run()

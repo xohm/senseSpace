@@ -655,10 +655,17 @@ class SkeletonGLWidget(QGLWidget):
     
     def keyPressEvent(self, event):
         """Handle keyboard input - override for custom key handling"""
-        # Toggle point cloud rendering with 'P' key
+        # Toggle playback pause with 'P' key (if in playback mode), otherwise toggle point cloud
         if event.key() == Qt.Key_P:
-            self.point_cloud_enabled = not self.point_cloud_enabled
-            print(f"[INFO] Point cloud rendering: {'enabled' if self.point_cloud_enabled else 'disabled'}")
+            # Check if in playback mode
+            if self.client and hasattr(self.client, 'playback_mode') and self.client.playback_mode:
+                is_playing = self.client.toggle_playback_pause()
+                status = "playing" if is_playing else "paused"
+                print(f"[INFO] Playback {status}")
+            else:
+                # Toggle point cloud rendering
+                self.point_cloud_enabled = not self.point_cloud_enabled
+                print(f"[INFO] Point cloud rendering: {'enabled' if self.point_cloud_enabled else 'disabled'}")
             self.update()
         # Toggle recording with 'R' key
         elif event.key() == Qt.Key_R:

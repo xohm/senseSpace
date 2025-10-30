@@ -274,6 +274,25 @@ class SenseSpaceClient:
         """Check if currently recording"""
         return self.recorder is not None and self.recorder.is_recording()
     
+    def toggle_playback_pause(self):
+        """Toggle pause/play for playback mode"""
+        if not self.playback_mode or not self.player:
+            print("[WARNING] Not in playback mode")
+            return False
+        
+        if self.player.paused:
+            self.player.resume()
+            return True  # Now playing
+        else:
+            self.player.pause()
+            return False  # Now paused
+    
+    def is_playback_paused(self) -> bool:
+        """Check if playback is currently paused"""
+        if not self.playback_mode or not self.player:
+            return False
+        return self.player.paused
+    
     def wait_for_connection(self, timeout: float = 10.0) -> bool:
         """Wait for connection to be established with timeout"""
         start_time = time.time()

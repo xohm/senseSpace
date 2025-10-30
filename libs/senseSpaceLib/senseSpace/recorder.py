@@ -287,6 +287,8 @@ class FramePlayer:
         self.speed = max(0.1, min(10.0, speed))  # Clamp between 0.1x and 10x
         self.playing = False
         self.paused = False
+        self.pause_start_time = None  # Track when pause started
+        self.total_pause_time = 0.0   # Accumulated pause time
         self.frame_count = 0
         self.header = None
         self._playback_thread = None
@@ -399,13 +401,21 @@ class FramePlayer:
     
     def pause(self):
         """Pause playback"""
-        self.paused = True
-        print("[PLAYER] Paused")
+        if not self.paused:
+            self.paused = True
+            self.pause_start_time = time.time()
+            print("[PLAYER] Paused")
     
     def resume(self):
         """Resume playback"""
-        self.paused = False
-        print("[PLAYER] Resumed")
+        if self.paused:
+            self.paused = False
+            # Accumulate the time spent paused
+            if self.pause_start_time is not None:
+                pause_duration = time.time() - self.pause_start_time
+                self.total_pause_time += pause_duration
+                self.pause_start_time = None
+            print("[PLAYER] Resumed")
     
     def _read_line(self, reader) -> bytes:
         """Read a line from reader (handles both file and stream_reader)"""
@@ -426,6 +436,10 @@ class FramePlayer:
         """
         try:
             while self.playing:
+                # Reset pause time tracking for this loop iteration
+                self.total_pause_time = 0.0
+                self.pause_start_time = None
+                
                 # Open file for streaming
                 with open(self.filepath, 'rb') as f:
                     if ZSTD_AVAILABLE and self.header.get('compression') == 'zstd':
@@ -512,7 +526,9 @@ class FramePlayer:
         # Calculate when this frame should be displayed
         record_ts = record.get('timestamp', 0)
         relative_time = (record_ts - start_ts) / self.speed
-        target_time = playback_start + relative_time
+        # Adjust playback start by accumulated pause time
+        adjusted_playback_start = playback_start + self.total_pause_time
+        target_time = adjusted_playback_start + relative_time
         
         # Send frame via callback FIRST
         frame_data = record.get('frame')
