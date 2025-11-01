@@ -19,6 +19,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "msgpack>=1.0.0",
     "zstandard>=0.22.0",
+    # Note: PyGObject (GStreamer bindings) should be installed via system packages:
+    # Linux: sudo apt-get install python3-gi python3-gi-cairo
 ]
 
 [project.optional-dependencies]
@@ -38,6 +40,25 @@ segmentation = [
     "opencv-contrib-python",
     "protobuf>=4.25.3,<5",
     "sentencepiece",
+]
+streaming = [
+    # Video streaming dependencies (GStreamer)
+    # IMPORTANT: PyGObject and GStreamer must be installed via system packages (not pip):
+    # 
+    # Linux (Ubuntu/Debian):
+    #   sudo apt-get install python3-gi python3-gi-cairo \
+    #       gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+    #       gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
+    # 
+    # macOS (Homebrew):
+    #   brew install gstreamer gst-plugins-base gst-plugins-good \
+    #       gst-plugins-bad gst-plugins-ugly pygobject3
+    # 
+    # Windows:
+    #   Download installers from https://gstreamer.freedesktop.org/download/
+    #   Install both runtime and development packages
+    # 
+    # No additional pip packages required - GStreamer uses system PyGObject
 ]
 
 [tool.setuptools.packages.find]

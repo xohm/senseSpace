@@ -6,6 +6,7 @@
 - [Setup the Environment](#setup-the-environment)
 - [Install Libraries](#install-libraries)
   - [GPU Acceleration (Apple Silicon)](#gpu-acceleration-apple-silicon)
+- [Install Streaming Libraries (Optional)](#install-streaming-libraries-optional)
 - [Install Examples](#install-examples)
   - [Speech](#speech)
 - [Install Ollama (Optional)](#install-ollama-optional)
@@ -80,6 +81,53 @@ MPS built: True
 ```
 
 **Note:** Intel Macs will use CPU only, as they don't support Metal acceleration.
+
+## Install Streaming Libraries (Optional)
+
+The video streaming feature allows real-time video transmission from ZED cameras to remote clients using GStreamer. This is optional and only needed if you want to use the `--stream` flag with the server.
+
+### System Dependencies
+
+Install GStreamer and PyGObject using Homebrew:
+
+```bash
+brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav pygobject3 cairo
+```
+
+### Install Python Streaming Package
+
+Install the senseSpace library with streaming support:
+```
+pip install -e ".[streaming]"
+```
+
+### Verify Installation
+
+Test if GStreamer is working:
+```
+python -c "import gi; gi.require_version('Gst', '1.0'); from gi.repository import Gst; Gst.init(None); print('GStreamer OK')"
+```
+
+Test if streaming module loads:
+```
+python -c "from senseSpace.video_streaming import VideoStreamer; print('Streaming module OK')"
+```
+
+### Usage
+
+Start the server with streaming enabled:
+```
+cd server
+python senseSpace_fusion_main.py --viz --stream
+```
+
+Connect a client:
+```
+cd client/examples/streaming
+python streamingClient.py --server localhost
+```
+
+**Note:** Streaming only activates when a client is connected, so there's zero overhead when no clients are active.
 
 ## Install Examples
 

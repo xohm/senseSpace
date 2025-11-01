@@ -6,6 +6,7 @@
 - [Setup the Environment](#setup-the-environment)
 - [Install Libraries](#install-libraries)
   - [GPU Acceleration (NVIDIA)](#gpu-acceleration-nvidia)
+- [Install Streaming Libraries (Optional)](#install-streaming-libraries-optional)
 - [Install Examples](#install-examples)
   - [Speech](#speech)
 - [Install Ollama (Optional)](#install-ollama-optional)
@@ -101,6 +102,105 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 ```
 
 **Note:** AMD GPUs with ROCm support may work but are not officially tested.
+
+## Install Streaming Libraries (Optional)
+
+The video streaming feature allows real-time video transmission from ZED cameras to remote clients using GStreamer. This is optional and only needed if you want to use the `--stream` flag with the server.
+
+### System Dependencies
+
+Install GStreamer and PyGObject system packages:
+
+**Ubuntu/Debian/KDE Neon:**
+```
+sudo apt-get install -y \
+    python3-gi \
+    python3-gi-cairo \
+    gir1.2-gstreamer-1.0 \
+    gstreamer1.0-tools \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly \
+    gstreamer1.0-libav \
+    libcairo2-dev \
+    libgirepository1.0-dev
+```
+
+**Fedora/RHEL:**
+```
+sudo dnf install -y \
+    python3-gobject \
+    python3-cairo \
+    gstreamer1 \
+    gstreamer1-plugins-base \
+    gstreamer1-plugins-good \
+    gstreamer1-plugins-bad-free \
+    gstreamer1-plugins-ugly-free \
+    gstreamer1-libav \
+    cairo-devel \
+    gobject-introspection-devel
+```
+
+**Arch Linux:**
+```
+sudo pacman -S \
+    python-gobject \
+    python-cairo \
+    gstreamer \
+    gst-plugins-base \
+    gst-plugins-good \
+    gst-plugins-bad \
+    gst-plugins-ugly \
+    gst-libav \
+    cairo \
+    gobject-introspection
+```
+
+### Virtual Environment Setup
+
+**Important:** PyGObject must use the system-installed version. If you're using a virtual environment, create symlinks:
+
+```bash
+# Adjust Python version (3.12 in this example) to match yours
+ln -s /usr/lib/python3/dist-packages/gi .venv/lib/python3.12/site-packages/gi
+ln -s /usr/lib/python3/dist-packages/cairo .venv/lib/python3.12/site-packages/cairo
+```
+
+### Install Python Streaming Package
+
+Install the senseSpace library with streaming support:
+```
+pip install -e ".[streaming]"
+```
+
+### Verify Installation
+
+Test if GStreamer is working:
+```
+python -c "import gi; gi.require_version('Gst', '1.0'); from gi.repository import Gst; Gst.init(None); print('GStreamer OK')"
+```
+
+Test if streaming module loads:
+```
+python -c "from senseSpace.video_streaming import VideoStreamer; print('Streaming module OK')"
+```
+
+### Usage
+
+Start the server with streaming enabled:
+```
+cd server
+python senseSpace_fusion_main.py --viz --stream
+```
+
+Connect a client:
+```
+cd client/examples/streaming
+python streamingClient.py --server localhost
+```
+
+**Note:** Streaming only activates when a client is connected, so there's zero overhead when no clients are active.
 
 ## Install Examples
 

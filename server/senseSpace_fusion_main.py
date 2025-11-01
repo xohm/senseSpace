@@ -93,6 +93,14 @@ def main():
     parser.add_argument("--no-cameras", action="store_true", help="Skip ZED camera initialization and start server only (debug)")
     parser.add_argument("--viz", action="store_true", help="Enable visualization (alternative to --mode viz)")
     
+    # Video streaming arguments
+    parser.add_argument("--stream", action="store_true", 
+                       help="Enable RGB/depth video streaming to clients via GStreamer MPEG-TS")
+    parser.add_argument("--stream-host", default="0.0.0.0",
+                       help="Video stream host IP (default: 0.0.0.0)")
+    parser.add_argument("--stream-port", type=int, default=5000,
+                       help="Single multiplexed stream UDP port (default: 5000)")
+    
     args = parser.parse_args()
     
     # Handle --viz flag as alternative to --mode viz
@@ -100,7 +108,15 @@ def main():
         args.mode = "viz"
     
     # Create server instance (TCP by default, UDP if --udp flag is set)
-    server = SenseSpaceServer(host=args.host, port=args.port, use_udp=args.udp)
+    # Pass streaming configuration if --stream flag is used
+    server = SenseSpaceServer(
+        host=args.host, 
+        port=args.port, 
+        use_udp=args.udp,
+        enable_streaming=args.stream,
+        stream_host=args.stream_host if args.stream else None,
+        stream_rgb_port=args.stream_port if args.stream else None  # Use single stream port
+    )
     
     try:
         if args.mode == "viz":

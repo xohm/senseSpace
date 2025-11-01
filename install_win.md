@@ -6,6 +6,7 @@
 - [Setup the Environment](#setup-the-environment)
 - [Install Libraries](#install-libraries)
   - [GPU Acceleration](#gpu-acceleration)
+- [Install Streaming Libraries (Optional)](#install-streaming-libraries-optional)
 - [Install Examples](#install-examples)
   - [Speech](#speech)
 - [Install Ollama (Optional)](#install-ollama-optional)
@@ -96,6 +97,100 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 ```
 
 This should output `CUDA available: True` if properly installed.
+
+## Install Streaming Libraries (Optional)
+
+The video streaming feature allows real-time video transmission from ZED cameras to remote clients using GStreamer. This is optional and only needed if you want to use the `--stream` flag with the server.
+
+### System Dependencies
+
+**Important:** Setting up GStreamer on Windows requires several steps.
+
+#### 1. Install GStreamer Runtime
+
+Download and install both the runtime and development installers from the [GStreamer website](https://gstreamer.freedesktop.org/download/):
+
+- **GStreamer 1.22.x runtime** (MSVC 64-bit): [Download](https://gstreamer.freedesktop.org/data/pkg/windows/)
+- **GStreamer 1.22.x development** (MSVC 64-bit): [Download](https://gstreamer.freedesktop.org/data/pkg/windows/)
+
+During installation:
+- Choose **Complete** installation (not Typical)
+- Default install path is `C:\gstreamer\1.0\msvc_x86_64\`
+- The installer should automatically add GStreamer to your PATH
+
+#### 2. Install PyGObject for Windows
+
+Download and install the PyGObject all-in-one installer:
+- [PyGObject for Windows](https://github.com/wingtk/gvsbuild/releases)
+- Download the latest `PyGObject-3.xx.x-MSVC-py3.11-x64.exe` (match your Python version)
+- Run the installer and follow the wizard
+
+#### 3. Verify PATH Configuration
+
+Ensure these paths are in your system PATH (adjust version numbers as needed):
+```
+C:\gstreamer\1.0\msvc_x86_64\bin
+C:\Program Files\GTK3-Runtime Win64\bin
+```
+
+To check your PATH in PowerShell:
+```powershell
+$env:PATH -split ';' | Select-String gstreamer
+```
+
+Or in Command Prompt:
+```cmd
+echo %PATH% | findstr gstreamer
+```
+
+### Install Python Streaming Package
+
+Install the senseSpace library with streaming support:
+
+**Command Prompt + PowerShell:**
+```
+pip install -e ".[streaming]"
+```
+
+### Verify Installation
+
+Test if GStreamer is working:
+
+**Command Prompt + PowerShell:**
+```
+python -c "import gi; gi.require_version('Gst', '1.0'); from gi.repository import Gst; Gst.init(None); print('GStreamer OK')"
+```
+
+Test if streaming module loads:
+```
+python -c "from senseSpace.video_streaming import VideoStreamer; print('Streaming module OK')"
+```
+
+### Troubleshooting
+
+If you get import errors:
+
+1. **DLL load failed**: Ensure GStreamer bin directory is in PATH and restart your terminal
+2. **Module not found**: Reinstall PyGObject installer matching your Python version
+3. **Version mismatch**: Make sure GStreamer runtime and development versions match
+
+### Usage
+
+Start the server with streaming enabled:
+
+**Command Prompt + PowerShell:**
+```
+cd server
+python senseSpace_fusion_main.py --viz --stream
+```
+
+Connect a client:
+```
+cd client\examples\streaming
+python streamingClient.py --server localhost
+```
+
+**Note:** Streaming only activates when a client is connected, so there's zero overhead when no clients are active.
 
 ## Install Examples
 

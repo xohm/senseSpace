@@ -13,6 +13,7 @@ import queue
 from typing import List, Optional, Callable
 import pyzed.sl as sl
 import os
+import numpy as np
 from PyQt5.QtGui import QVector3D, QQuaternion
 
 # Import protocol classes
@@ -26,6 +27,18 @@ except ImportError:
         import sys
         sys.path.append(os.path.join(os.path.dirname(__file__)))
         from protocol import Frame, Person, Joint, Position, Quaternion
+
+# Import video streaming classes (optional)
+try:
+    from .video_streaming import MultiCameraVideoStreamer
+    STREAMING_AVAILABLE = True
+except ImportError:
+    try:
+        from senseSpaceLib.senseSpace.video_streaming import MultiCameraVideoStreamer
+        STREAMING_AVAILABLE = True
+    except ImportError:
+        STREAMING_AVAILABLE = False
+        MultiCameraVideoStreamer = None
 
 
 def get_local_ip():
@@ -48,11 +61,20 @@ def get_local_ip():
 class SenseSpaceServer:
     """Main server class for ZED SDK body tracking and TCP broadcasting"""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 12345, use_udp: bool = False):
+    def __init__(self, host: str = "0.0.0.0", port: int = 12345, use_udp: bool = False,
+                 enable_streaming: bool = False, stream_host: str = None,
+                 stream_rgb_port: int = 5000, stream_depth_port: int = 5001):
         self.host = host
         self.port = port
         self.local_ip = get_local_ip()
         self.use_udp = use_udp
+        
+        # Video streaming configuration
+        self.enable_streaming = enable_streaming
+        self.stream_host = stream_host or host
+        self.stream_rgb_port = stream_rgb_port
+        self.stream_depth_port = stream_depth_port
+        self.video_streamer = None
         
         # Server state
         self.running = True
@@ -90,6 +112,15 @@ class SenseSpaceServer:
         # Per-client send queues and sender threads (avoid per-frame thread creation)
         self._client_queues = {}  # socket -> Queue
         self._client_sender_threads = {}  # socket -> Thread
+        
+        # Initialize video streaming if enabled
+        if self.enable_streaming:
+            if not STREAMING_AVAILABLE:
+                print("[WARNING] Video streaming requested but GStreamer not available")
+                print("[WARNING] Install system packages: sudo apt-get install python3-gi gstreamer1.0-*")
+                self.enable_streaming = False
+            else:
+                print(f"[INFO] Video streaming will be initialized after cameras (port: {self.stream_rgb_port})")
 
     def set_update_callback(self, callback: Callable):
         """Set callback function for UI updates (e.g., Qt viewer updates)"""
@@ -208,6 +239,22 @@ class SenseSpaceServer:
     def _client_handler(self, conn, addr):
         """Handle individual client connection"""
         print(f"[CLIENT CONNECTED] {addr}")
+        
+        # If video streaming is enabled, notify the streamer about the new client
+        if hasattr(self, 'video_streamer') and self.video_streamer is not None:
+            client_ip = addr[0]  # Extract IP from (IP, port) tuple
+            # Send heartbeat on behalf of the TCP client to trigger streaming
+            try:
+                import socket as sock_module
+                heartbeat_socket = sock_module.socket(sock_module.AF_INET, sock_module.SOCK_DGRAM)
+                heartbeat_port = self.video_streamer.stream_port + 100  # Heartbeat port
+                # Send from the client's IP perspective (server sends to itself)
+                heartbeat_socket.sendto(b"STREAMING_CLIENT", ('127.0.0.1', heartbeat_port))
+                heartbeat_socket.close()
+                print(f"[INFO] Auto-triggered video streaming for TCP client {client_ip}")
+            except Exception as e:
+                print(f"[WARNING] Failed to auto-trigger video streaming: {e}")
+        
         try:
             while self.running:
                 try:
@@ -783,6 +830,11 @@ class SenseSpaceServer:
 
             self.is_fusion_mode = False
             print(f"[INFO] Single camera initialized successfully")
+            
+            # Initialize video streaming if enabled
+            if self.enable_streaming:
+                self._initialize_video_streamer(num_cameras=1)
+            
             return True
 
         except Exception as e:
@@ -883,6 +935,48 @@ class SenseSpaceServer:
         quat = QQuaternion(w, x, y, z)  # Qt expects (scalar=w, x, y, z)
 
         return pos, quat
+
+    def _initialize_video_streamer(self, num_cameras: int):
+        """Initialize video streamer after cameras are ready"""
+        if not STREAMING_AVAILABLE:
+            print("[WARNING] Video streaming not available - install required dependencies")
+            return
+        
+        try:
+            print(f"[INFO] Initializing video streamer for {num_cameras} camera(s)")
+            print(f"[INFO] RGB stream on port {self.stream_rgb_port}, Depth stream on port {self.stream_depth_port}")
+            
+            # Get camera resolution from first camera
+            camera_width = 672  # VGA width
+            camera_height = 376  # VGA height
+            framerate = 60 if self.is_fusion_mode else 30
+            
+            # Try to get actual resolution from camera
+            if hasattr(self, 'camera') and self.camera is not None:
+                camera_info = self.camera.get_camera_information()
+                res = camera_info.camera_configuration.resolution
+                camera_width = res.width
+                camera_height = res.height
+                fps = camera_info.camera_configuration.fps
+                framerate = fps
+            
+            self.video_streamer = MultiCameraVideoStreamer(
+                stream_port=self.stream_rgb_port,  # Use RGB port as the single stream port
+                num_cameras=num_cameras,
+                host=self.stream_host,
+                camera_width=camera_width,
+                camera_height=camera_height,
+                framerate=framerate,
+                enable_client_detection=False  # Using udpsink - no client detection needed
+            )
+            
+            # Start streaming immediately (using udpsink, no heartbeat needed)
+            self.video_streamer.start()
+            
+            print("[INFO] Video streamer initialized successfully")
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize video streamer: {e}")
+            self.video_streamer = None
     
     def _initialize_fusion_cameras(self, device_list, enable_body_tracking: bool = True, enable_floor_detection: bool = True) -> bool:
         """Initialize multiple cameras for fusion mode using a fusion configuration (calib) file."""
@@ -1043,6 +1137,11 @@ class SenseSpaceServer:
             self._fusion_senders = senders
             self.is_fusion_mode = True
             print(f"[INFO] Fusion mode initialized with {len(camera_identifiers)} cameras")
+            
+            # Initialize video streaming if enabled
+            if self.enable_streaming:
+                self._initialize_video_streamer(num_cameras=len(camera_identifiers))
+            
             return True
 
         except Exception as e:
@@ -1136,6 +1235,30 @@ class SenseSpaceServer:
             last_time = time.time()
 
             if self.camera.grab(runtime_params) == sl.ERROR_CODE.SUCCESS:
+                # Capture and stream video frames if enabled
+                if self.video_streamer is not None:
+                    try:
+                        # Create image containers
+                        rgb_mat = sl.Mat()
+                        depth_mat = sl.Mat()
+                        
+                        # Retrieve RGB and depth images
+                        self.camera.retrieve_image(rgb_mat, sl.VIEW.LEFT, sl.MEM.CPU)
+                        self.camera.retrieve_measure(depth_mat, sl.MEASURE.DEPTH, sl.MEM.CPU)
+                        
+                        # Convert to numpy arrays
+                        rgb_frame = rgb_mat.get_data()
+                        depth_frame = depth_mat.get_data()
+                        
+                        # ZED returns BGRA, convert to BGR (remove alpha channel)
+                        if rgb_frame.shape[2] == 4:
+                            rgb_frame = rgb_frame[:, :, :3]
+                        
+                        # Push frames to streamer (single camera = list with one element)
+                        self.video_streamer.push_camera_frames([rgb_frame], [depth_frame])
+                    except Exception as e:
+                        print(f"[WARNING] Failed to stream video frame: {e}")
+                
                 # Retrieve bodies with proper error handling for different SDK versions
                 try:
                     if hasattr(sl, 'BodyTrackingRuntimeParameters'):
@@ -1182,6 +1305,9 @@ class SenseSpaceServer:
 
             # Grab frames from local senders sequentially (essential for fusion to work)
             # Note: Sequential is required to avoid USB bandwidth conflicts
+            rgb_frames = []
+            depth_frames = []
+            
             try:
                 if hasattr(self, '_fusion_senders'):
                     for serial, zed in self._fusion_senders.items():
@@ -1191,10 +1317,49 @@ class SenseSpaceServer:
                                     zed.retrieve_bodies(bodies)
                                 except Exception:
                                     pass
+                                
+                                # Capture video frames if streaming enabled
+                                if self.video_streamer is not None:
+                                    try:
+                                        # Create image containers
+                                        rgb_mat = sl.Mat()
+                                        depth_mat = sl.Mat()
+                                        
+                                        # Retrieve RGB and depth images
+                                        zed.retrieve_image(rgb_mat, sl.VIEW.LEFT, sl.MEM.CPU)
+                                        zed.retrieve_measure(depth_mat, sl.MEASURE.DEPTH, sl.MEM.CPU)
+                                        
+                                        # Convert to numpy arrays
+                                        rgb_frame = rgb_mat.get_data()
+                                        depth_frame = depth_mat.get_data()
+                                        
+                                        # ZED returns BGRA, convert to BGR (remove alpha channel)
+                                        if rgb_frame.shape[2] == 4:
+                                            rgb_frame = rgb_frame[:, :, :3]
+                                        
+                                        # Collect frames
+                                        rgb_frames.append(rgb_frame)
+                                        depth_frames.append(depth_frame)
+                                    except Exception as e:
+                                        print(f"[WARNING] Failed to capture video frame from camera {serial}: {e}")
+                                        # Add None placeholders to maintain camera index alignment
+                                        rgb_frames.append(None)
+                                        depth_frames.append(None)
                         except Exception:
                             pass
             except Exception:
                 pass
+            
+            # Push all frames together if we have any
+            if self.video_streamer is not None and len(rgb_frames) > 0:
+                try:
+                    # Replace None with dummy frames if needed, or filter them out
+                    valid_rgb = [f for f in rgb_frames if f is not None]
+                    valid_depth = [f for f in depth_frames if f is not None]
+                    if len(valid_rgb) == len(rgb_frames):  # All frames captured successfully
+                        self.video_streamer.push_camera_frames(rgb_frames, depth_frames)
+                except Exception as e:
+                    print(f"[WARNING] Failed to stream video frames: {e}")
 
             fusion_status = self.fusion.process()
             if fusion_status == sl.FUSION_ERROR_CODE.SUCCESS:
