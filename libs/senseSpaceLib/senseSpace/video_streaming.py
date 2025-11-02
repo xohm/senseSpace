@@ -47,10 +47,24 @@ if not ZSTD_AVAILABLE:
 class GStreamerPlatform:
     """Platform-specific GStreamer element selection for GPU encoding/decoding"""
     
+    # Cache for detected encoders/decoders
+    _encoder_cache = {}
+    _decoder_cache = None
+    
+    @staticmethod
+    def _check_element_available(element_name):
+        """Check if a GStreamer element is available"""
+        try:
+            factory = Gst.ElementFactory.find(element_name)
+            return factory is not None
+        except:
+            return False
+    
     @staticmethod
     def get_encoder(encoder_type='rgb'):
         """
-        Get platform-specific H.265 encoder element.
+        Get platform-specific H.265 encoder element with fallback.
+        Tries hardware encoders first, falls back to software.
         
         Args:
             encoder_type: 'rgb' for standard H.265, 'depth' for lossless H.265
@@ -58,51 +72,132 @@ class GStreamerPlatform:
         Returns:
             tuple: (encoder_name, properties_dict)
         """
+        # Check cache
+        cache_key = encoder_type
+        if cache_key in GStreamerPlatform._encoder_cache:
+            return GStreamerPlatform._encoder_cache[cache_key]
+        
         system = platform.system()
         
-        # Lossless encoding for depth
-        lossless_props = {'tune': 'lossless', 'speed-preset': 'fast'}
-        
-        # Standard encoding for RGB
-        rgb_props = {'speed-preset': 'fast', 'bitrate': 4000}  # 4 Mbps
-        
-        props = lossless_props if encoder_type == 'depth' else rgb_props
+        # Define encoder preferences per platform
+        # Format: [(element_name, properties_dict), ...]
+        encoder_options = []
         
         if system == 'Linux':
-            # Try NVENC (NVIDIA), VAAPI (Intel/AMD), then software
-            # NVENC: nvh265enc
-            # VAAPI: vaapih265enc
-            # Software: x265enc
-            return 'nvh265enc', {'preset': 'low-latency-hq', 'bitrate': props.get('bitrate', 4000)}
+            # NVIDIA NVENC (best for NVIDIA GPUs)
+            encoder_options.append(('nvh265enc', {'preset': 'low-latency-hq', 'bitrate': 4000}))
+            # Intel/AMD VAAPI
+            encoder_options.append(('vaapih265enc', {'bitrate': 4000, 'rate-control': 1}))
+            # Software fallback
+            encoder_options.append(('x265enc', {'speed-preset': 'fast', 'bitrate': 4000}))
         
         elif system == 'Windows':
-            # Try NVENC, then Media Foundation, then software
-            return 'nvh265enc', {'preset': 'low-latency-hq', 'bitrate': props.get('bitrate', 4000)}
+            # NVIDIA NVENC
+            encoder_options.append(('nvh265enc', {'preset': 'low-latency-hq', 'bitrate': 4000}))
+            # Microsoft Media Foundation (Intel Quick Sync, AMD VCE)
+            encoder_options.append(('mfh265enc', {'bitrate': 4000, 'rate-control': 1}))
+            # Software fallback
+            encoder_options.append(('x265enc', {'speed-preset': 'fast', 'bitrate': 4000}))
         
         elif system == 'Darwin':  # macOS
-            # Try VideoToolbox (Apple hardware), then software
-            return 'vtenc_h265', {'bitrate': props.get('bitrate', 4000)}
+            # Apple VideoToolbox (M1/M2/Intel with T2)
+            encoder_options.append(('vtenc_h265', {'bitrate': 4000, 'allow-frame-reordering': False}))
+            # Software fallback
+            encoder_options.append(('x265enc', {'speed-preset': 'fast', 'bitrate': 4000}))
         
-        # Fallback to software encoder
-        return 'x265enc', props
+        else:
+            # Unknown platform - software only
+            encoder_options.append(('x265enc', {'speed-preset': 'fast', 'bitrate': 4000}))
+        
+        # Try each encoder in order
+        selected_encoder = None
+        selected_props = {}
+        
+        for encoder_name, base_props in encoder_options:
+            if GStreamerPlatform._check_element_available(encoder_name):
+                selected_encoder = encoder_name
+                selected_props = base_props.copy()
+                
+                # Log what we found
+                hw_type = "hardware" if encoder_name not in ['x265enc', 'avenc_h265'] else "software"
+                print(f"[INFO] Using {hw_type} H.265 encoder: {encoder_name}")
+                logger.info(f"Selected {hw_type} encoder: {encoder_name}")
+                break
+        
+        if not selected_encoder:
+            # Ultimate fallback - should always be available
+            selected_encoder = 'x265enc'
+            selected_props = {'speed-preset': 'fast', 'bitrate': 4000}
+            print(f"[WARNING] No hardware encoder found, using software: {selected_encoder}")
+            logger.warning(f"Falling back to software encoder: {selected_encoder}")
+        
+        # Cache result
+        result = (selected_encoder, selected_props)
+        GStreamerPlatform._encoder_cache[cache_key] = result
+        return result
     
     @staticmethod
     def get_decoder():
-        """Get platform-specific H.265 decoder element"""
+        """
+        Get platform-specific H.265 decoder element with fallback.
+        Tries hardware decoders first, falls back to software.
+        """
+        # Check cache
+        if GStreamerPlatform._decoder_cache:
+            return GStreamerPlatform._decoder_cache
+        
         system = platform.system()
         
+        # Define decoder preferences per platform
+        decoder_options = []
+        
         if system == 'Linux':
-            # Try NVDEC, VAAPI, then software
-            return 'nvh265dec'
+            # NVIDIA NVDEC
+            decoder_options.append('nvh265dec')
+            # Intel/AMD VAAPI
+            decoder_options.append('vaapih265dec')
+            # Software fallback (libav)
+            decoder_options.append('avdec_h265')
         
         elif system == 'Windows':
-            return 'nvh265dec'
+            # NVIDIA NVDEC
+            decoder_options.append('nvh265dec')
+            # Microsoft Media Foundation
+            decoder_options.append('mfh265dec')
+            # Software fallback
+            decoder_options.append('avdec_h265')
         
-        elif system == 'Darwin':
-            return 'vtdec_h265'
+        elif system == 'Darwin':  # macOS
+            # Apple VideoToolbox
+            decoder_options.append('vtdec_h265')
+            # Software fallback
+            decoder_options.append('avdec_h265')
         
-        # Fallback
-        return 'avdec_h265'
+        else:
+            # Unknown platform
+            decoder_options.append('avdec_h265')
+        
+        # Try each decoder in order
+        selected_decoder = None
+        
+        for decoder_name in decoder_options:
+            if GStreamerPlatform._check_element_available(decoder_name):
+                selected_decoder = decoder_name
+                
+                hw_type = "hardware" if decoder_name not in ['avdec_h265'] else "software"
+                print(f"[INFO] Using {hw_type} H.265 decoder: {decoder_name}")
+                logger.info(f"Selected {hw_type} decoder: {decoder_name}")
+                break
+        
+        if not selected_decoder:
+            # Ultimate fallback
+            selected_decoder = 'avdec_h265'
+            print(f"[WARNING] No hardware decoder found, using software: {selected_decoder}")
+            logger.warning(f"Falling back to software decoder: {selected_decoder}")
+        
+        # Cache result
+        GStreamerPlatform._decoder_cache = selected_decoder
+        return selected_decoder
 
 
 class MultiCameraVideoStreamer:
@@ -141,7 +236,6 @@ class MultiCameraVideoStreamer:
             num_cameras: Number of cameras to multiplex (RGB + Depth each)
             host: Host address to bind to
             stream_port: Single UDP port for ALL streams (default: 5000)
-            stream_port: UDP port for single multiplexed MPEG-TS stream (RGB+Depth)
             camera_width: Width of each individual camera
             camera_height: Height of each individual camera
             framerate: Target framerate
@@ -393,83 +487,6 @@ class MultiCameraVideoStreamer:
                 print(f"[DEBUG] Server pipeline state: {old.value_nick} -> {new.value_nick}")
         return True
     
-    def _create_multiplexed_pipeline(self):
-        """Create single pipeline with interleaved RTP streams for RGB and depth"""
-        try:
-            encoder_name, encoder_props = GStreamerPlatform.get_encoder('rgb')
-            props_str = " ".join([f"{k}={v}" for k, v in encoder_props.items()])
-            
-            # Create interleaved RTP pipeline
-            pipeline_str = (
-                f"appsrc name=rgb_src_0 format=time is-live=true do-timestamp=true "
-                f"caps=video/x-raw,format=BGR,width={self.camera_width},height={self.camera_height},"
-                f"framerate={self.framerate}/1 ! "
-                f"queue max-size-buffers=2 leaky=downstream ! "
-                f"videoconvert ! "
-                f"{encoder_name} {props_str} ! "
-                f"h265parse config-interval=-1 ! "
-                f"rtph265pay pt=96 config-interval=-1 ! "
-                f"funnel name=f ! "
-                f"multiudpsink name=stream_sink sync=false async=false "
-                f"appsrc name=depth_src_0 format=time is-live=true do-timestamp=true "
-                f"caps=video/x-raw,format=GRAY16_LE,width={self.camera_width},height={self.camera_height},"
-                f"framerate={self.framerate}/1 ! "
-                f"queue max-size-buffers=2 leaky=downstream ! "
-                f"videoconvert ! "
-                f"video/x-raw,format=I420 ! "
-                f"{encoder_name} {props_str} ! "
-                f"h265parse config-interval=-1 ! "
-                f"rtph265pay pt=97 config-interval=-1 ! "
-                f"f."
-            )
-            
-            logger.debug(f"Interleaved RTP pipeline: {pipeline_str}")
-            print(f"[DEBUG] Creating interleaved RTP pipeline...")
-            print(f"[DEBUG] Pipeline: {pipeline_str}")
-            
-            self.pipeline = Gst.parse_launch(pipeline_str)
-            
-            if not self.pipeline:
-                raise Exception("Failed to parse pipeline")
-            
-            # Store all appsrc elements
-            self.rgb_appsrcs = []
-            self.depth_appsrcs = []
-            
-            for cam_idx in range(self.num_cameras):
-                rgb_src = self.pipeline.get_by_name(f'rgb_src_{cam_idx}')
-                if not rgb_src:
-                    raise Exception(f"Failed to get rgb_src_{cam_idx}")
-                rgb_src.set_property('format', Gst.Format.TIME)
-                self.rgb_appsrcs.append(rgb_src)
-                
-                depth_src = self.pipeline.get_by_name(f'depth_src_{cam_idx}')
-                if not depth_src:
-                    raise Exception(f"Failed to get depth_src_{cam_idx}")
-                depth_src.set_property('format', Gst.Format.TIME)
-                self.depth_appsrcs.append(depth_src)
-            
-            # Store multiudpsink for adding clients later
-            self.stream_sink = self.pipeline.get_by_name('stream_sink')
-            if not self.stream_sink:
-                raise Exception("Failed to get stream_sink")
-            
-            # Add bus message handler to catch errors
-            bus = self.pipeline.get_bus()
-            bus.add_signal_watch()
-            bus.connect('message', self._on_server_bus_message)
-            
-            print(f"[DEBUG] Created {len(self.rgb_appsrcs)} RGB appsrcs and {len(self.depth_appsrcs)} depth appsrcs")
-            logger.info(f"Created multiplexed pipeline with {self.num_cameras} camera(s)")
-            print(f"[INFO] Single MPEG-TS multiplexed pipeline created successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to create multiplexed pipeline: {e}")
-            print(f"[ERROR] Failed to create multiplexed pipeline: {e}")
-            import traceback
-            traceback.print_exc()
-            self.pipeline = None
-    
     def _create_simple_rgb_pipeline(self):
         """
         Create separate RGB pipelines for each camera, all sending to same port with different payload types.
@@ -531,24 +548,52 @@ class MultiCameraVideoStreamer:
         Create separate depth pipelines for each camera, all sending to same port with different payload types.
         Camera N uses PT = 97 + (N * 2) for Depth
         
-        Uses truly lossless H.265 encoding:
-        - NVIDIA: preset=lossless, qp=0 (mathematically lossless, bit-identical)
-        - Software: qp-min=0 (near-lossless, visually identical)
+        Uses best-effort lossless H.265 encoding per platform:
+        - NVIDIA nvh265enc: preset=lossless, qp=0 (truly lossless, bit-identical uint16)
+        - Apple vtenc_h265: quality=1.0 (highest quality, near-lossless)
+        - Software x265enc: qp-min=0 (near-lossless)
+        - Others: Lowest QP possible
         """
         try:
             depth_encoder_name, depth_encoder_props = GStreamerPlatform.get_encoder('depth')
             
-            # Lossless configuration
+            # Platform-specific lossless/high-quality configuration
             if 'nvh265enc' in depth_encoder_name:
-                # NVIDIA hardware lossless encoding
-                # QP=0 means NO quantization - bit-perfect lossless
+                # NVIDIA: True lossless mode (QP=0, bit-perfect)
                 lossless_props = "preset=lossless rc-mode=constqp qp-const-i=0 qp-const-p=0 qp-const-b=0 gop-size=1"
-                # Y444_16LE: 4:4:4 chroma, 16-bit, no subsampling
-                output_format = "Y444_16LE"
-            else:
-                # Software encoder near-lossless (x265)
+                output_format = "Y444_16LE"  # 4:4:4 16-bit
+                quality_desc = "lossless (QP=0)"
+                
+            elif 'vtenc_h265' in depth_encoder_name:
+                # Apple VideoToolbox: Maximum quality
+                # Note: vtenc doesn't support true lossless, but quality=1.0 is very high
+                lossless_props = "quality=1.0 max-keyframe-interval=1 realtime=false"
+                output_format = "I420_10LE"  # 10-bit
+                quality_desc = "maximum quality (near-lossless)"
+                
+            elif 'vaapih265enc' in depth_encoder_name:
+                # Intel/AMD VAAPI: Best quality mode
+                lossless_props = "rate-control=1 quality-level=1"  # CQP mode, best quality
+                output_format = "I420_10LE"
+                quality_desc = "best quality (CQP)"
+                
+            elif 'mfh265enc' in depth_encoder_name:
+                # Microsoft Media Foundation: Best quality
+                lossless_props = "quality=100 low-latency=false"
+                output_format = "I420_10LE"
+                quality_desc = "maximum quality"
+                
+            elif 'x265enc' in depth_encoder_name:
+                # Software x265: Near-lossless
                 lossless_props = "speed-preset=veryslow tune=ssim qp-min=0 qp-max=5"
                 output_format = "I420_10LE"
+                quality_desc = "near-lossless (QP 0-5)"
+                
+            else:
+                # Unknown encoder: conservative high quality
+                lossless_props = "bitrate=50000"  # Very high bitrate
+                output_format = "I420"
+                quality_desc = "high bitrate"
             
             depth_encoder_props_str = ' '.join([f"{k}={v}" for k, v in depth_encoder_props.items()])
             framerate_int = int(self.framerate)
@@ -560,6 +605,9 @@ class MultiCameraVideoStreamer:
             self.depth_pipelines = []
             self.depth_appsrcs = []
             
+            print(f"[INFO] Depth encoding mode: {quality_desc}")
+            logger.info(f"Depth encoding: {depth_encoder_name} with {quality_desc}")
+            
             for cam_idx in range(self.num_cameras):
                 pt = 97 + (cam_idx * 2)  # PT: 97, 99, 101, ...
                 
@@ -568,8 +616,6 @@ class MultiCameraVideoStreamer:
                     f"caps=video/x-raw,format=GRAY16_LE,width={self.camera_width},height={self.camera_height},"
                     f"framerate={framerate_int}/1 ! "
                     f"queue max-size-buffers=2 leaky=downstream ! "
-                    # Convert grayscale to YUV format for H.265 encoder
-                    # dither=none preserves exact values (no dithering noise)
                     f"videoconvert dither=none ! video/x-raw,format={output_format} ! "
                     f"{depth_encoder_name} {depth_encoder_props_str} {lossless_props} ! "
                     f"h265parse ! "
@@ -603,115 +649,6 @@ class MultiCameraVideoStreamer:
             traceback.print_exc()
             self.depth_pipeline = None
             self.depth_pipelines = []
-    
-    def _create_muxed_rgb_pipeline(self):
-        """
-        Create GStreamer pipeline with multiplexing for RGB streams.
-        Uses mpegtsmux to multiplex multiple H.265 streams into MPEG-TS container.
-        """
-        try:
-            encoder_name, encoder_props = GStreamerPlatform.get_encoder('rgb')
-            
-            # Build pipeline with multiple appsrc -> encode -> mux
-            pipeline_desc = []
-            
-            # Create encoding branch for each camera
-            for i in range(self.num_cameras):
-                branch = (
-                    f"appsrc name=rgb_src_{i} format=time is-live=true do-timestamp=true "
-                    f"caps=video/x-raw,format=BGR,width={self.camera_width},height={self.camera_height},"
-                    f"framerate={self.framerate}/1 ! "
-                    f"queue max-size-buffers=2 leaky=downstream ! "
-                    f"videoconvert ! "
-                    f"{encoder_name} "
-                )
-                
-                for key, val in encoder_props.items():
-                    branch += f"{key}={val} "
-                
-                branch += (
-                    f"! h265parse ! "
-                    f"queue ! "
-                    f"mux.sink_{i} "
-                )
-                
-                pipeline_desc.append(branch)
-            
-            # Add muxer and network sink
-            mux_part = (
-                f"mpegtsmux name=mux ! "
-                f"rtpmp2tpay ! "
-                f"udpsink host={self.host} port={self.rgb_port} sync=false"
-            )
-            
-            pipeline_str = " ".join(pipeline_desc) + " " + mux_part
-            
-            logger.debug(f"Muxed RGB pipeline: {pipeline_str}")
-            
-            self.rgb_pipeline = Gst.parse_launch(pipeline_str)
-            
-            # Get all appsrc elements
-            self.rgb_appsrcs = []
-            for i in range(self.num_cameras):
-                appsrc = self.rgb_pipeline.get_by_name(f'rgb_src_{i}')
-                appsrc.set_property('format', Gst.Format.TIME)
-                self.rgb_appsrcs.append(appsrc)
-            
-        except Exception as e:
-            logger.error(f"Failed to create muxed RGB pipeline: {e}")
-            self.rgb_pipeline = None
-    
-    def _create_muxed_depth_pipeline(self):
-        """
-        Create GStreamer pipeline with multiplexing for depth streams.
-        """
-        try:
-            encoder_name, encoder_props = GStreamerPlatform.get_encoder('depth')
-            
-            pipeline_desc = []
-            
-            for i in range(self.num_cameras):
-                branch = (
-                    f"appsrc name=depth_src_{i} format=time is-live=true do-timestamp=true "
-                    f"caps=video/x-raw,format=GRAY16_LE,width={self.camera_width},height={self.camera_height},"
-                    f"framerate={self.framerate}/1 ! "
-                    f"queue max-size-buffers=2 leaky=downstream ! "
-                    f"videoconvert ! "
-                    f"{encoder_name} "
-                )
-                
-                for key, val in encoder_props.items():
-                    branch += f"{key}={val} "
-                
-                branch += (
-                    f"! h265parse ! "
-                    f"queue ! "
-                    f"mux.sink_{i} "
-                )
-                
-                pipeline_desc.append(branch)
-            
-            mux_part = (
-                f"mpegtsmux name=mux ! "
-                f"rtpmp2tpay ! "
-                f"udpsink host={self.host} port={self.depth_port} sync=false"
-            )
-            
-            pipeline_str = " ".join(pipeline_desc) + " " + mux_part
-            
-            logger.debug(f"Muxed depth pipeline: {pipeline_str}")
-            
-            self.depth_pipeline = Gst.parse_launch(pipeline_str)
-            
-            self.depth_appsrcs = []
-            for i in range(self.num_cameras):
-                appsrc = self.depth_pipeline.get_by_name(f'depth_src_{i}')
-                appsrc.set_property('format', Gst.Format.TIME)
-                self.depth_appsrcs.append(appsrc)
-            
-        except Exception as e:
-            logger.error(f"Failed to create muxed depth pipeline: {e}")
-            self.depth_pipeline = None
     
     def push_camera_frames(self, rgb_frames: List[np.ndarray], depth_frames: List[np.ndarray]):
         """
@@ -2033,15 +1970,14 @@ def create_streamer(host='0.0.0.0', rgb_port=5000, depth_port=5001, **kwargs):
     return VideoStreamer(host=host, rgb_port=rgb_port, depth_port=depth_port, **kwargs)
 
 
-def create_multi_camera_streamer(num_cameras, host='0.0.0.0', rgb_port=5000, depth_port=5001, **kwargs):
+def create_multi_camera_streamer(num_cameras, host='0.0.0.0', stream_port=5000, **kwargs):
     """
-    Create and return a MultiCameraVideoStreamer instance with multiplexing.
+    Create and return a MultiCameraVideoStreamer instance with RTP multiplexing.
     
     Args:
         num_cameras: Number of cameras to multiplex into single stream
         host: Host address to bind to
-        rgb_port: RTP port for multiplexed RGB stream (MPEG-TS)
-        depth_port: RTP port for multiplexed depth stream (MPEG-TS)
+        stream_port: Single UDP port for ALL streams (RGB+Depth from all cameras)
         **kwargs: Additional arguments (camera_width, camera_height, framerate)
     
     Returns:
@@ -2050,8 +1986,7 @@ def create_multi_camera_streamer(num_cameras, host='0.0.0.0', rgb_port=5000, dep
     return MultiCameraVideoStreamer(
         num_cameras=num_cameras,
         host=host,
-        rgb_port=rgb_port,
-        depth_port=depth_port,
+        stream_port=stream_port,
         **kwargs
     )
 
