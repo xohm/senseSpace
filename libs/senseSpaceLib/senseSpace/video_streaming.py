@@ -107,9 +107,26 @@ class GStreamerPlatform:
 
 class MultiCameraVideoStreamer:
     """
-    Multi-camera video streamer using GStreamer multiplexing.
-    Encodes multiple camera streams and multiplexes them into single transport streams.
-    Uses MPEG-TS container for efficient multi-stream multiplexing over RTP.
+    Multi-camera video streamer using RTP payload type multiplexing.
+    
+    **Architecture:**
+    - All cameras (RGB + Depth) multiplexed on SINGLE UDP port
+    - Uses different RTP payload types for stream identification:
+        - Camera N RGB:   PT = 96 + (N * 2)
+        - Camera N Depth: PT = 97 + (N * 2)
+    
+    **Example (3 cameras):**
+        Camera 0: RGB=PT96,  Depth=PT97
+        Camera 1: RGB=PT98,  Depth=PT99
+        Camera 2: RGB=PT100, Depth=PT101
+        
+        All on port 5000 → client uses rtpptdemux to separate
+    
+    **Benefits:**
+    - Single firewall port
+    - Synchronized streams (same network path)
+    - Easy client detection
+    - Scalable to many cameras
     
     Automatically starts/stops streaming based on active client count.
     """
@@ -118,11 +135,12 @@ class MultiCameraVideoStreamer:
                  camera_width=1280, camera_height=720, framerate=30,
                  enable_client_detection=True, client_timeout=5.0):
         """
-        Initialize multi-camera video streamer with single multiplexed stream.
+        Initialize multi-camera video streamer with RTP multiplexing.
         
         Args:
-            num_cameras: Number of cameras to multiplex
+            num_cameras: Number of cameras to multiplex (RGB + Depth each)
             host: Host address to bind to
+            stream_port: Single UDP port for ALL streams (default: 5000)
             stream_port: UDP port for single multiplexed MPEG-TS stream (RGB+Depth)
             camera_width: Width of each individual camera
             camera_height: Height of each individual camera
@@ -298,15 +316,21 @@ class MultiCameraVideoStreamer:
             logger.warning("Streaming already active")
             return
         
-        # Create RGB/Depth pipelines
+        # Create RGB/Depth pipelines (multiple pipelines, one per camera per stream type)
         self._create_simple_rgb_pipeline()
         self._create_simple_depth_pipeline()
         
-        # Start pipeline
-        if self.rgb_pipeline:
-            self.rgb_pipeline.set_state(Gst.State.PLAYING)
-        if self.depth_pipeline:
-            self.depth_pipeline.set_state(Gst.State.PLAYING)
+        # Start all RGB pipelines
+        if hasattr(self, 'rgb_pipelines'):
+            for pipeline in self.rgb_pipelines:
+                if pipeline:
+                    pipeline.set_state(Gst.State.PLAYING)
+        
+        # Start all Depth pipelines
+        if hasattr(self, 'depth_pipelines'):
+            for pipeline in self.depth_pipelines:
+                if pipeline:
+                    pipeline.set_state(Gst.State.PLAYING)
         
         self.is_streaming = True
         if hasattr(self, '_warned_not_streaming'):
@@ -321,10 +345,17 @@ class MultiCameraVideoStreamer:
         
         self.is_streaming = False
         
-        if self.rgb_pipeline:
-            self.rgb_pipeline.set_state(Gst.State.NULL)
-        if self.depth_pipeline:
-            self.depth_pipeline.set_state(Gst.State.NULL)
+        # Stop all RGB pipelines
+        if hasattr(self, 'rgb_pipelines'):
+            for pipeline in self.rgb_pipelines:
+                if pipeline:
+                    pipeline.set_state(Gst.State.NULL)
+        
+        # Stop all Depth pipelines
+        if hasattr(self, 'depth_pipelines'):
+            for pipeline in self.depth_pipelines:
+                if pipeline:
+                    pipeline.set_state(Gst.State.NULL)
         
         logger.info("Streaming stopped")
         print("[INFO] Streaming stopped")
@@ -356,11 +387,10 @@ class MultiCameraVideoStreamer:
             print(f"[WARNING] Server GStreamer warning: {warn}: {debug}")
             logger.warning(f"Server GStreamer warning: {warn}: {debug}")
         elif t == Gst.MessageType.STATE_CHANGED:
-            watched_pipelines = [p for p in (self.rgb_pipeline, self.depth_pipeline) if p is not None]
-            if message.src in watched_pipelines:
+            # Only RGB pipeline exists now (contains both RGB and depth streams)
+            if hasattr(self, 'rgb_pipeline') and self.rgb_pipeline and message.src == self.rgb_pipeline:
                 old, new, pending = message.parse_state_changed()
-                label = 'RGB' if message.src == self.rgb_pipeline else 'Depth'
-                print(f"[DEBUG] Server {label} pipeline state: {old.value_nick} -> {new.value_nick}")
+                print(f"[DEBUG] Server pipeline state: {old.value_nick} -> {new.value_nick}")
         return True
     
     def _create_multiplexed_pipeline(self):
@@ -441,142 +471,138 @@ class MultiCameraVideoStreamer:
             self.pipeline = None
     
     def _create_simple_rgb_pipeline(self):
-        """Create simple single-camera RGB pipeline without muxing"""
-        try:
-            encoder_name, encoder_props = GStreamerPlatform.get_encoder('rgb')
-            
-            props_str = " ".join([f"{k}={v}" for k, v in encoder_props.items()])
-            
-            # Convert framerate to integer for proper caps format
-            framerate_int = int(self.framerate)
-            
-            # Use udpsink with localhost for testing (simpler than multiudpsink)
-            pipeline_str = (
-                f"appsrc name=rgb_src_0 format=time is-live=true do-timestamp=true "
-                f"caps=video/x-raw,format=BGR,width={self.camera_width},height={self.camera_height},"
-                f"framerate={framerate_int}/1 ! "
-                f"queue max-size-buffers=2 leaky=downstream ! "
-                f"videoconvert ! "
-                f"video/x-raw,format=NV12,width={self.camera_width},height={self.camera_height},"
-                f"framerate={framerate_int}/1 ! "
-                f"{encoder_name} {props_str} ! "
-                f"h265parse ! "
-                f"rtph265pay config-interval=1 pt=96 ! "
-                f"udpsink host=127.0.0.1 port={self.stream_port} sync=false async=false"
-            )
-            
-            logger.debug(f"Simple RGB pipeline: {pipeline_str}")
-            print(f"[DEBUG] Simple RGB pipeline with udpsink")
-            
-            self.rgb_pipeline = Gst.parse_launch(pipeline_str)
-            appsrc = self.rgb_pipeline.get_by_name('rgb_src_0')
-            appsrc.set_property('format', Gst.Format.TIME)
-            self.rgb_appsrcs = [appsrc]
-            
-            # No sink reference needed for udpsink (fixed destination)
-            self.rgb_sink = None
-
-            if self.rgb_pipeline:
-                bus = self.rgb_pipeline.get_bus()
-                bus.add_signal_watch()
-                bus.connect('message', self._on_server_bus_message)
-            
-        except Exception as e:
-            logger.error(f"Failed to create simple RGB pipeline: {e}")
-            print(f"[ERROR] Failed to create simple RGB pipeline: {e}")
-            self.rgb_pipeline = None
-    
-    def _create_simple_depth_pipeline(self):
-        """Create Zstd-compressed depth streaming over RTP
-        
-        OPTIMIZED for ZED camera depth precision:
-        
-        Pipeline: float32 mm → uint16 tenths-mm → Zstd compress → RTP → UDP
-        
-        Why uint16 tenths-of-millimeters?
-        - ZED configured with UNIT.MILLIMETER (values already in mm)
-        - ZED sensor precision: ~1-3mm (0.1mm is 10x finer = lossless)
-        - uint16 range: 0-6553.5 mm (0-6.5 meters) with 0.1mm precision
-        - Data size: 2 bytes/pixel (vs 4 bytes for float32)
-        - Zstd compression: ~60-70x typical on depth data
-        - Final bandwidth: ~8x smaller than float32
-        - Quality: LOSSLESS within sensor noise floor
-        
-        Why RTP?
-        - Automatic packet fragmentation (no manual chunking needed)
-        - Handles large frames (>65KB compressed)
-        - Built-in sequencing and reassembly
-        - Same infrastructure as H.265 RGB stream
-        
-        Pipeline: appsrc → rtpgstpay pt=97 → udpsink
+        """
+        Create separate RGB pipelines for each camera, all sending to same port with different payload types.
+        Camera N uses PT = 96 + (N * 2) for RGB
         """
         try:
-            depth_port = self.stream_port + 1
+            encoder_name, encoder_props = GStreamerPlatform.get_encoder('rgb')
+            props_str = " ".join([f"{k}={v}" for k, v in encoder_props.items()])
+            framerate_int = int(self.framerate)
             
-            # Use Zstd compression (LOSSLESS within sensor limits)
-            # No H.265 encoding - avoids YUV conversion, better compression
-            if not ZSTD_AVAILABLE:
-                logger.error("zstandard module required for depth streaming")
+            # Create list to hold all RGB pipelines (one per camera)
+            self.rgb_pipelines = []
+            self.rgb_appsrcs = []
             
-            # Create H.265 pipeline for depth (16-bit grayscale → YUV444 for lossless encoding)
-            # Encode depth as GRAY16_LE, convert to I420_10LE (10-bit YUV), use H.265 lossless/near-lossless
-            # Note: NVENC supports 10-bit better than 16-bit, so we'll use I420_10LE
-            # This gives us 0-1023 range for depth values (we'll scale from uint16)
-            encoder_name, encoder_props = GStreamerPlatform.get_encoder('depth')
+            for cam_idx in range(self.num_cameras):
+                pt = 96 + (cam_idx * 2)  # PT: 96, 98, 100, ...
+                
+                pipeline_str = (
+                    f"appsrc name=src format=time is-live=true do-timestamp=true "
+                    f"caps=video/x-raw,format=BGR,width={self.camera_width},height={self.camera_height},"
+                    f"framerate={framerate_int}/1 ! "
+                    f"queue max-size-buffers=2 leaky=downstream ! "
+                    f"videoconvert ! video/x-raw,format=NV12 ! "
+                    f"{encoder_name} {props_str} ! "
+                    f"h265parse ! "
+                    f"rtph265pay config-interval=1 pt={pt} ! "
+                    f"udpsink host=127.0.0.1 port={self.stream_port} sync=false async=false"
+                )
+                
+                pipeline = Gst.parse_launch(pipeline_str)
+                appsrc = pipeline.get_by_name('src')
+                appsrc.set_property('format', Gst.Format.TIME)
+                
+                # Add bus handler
+                bus = pipeline.get_bus()
+                bus.add_signal_watch()
+                bus.connect('message', self._on_server_bus_message)
+                
+                self.rgb_pipelines.append(pipeline)
+                self.rgb_appsrcs.append(appsrc)
+                
+                logger.info(f"RGB pipeline {cam_idx} created: PT={pt}, port={self.stream_port}")
             
-            # For lossless/near-lossless depth encoding:
-            # - Use constqp mode with qp-const-i/p/b=0 for lossless (or 1-5 for near-lossless)
-            # - Use preset=lossless or preset=losslesshp
-            # - gop-size=1 for all-intra (reduces latency)
-            # - Y444_16LE preserves 16-bit depth precision (I420_10LE is 4:2:0 subsampled)
+            # Keep first pipeline as main reference for compatibility
+            self.rgb_pipeline = self.rgb_pipelines[0] if self.rgb_pipelines else None
             
-            if 'nvh265enc' in encoder_name:
-                # NVIDIA hardware encoder - use lossless preset with constqp
-                # Note: This GStreamer version uses qp-const-i/p/b (not qp)
+            print(f"[INFO] Created {len(self.rgb_pipelines)} RGB pipelines on port {self.stream_port} (PT 96, 98, 100...)")
+            
+        except Exception as e:
+            logger.error(f"Failed to create RGB pipelines: {e}")
+            print(f"[ERROR] Failed to create RGB pipelines: {e}")
+            import traceback
+            traceback.print_exc()
+            self.rgb_pipeline = None
+            self.rgb_pipelines = []
+    
+    def _create_simple_depth_pipeline(self):
+        """
+        Create separate depth pipelines for each camera, all sending to same port with different payload types.
+        Camera N uses PT = 97 + (N * 2) for Depth
+        
+        Uses truly lossless H.265 encoding:
+        - NVIDIA: preset=lossless, qp=0 (mathematically lossless, bit-identical)
+        - Software: qp-min=0 (near-lossless, visually identical)
+        """
+        try:
+            depth_encoder_name, depth_encoder_props = GStreamerPlatform.get_encoder('depth')
+            
+            # Lossless configuration
+            if 'nvh265enc' in depth_encoder_name:
+                # NVIDIA hardware lossless encoding
+                # QP=0 means NO quantization - bit-perfect lossless
                 lossless_props = "preset=lossless rc-mode=constqp qp-const-i=0 qp-const-p=0 qp-const-b=0 gop-size=1"
+                # Y444_16LE: 4:4:4 chroma, 16-bit, no subsampling
                 output_format = "Y444_16LE"
             else:
-                # Software encoder fallback - use very high quality
+                # Software encoder near-lossless (x265)
                 lossless_props = "speed-preset=veryslow tune=ssim qp-min=0 qp-max=5"
                 output_format = "I420_10LE"
             
-            # Build encoder properties
-            encoder_props_str = ' '.join([f"{k}={v}" for k, v in encoder_props.items()])
+            depth_encoder_props_str = ' '.join([f"{k}={v}" for k, v in depth_encoder_props.items()])
+            framerate_int = int(self.framerate)
             
-            # Pipeline: GRAY16_LE → videoconvert → Y444_16LE (16-bit) → H.265 lossless → RTP
-            pipeline_str = (
-                f"appsrc name=depth_src_0 format=time is-live=true do-timestamp=true "
-                f"caps=video/x-raw,format=GRAY16_LE,width={self.camera_width},height={self.camera_height},"
-                f"framerate={int(self.framerate)}/1 ! "
-                f"videoconvert dither=none ! video/x-raw,format={output_format} ! "
-                f"{encoder_name} {encoder_props_str} {lossless_props} ! "
-                f"h265parse ! "
-                f"rtph265pay pt=98 config-interval=1 mtu=1400 ! "
-                f"udpsink host=127.0.0.1 port={depth_port} sync=false async=false"
-            )
+            # MTU optimization: 1400 for internet, could use 8192 for local networks (jumbo frames)
+            mtu_size = 1400
             
-            logger.debug(f"Depth H.265 pipeline: {pipeline_str}")
-            print(f"[DEBUG] Depth streaming via H.265 (GRAY16→{output_format}, lossless) on port {depth_port}")
+            # Create list to hold all depth pipelines (one per camera)
+            self.depth_pipelines = []
+            self.depth_appsrcs = []
             
-            self.depth_pipeline = Gst.parse_launch(pipeline_str)
-            appsrc = self.depth_pipeline.get_by_name('depth_src_0')
-            appsrc.set_property('format', Gst.Format.TIME)
-            self.depth_appsrcs = [appsrc]
-            
-            self.depth_sink = None
-            
-            if self.depth_pipeline:
-                bus = self.depth_pipeline.get_bus()
+            for cam_idx in range(self.num_cameras):
+                pt = 97 + (cam_idx * 2)  # PT: 97, 99, 101, ...
+                
+                pipeline_str = (
+                    f"appsrc name=src format=time is-live=true do-timestamp=true "
+                    f"caps=video/x-raw,format=GRAY16_LE,width={self.camera_width},height={self.camera_height},"
+                    f"framerate={framerate_int}/1 ! "
+                    f"queue max-size-buffers=2 leaky=downstream ! "
+                    # Convert grayscale to YUV format for H.265 encoder
+                    # dither=none preserves exact values (no dithering noise)
+                    f"videoconvert dither=none ! video/x-raw,format={output_format} ! "
+                    f"{depth_encoder_name} {depth_encoder_props_str} {lossless_props} ! "
+                    f"h265parse ! "
+                    f"rtph265pay config-interval=1 mtu={mtu_size} pt={pt} ! "
+                    f"udpsink host=127.0.0.1 port={self.stream_port} sync=false async=false"
+                )
+                
+                pipeline = Gst.parse_launch(pipeline_str)
+                appsrc = pipeline.get_by_name('src')
+                appsrc.set_property('format', Gst.Format.TIME)
+                
+                # Add bus handler
+                bus = pipeline.get_bus()
                 bus.add_signal_watch()
                 bus.connect('message', self._on_server_bus_message)
+                
+                self.depth_pipelines.append(pipeline)
+                self.depth_appsrcs.append(appsrc)
+                
+                logger.info(f"Depth pipeline {cam_idx} created: PT={pt}, port={self.stream_port} (lossless)")
             
-            logger.info(f"Depth streaming: H.265 10-bit lossless on port {depth_port}")
-            print(f"[INFO] Depth streaming: H.265 10-bit lossless on port {depth_port}")
+            # Keep first pipeline as main reference for compatibility
+            self.depth_pipeline = self.depth_pipelines[0] if self.depth_pipelines else None
+            
+            print(f"[INFO] Created {len(self.depth_pipelines)} lossless Depth pipelines on port {self.stream_port} (PT 97, 99, 101...)")
             
         except Exception as e:
-            logger.error(f"Failed to create depth pipeline: {e}")
-            print(f"[ERROR] Failed to create depth pipeline: {e}")
+            logger.error(f"Failed to create depth pipelines: {e}")
+            print(f"[ERROR] Failed to create depth pipelines: {e}")
+            import traceback
+            traceback.print_exc()
             self.depth_pipeline = None
+            self.depth_pipelines = []
     
     def _create_muxed_rgb_pipeline(self):
         """
@@ -1398,95 +1424,151 @@ class VideoReceiver:
             self.pipeline = None
     
     def _create_rgb_receiver(self):
-        """Create GStreamer pipeline for RGB reception"""
+        """
+        Create RTP receiver with payload type demultiplexing.
+        Uses rtpptdemux to separate RGB and Depth streams by payload type on single port.
+        Dynamically connects pads as streams are detected.
+        """
         try:
-            # Use NVIDIA hardware decoder for GPU acceleration
             decoder_name = GStreamerPlatform.get_decoder()
             
-            # udpsrc -> rtph265depay -> h265parse -> nvh265dec (GPU) -> videoconvert -> appsink
-            # h265parse converts stream-format from hvc1 (RTP) to byte-stream (nvh265dec requirement)
-            # Caps MUST match server: payload=96, clock-rate=90000, encoding-name=H265
+            # Single udpsrc → rtpptdemux (pads created dynamically)
             pipeline_str = (
                 f"udpsrc port={self.stream_port} "
-                f"caps=\"application/x-rtp,media=(string)video,clock-rate=(int)90000,encoding-name=(string)H265,payload=(int)96\" ! "
-                f"rtph265depay ! "
-                f"h265parse ! "
-                f"{decoder_name} ! "
-                f"videoconvert ! "
-                f"video/x-raw,format=(string)BGR ! "
-                f"appsink name=sink emit-signals=true sync=false max-buffers=1 drop=true"
+                f"caps=\"application/x-rtp\" ! "
+                f"rtpptdemux name=demux"
             )
             
-            logger.debug(f"RGB receiver pipeline: {pipeline_str}")
-            print(f"[DEBUG] RGB receiver pipeline: {pipeline_str}")
+            logger.debug(f"RTP demux receiver base pipeline: {pipeline_str}")
+            print(f"[DEBUG] RTP demux receiver pipeline (single port {self.stream_port})")
             
             self.rgb_pipeline = Gst.parse_launch(pipeline_str)
+            
+            # Get demux element to connect pad-added signal
+            demux = self.rgb_pipeline.get_by_name('demux')
+            if demux:
+                # Connect to pad-added signal to handle dynamic pads
+                demux.connect('pad-added', self._on_demux_pad_added)
+                print(f"[INFO] Connected to rtpptdemux pad-added signal")
             
             # Add bus message handler
             bus = self.rgb_pipeline.get_bus()
             bus.add_signal_watch()
             bus.connect('message', self._on_bus_message)
             
-            # Connect to new-sample signal
-            appsink = self.rgb_pipeline.get_by_name('sink')
-            appsink.connect('new-sample', self._on_rgb_sample)
+            # Initialize sink tracking
+            self.rgb_sinks = {}  # {cam_idx: appsink}
+            self.depth_sinks = {}  # {cam_idx: appsink}
             
-            print(f"[INFO] RGB receiver pipeline created successfully")
+            print(f"[INFO] RTP demux receiver pipeline created on port {self.stream_port}")
             
         except Exception as e:
-            logger.error(f"Failed to create RGB receiver: {e}")
-            print(f"[ERROR] Failed to create RGB receiver: {e}")
+            logger.error(f"Failed to create RTP demux receiver: {e}")
+            print(f"[ERROR] Failed to create RTP demux receiver: {e}")
+            import traceback
+            traceback.print_exc()
+            self.rgb_pipeline = None
+    
+    def _on_demux_pad_added(self, demux, pad):
+        """Handle dynamically added pads from rtpptdemux based on payload type"""
+        try:
+            # Get pad name (format: "src_96", "src_97", etc.)
+            pad_name = pad.get_name()
+            if not pad_name.startswith('src_'):
+                return
+            
+            # Extract payload type
+            pt = int(pad_name.split('_')[1])
+            
+            # Determine if RGB or Depth based on PT (even=RGB, odd=Depth)
+            # PT 96, 98, 100... = RGB (cameras 0, 1, 2...)
+            # PT 97, 99, 101... = Depth (cameras 0, 1, 2...)
+            is_rgb = (pt % 2 == 0)
+            cam_idx = (pt - 96) // 2
+            
+            decoder_name = GStreamerPlatform.get_decoder()
+            
+            if is_rgb:
+                # Create RGB decoder chain with proper RTP caps
+                elements_str = (
+                    f"capsfilter caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H265,payload={pt}\" ! "
+                    f"queue ! "
+                    f"rtph265depay ! "
+                    f"h265parse ! "
+                    f"{decoder_name} ! "
+                    f"videoconvert ! "
+                    f"video/x-raw,format=BGR ! "
+                    f"appsink name=rgb_sink_{cam_idx} emit-signals=true sync=false max-buffers=1 drop=true"
+                )
+                
+                bin = Gst.parse_bin_from_description(elements_str, True)
+                self.rgb_pipeline.add(bin)
+                
+                # Link demux pad to bin
+                sink_pad = bin.get_static_pad('sink')
+                if pad.link(sink_pad) == Gst.PadLinkReturn.OK:
+                    bin.sync_state_with_parent()
+                    
+                    # Connect appsink callback
+                    appsink = bin.get_by_name(f'rgb_sink_{cam_idx}')
+                    if appsink:
+                        appsink.connect('new-sample', self._on_rgb_sample)
+                        self.rgb_sinks[cam_idx] = appsink
+                        print(f"[INFO] RGB receiver connected: Camera {cam_idx}, PT={pt}")
+                else:
+                    print(f"[ERROR] Failed to link RGB pad for camera {cam_idx}")
+            else:
+                # Create Depth decoder chain with proper RTP caps
+                elements_str = (
+                    f"capsfilter caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H265,payload={pt}\" ! "
+                    f"queue ! "
+                    f"rtph265depay ! "
+                    f"h265parse ! "
+                    f"{decoder_name} ! "
+                    f"videoconvert ! "
+                    f"video/x-raw,format=GRAY16_LE ! "
+                    f"appsink name=depth_sink_{cam_idx} emit-signals=true sync=false max-buffers=2 drop=true"
+                )
+                
+                bin = Gst.parse_bin_from_description(elements_str, True)
+                self.rgb_pipeline.add(bin)
+                
+                # Link demux pad to bin
+                sink_pad = bin.get_static_pad('sink')
+                if pad.link(sink_pad) == Gst.PadLinkReturn.OK:
+                    bin.sync_state_with_parent()
+                    
+                    # Connect appsink callback
+                    appsink = bin.get_by_name(f'depth_sink_{cam_idx}')
+                    if appsink:
+                        appsink.connect('new-sample', self._on_depth_sample)
+                        self.depth_sinks[cam_idx] = appsink
+                        print(f"[INFO] Depth receiver connected: Camera {cam_idx}, PT={pt}")
+                else:
+                    print(f"[ERROR] Failed to link Depth pad for camera {cam_idx}")
+                    
+        except Exception as e:
+            print(f"[ERROR] Failed to handle demux pad: {e}")
+            import traceback
+            traceback.print_exc()
+            
+        except Exception as e:
+            logger.error(f"Failed to create RTP demux receiver: {e}")
+            print(f"[ERROR] Failed to create RTP demux receiver: {e}")
+            import traceback
+            traceback.print_exc()
             self.rgb_pipeline = None
     
     def _create_depth_receiver(self):
-        """Create H.265 RTP receiver for depth stream"""
-        try:
-            # Use NVIDIA hardware decoder for GPU acceleration
-            decoder_name = GStreamerPlatform.get_decoder()
-            
-            # Create H.265 RTP pipeline for depth (16-bit lossless via Y444_16LE)
-            # udpsrc → rtph265depay → h265parse → nvh265dec (GPU) → videoconvert → GRAY16_LE → appsink
-            # h265parse converts stream-format from hvc1 (RTP) to byte-stream (nvh265dec requirement)
-            pipeline_str = (
-                f"udpsrc port={self.depth_port} "
-                f"caps=\"application/x-rtp,media=(string)video,clock-rate=(int)90000,encoding-name=(string)H265,payload=(int)98\" ! "
-                f"rtph265depay ! "
-                f"h265parse ! "
-                f"{decoder_name} ! "
-                f"videoconvert ! video/x-raw,format=GRAY16_LE ! "
-                f"appsink name=depth_sink emit-signals=true sync=false max-buffers=2 drop=true"
-            )
-            
-            logger.debug(f"Depth H.265 receiver pipeline: {pipeline_str}")
-            print(f"[DEBUG] Depth H.265 receiver pipeline: {pipeline_str}")
-            
-            self.depth_pipeline = Gst.parse_launch(pipeline_str)
-            
-            # Add bus message handler
-            bus = self.depth_pipeline.get_bus()
-            bus.add_signal_watch()
-            bus.connect('message', self._on_bus_message)
-            
-            # Connect depth appsink callback
-            depth_sink = self.depth_pipeline.get_by_name('depth_sink')
-            if depth_sink:
-                depth_sink.connect('new-sample', self._on_depth_sample)
-                print(f"[INFO] Depth receiver created: H.265 RTP port {self.depth_port}")
-            else:
-                logger.error("Could not find depth_sink in pipeline")
-                print(f"[ERROR] Could not find depth_sink in pipeline")
-                self.depth_pipeline = None
-                return
-            
-            logger.info(f"Depth receiver: H.265 16-bit lossless (Y444_16LE) on port {self.depth_port}")
-            print(f"[INFO] Depth receiver: H.265 16-bit lossless (Y444_16LE) on port {self.depth_port}")
-            
-        except Exception as e:
-            logger.error(f"Failed to create depth receiver: {e}")
-            print(f"[ERROR] Failed to create depth receiver: {e}")
-            import traceback
-            traceback.print_exc()
-            self.depth_pipeline = None
+        """
+        Depth receiver is now part of the RTP demux pipeline in _create_rgb_receiver().
+        This method is a no-op to maintain API compatibility.
+        """
+        # Depth receivers are created dynamically in _on_demux_pad_added
+        logger.info("Depth receiver will be created dynamically via rtpptdemux")
+        print(f"[DEBUG] Depth receiver will be connected via pad-added signal")
+        # Depth pipeline already created in _create_rgb_receiver
+        pass
     
     def _on_depth_sample(self, appsink):
         """Callback for H.265 depth sample (GRAY16_LE format)"""
