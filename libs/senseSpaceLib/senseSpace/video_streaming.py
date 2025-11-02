@@ -1400,16 +1400,17 @@ class VideoReceiver:
     def _create_rgb_receiver(self):
         """Create GStreamer pipeline for RGB reception"""
         try:
-            # Use hardware decoder for GPU acceleration
-            # Note: avdec_h265 works but uses CPU, nvh265dec uses GPU
-            decoder_name = "avdec_h265"  # Fallback to CPU decoder (works reliably)
+            # Use NVIDIA hardware decoder for GPU acceleration
+            decoder_name = GStreamerPlatform.get_decoder()
             
-            # udpsrc -> rtph265depay -> decoder -> videoconvert -> appsink
+            # udpsrc -> rtph265depay -> h265parse -> nvh265dec (GPU) -> videoconvert -> appsink
+            # h265parse converts stream-format from hvc1 (RTP) to byte-stream (nvh265dec requirement)
             # Caps MUST match server: payload=96, clock-rate=90000, encoding-name=H265
             pipeline_str = (
                 f"udpsrc port={self.stream_port} "
                 f"caps=\"application/x-rtp,media=(string)video,clock-rate=(int)90000,encoding-name=(string)H265,payload=(int)96\" ! "
                 f"rtph265depay ! "
+                f"h265parse ! "
                 f"{decoder_name} ! "
                 f"videoconvert ! "
                 f"video/x-raw,format=(string)BGR ! "
@@ -1440,13 +1441,18 @@ class VideoReceiver:
     def _create_depth_receiver(self):
         """Create H.265 RTP receiver for depth stream"""
         try:
+            # Use NVIDIA hardware decoder for GPU acceleration
+            decoder_name = GStreamerPlatform.get_decoder()
+            
             # Create H.265 RTP pipeline for depth (16-bit lossless via Y444_16LE)
-            # udpsrc → rtph265depay → avdec_h265 → videoconvert → GRAY16_LE → appsink
+            # udpsrc → rtph265depay → h265parse → nvh265dec (GPU) → videoconvert → GRAY16_LE → appsink
+            # h265parse converts stream-format from hvc1 (RTP) to byte-stream (nvh265dec requirement)
             pipeline_str = (
                 f"udpsrc port={self.depth_port} "
                 f"caps=\"application/x-rtp,media=(string)video,clock-rate=(int)90000,encoding-name=(string)H265,payload=(int)98\" ! "
                 f"rtph265depay ! "
-                f"avdec_h265 ! "
+                f"h265parse ! "
+                f"{decoder_name} ! "
                 f"videoconvert ! video/x-raw,format=GRAY16_LE ! "
                 f"appsink name=depth_sink emit-signals=true sync=false max-buffers=2 drop=true"
             )
