@@ -14,6 +14,7 @@ import sys
 import argparse
 import time
 import numpy as np
+import cv2
 from pathlib import Path
 
 # Add parent directories to path for imports
@@ -226,35 +227,55 @@ class StreamingVisualizationWidget(SkeletonGLWidget):
                 gl_data_format = GL_RGB
                 gl_internal_format = GL_RGB8
         else:  # depth
-            # Depth is now float32 in millimeters - apply colormap visualization
-            # Red = close, Blue = far
+            # Depth visualization with proper colormap
+            # Data is float32 in MILLIMETERS (from ZED with UNIT.MILLIMETER), create RED->BLUE colormap
             depth_nonzero = frame[frame > 0]  # Ignore zero/invalid depth
             
             if depth_nonzero.size > 0:
-                # Use percentiles to get a better range (ignore outliers)
-                depth_min = np.percentile(depth_nonzero, 1)  # 1st percentile (mm)
-                depth_max = np.percentile(depth_nonzero, 99)  # 99th percentile (mm)
+                # Use percentiles for robust range estimation (ignore outliers)
+                depth_min = np.percentile(depth_nonzero, 2)   # 2nd percentile
+                depth_max = np.percentile(depth_nonzero, 98)  # 98th percentile
                 
-                # Normalize to 0-1 range
+                # DEBUG: Show depth statistics once
+                if not hasattr(self, '_depth_viz_debug_done'):
+                    self._depth_viz_debug_done = True
+                    print(f"[DEBUG] Client depth visualization: min={depth_min:.1f}mm, max={depth_max:.1f}mm, range={depth_max-depth_min:.1f}mm")
+                
+                # Ensure we have a valid range
+                if depth_max - depth_min < 100:  # Less than 10cm range
+                    depth_min = depth_nonzero.min()
+                    depth_max = depth_nonzero.max()
+                
+                # Normalize depth to 0-1 range
                 depth_clipped = np.clip(frame, depth_min, depth_max)
                 depth_range = depth_max - depth_min
                 
-                if depth_range > 0:
-                    # Normalize to 0-1
+                if depth_range > 10:  # At least 1cm range
                     depth_norm = (depth_clipped - depth_min) / depth_range
                     
-                    # Apply colormap: Red (close) -> Yellow -> Green -> Cyan -> Blue (far)
-                    # This is similar to a "jet" colormap but simplified
-                    r = np.clip(255.0 * (1.0 - depth_norm * 1.5), 0, 255).astype(np.uint8)
-                    g = np.clip(255.0 * (1.0 - np.abs(depth_norm - 0.5) * 2.0), 0, 255).astype(np.uint8)
-                    b = np.clip(255.0 * (depth_norm * 1.5 - 0.5), 0, 255).astype(np.uint8)
+                    # Apply OpenCV TURBO colormap (like ZED SDK) - vibrant rainbow colors
+                    # Convert normalized depth (0-1) to 0-255 range for colormap
+                    depth_uint8 = (depth_norm * 255).astype(np.uint8)
                     
-                    # Stack into BGR format
-                    texture_data = np.ascontiguousarray(np.stack([b, g, r], axis=-1))
+                    # Apply TURBO colormap (modern, perceptually uniform rainbow)
+                    # This gives: Blue (far) → Cyan → Green → Yellow → Red (close)
+                    colored = cv2.applyColorMap(depth_uint8, cv2.COLORMAP_TURBO)
+                    
+                    # colored is already BGR format, perfect for OpenGL
+                    texture_data = np.ascontiguousarray(colored)
                 else:
-                    texture_data = np.zeros((frame.shape[0], frame.shape[1], 3), dtype=np.uint8)
+                    # Constant depth - map the single value to a color using TURBO colormap
+                    avg_depth = depth_nonzero.mean()
+                    norm_val = np.clip(avg_depth / 10000.0, 0.0, 1.0)  # Normalize to 0-10m
+                    
+                    # Create single-color image using TURBO colormap
+                    depth_uint8 = np.full_like(frame, int(norm_val * 255), dtype=np.uint8)
+                    colored = cv2.applyColorMap(depth_uint8, cv2.COLORMAP_TURBO)
+                    texture_data = np.ascontiguousarray(colored)
             else:
-                texture_data = np.zeros((frame.shape[0], frame.shape[1], 3), dtype=np.uint8)
+                # No valid depth - show as black
+                black = np.zeros_like(frame, dtype=np.uint8)
+                texture_data = np.ascontiguousarray(np.stack([black, black, black], axis=-1))
             
             gl_data_format = GL_BGR
             gl_internal_format = GL_RGB8

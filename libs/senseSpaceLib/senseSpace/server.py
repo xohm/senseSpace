@@ -788,11 +788,11 @@ class SenseSpaceServer:
         try:
             self.camera = sl.Camera()
 
-            # Set initialization parameters (optimized for performance)
+            # Set initialization parameters
             init_params = sl.InitParameters()
-            init_params.camera_resolution = sl.RESOLUTION.VGA  # 672x376 for better performance
+            init_params.camera_resolution = sl.RESOLUTION.VGA  # 672x376 @ 60fps
             init_params.camera_fps = 60  # Higher FPS for smoother tracking
-            init_params.depth_mode = sl.DEPTH_MODE.PERFORMANCE  # Faster depth processing
+            init_params.depth_mode = sl.DEPTH_MODE.NEURAL  # Neural depth for better quality (replaces deprecated PERFORMANCE)
             init_params.coordinate_units = sl.UNIT.MILLIMETER
             init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
 
@@ -999,12 +999,12 @@ class SenseSpaceServer:
 
             print(f"[INFO] Found {len(fusion_configurations)} cameras in configuration")
 
-            # Common parameters (optimized for performance)
+            # Common parameters
             init_params = sl.InitParameters()
             init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
             init_params.coordinate_units = sl.UNIT.MILLIMETER
-            init_params.depth_mode = sl.DEPTH_MODE.PERFORMANCE  # Faster depth processing
-            init_params.camera_resolution = sl.RESOLUTION.VGA  # 672x376 for better performance
+            init_params.depth_mode = sl.DEPTH_MODE.NEURAL  # Neural depth for better quality (replaces deprecated PERFORMANCE)
+            init_params.camera_resolution = sl.RESOLUTION.VGA  # 672x376 @ 60fps
             init_params.camera_fps = 60  # Higher FPS for smoother tracking
 
             communication_parameters = sl.CommunicationParameters()
