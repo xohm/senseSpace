@@ -224,48 +224,214 @@ System automatically detects best available encoder/decoder at runtime.
 
 ### System Requirements
 
-- **Network**: Gigabit Ethernet recommended (100 Mbps minimum)
-- **GPU**: NVIDIA, Intel, AMD, or Apple Silicon for hardware acceleration
-- **OS**: Linux, Windows 10/11, or macOS 10.15+
+- **Network**: Gigabit Ethernet recommended (100 Mbps minimum for 2 cameras)
+- **GPU**: NVIDIA, Intel, AMD, or Apple Silicon for hardware acceleration (10-50x faster than software encoding/decoding)
+- **OS**: Linux (Ubuntu 20.04+), Windows 10/11, or macOS 10.15+
 
-### Software Dependencies
+### Installation
 
-**GStreamer with H.265 support:**
+Choose **Server** if you're running ZED cameras, **Client** if you're just viewing streams.
 
-- **Linux:**
-  ```bash
-  sudo apt-get install python3-gi python3-gi-cairo \
-      gstreamer1.0-tools gstreamer1.0-plugins-base \
-      gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-      gstreamer1.0-plugins-ugly gstreamer1.0-libav
-  ```
+#### Server Installation (Machine with ZED Cameras)
 
-- **macOS:**
-  ```bash
-  brew install gstreamer gst-plugins-base gst-plugins-good \
-      gst-plugins-bad gst-plugins-ugly pygobject3
-  ```
+**1. Install Python dependencies**
 
-- **Windows:**
-  - Download from: https://gstreamer.freedesktop.org/download/
-  - Install both MSVC runtime AND development packages
-  - Install all plugin sets (base, good, bad, ugly)
-
-**Python packages:**
 ```bash
-pip install PyQt5 numpy
-# Note: PyGObject (gi) should be installed via system packages (see above)
+# From the senseSpace root directory
+pip install -e .
 ```
 
-**Verify installation:**
+This installs all required packages from `pyproject.toml` including:
+- ZED SDK Python bindings
+- NumPy, OpenCV
+- PyQt5, PyOpenGL
+- And all other dependencies
+
+**2. Install GStreamer**
+
+**Linux (Ubuntu/Debian):**
 ```bash
-# Check GStreamer
+sudo apt update
+sudo apt install -y \
+    gstreamer1.0-tools \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly \
+    gstreamer1.0-libav \
+    python3-gst-1.0 \
+    libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev
+
+# For NVIDIA GPU hardware acceleration (highly recommended)
+sudo apt install -y gstreamer1.0-plugins-bad
+```
+
+**macOS:**
+```bash
+# Install Homebrew if not already installed
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Install GStreamer
+brew install gstreamer gst-plugins-base gst-plugins-good \
+             gst-plugins-bad gst-plugins-ugly pygobject3
+```
+
+**Windows:**
+1. Download GStreamer from: https://gstreamer.freedesktop.org/download/
+2. Install **BOTH** packages:
+   - `gstreamer-1.0-msvc-x86_64-<version>.msi` (runtime)
+   - `gstreamer-1.0-devel-msvc-x86_64-<version>.msi` (development)
+3. During installation:
+   - Choose **"Complete"** installation
+   - Check "Add to PATH" when prompted
+4. Restart your terminal/PowerShell after installation
+
+**3. Verify Installation**
+
+```bash
+# Check GStreamer version
 gst-inspect-1.0 --version
-gst-inspect-1.0 nvh265dec  # or vtdec_h265 on macOS
+
+# Check for hardware encoders (server needs encoders)
+gst-inspect-1.0 nvh265enc      # NVIDIA (Linux/Windows)
+gst-inspect-1.0 vaapih265enc   # Intel/AMD (Linux)
+gst-inspect-1.0 mfh265enc      # Intel/AMD (Windows)
+gst-inspect-1.0 vtenc_h265     # Apple Silicon/Intel (macOS)
+
+# If no hardware encoder found, software encoder is available but slower
+gst-inspect-1.0 x265enc        # Software encoder (fallback)
 
 # Check Python bindings
-python -c "import gi; gi.require_version('Gst', '1.0'); from gi.repository import Gst; print(Gst.version())"
+python -c "import gi; gi.require_version('Gst', '1.0'); from gi.repository import Gst; print('✓ GStreamer version:', Gst.version())"
 ```
+
+**Expected output (with NVIDIA GPU):**
+```
+GStreamer 1.20.3
+Factory Details:
+  Rank: primary (256)
+  Long-name: NVENC H.265 Video Encoder
+  ...
+✓ GStreamer version: (1, 20, 3, 0)
+```
+
+#### Client Installation (Viewing Machine)
+
+**1. Install Python dependencies**
+
+```bash
+# From the senseSpace root directory
+pip install -e .
+```
+
+**2. Install GStreamer (same as server)**
+
+Follow the same GStreamer installation steps as above for your platform.
+
+**3. Verify Installation**
+
+```bash
+# Check GStreamer version
+gst-inspect-1.0 --version
+
+# Check for hardware decoders (client needs decoders)
+gst-inspect-1.0 nvh265dec      # NVIDIA (Linux/Windows)
+gst-inspect-1.0 vaapih265dec   # Intel/AMD (Linux)
+gst-inspect-1.0 mfh265dec      # Intel/AMD (Windows)
+gst-inspect-1.0 vtdec_h265     # Apple Silicon/Intel (macOS)
+
+# Software decoder (fallback if no GPU)
+gst-inspect-1.0 avdec_h265     # libav software decoder
+
+# Check Python bindings
+python -c "import gi; gi.require_version('Gst', '1.0'); from gi.repository import Gst; print('✓ GStreamer version:', Gst.version())"
+```
+
+**4. Verify with Test Script**
+
+Create `test_gstreamer.py`:
+```python
+import gi
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst
+
+Gst.init(None)
+
+# Check for required encoders (server) or decoders (client)
+encoders = ['nvh265enc', 'vaapih265enc', 'mfh265enc', 'vtenc_h265', 'x265enc']
+decoders = ['nvh265dec', 'vaapih265dec', 'mfh265dec', 'vtdec_h265', 'avdec_h265']
+
+print("Available H.265 encoders (server):")
+for enc in encoders:
+    element = Gst.ElementFactory.make(enc, None)
+    hw = 'hardware' if enc != 'x265enc' else 'software'
+    print(f"  {'✓' if element else '✗'} {enc} ({hw})")
+
+print("\nAvailable H.265 decoders (client):")
+for dec in decoders:
+    element = Gst.ElementFactory.make(dec, None)
+    hw = 'hardware' if dec != 'avdec_h265' else 'software'
+    print(f"  {'✓' if element else '✗'} {dec} ({hw})")
+
+# Check for required RTP plugins
+plugins = ['rtpbin', 'udpsrc', 'udpsink', 'rtph265pay', 'rtph265depay', 'rtpptdemux']
+print("\nRequired RTP plugins:")
+for plugin in plugins:
+    element = Gst.ElementFactory.make(plugin, None)
+    print(f"  {'✓' if element else '✗'} {plugin}")
+```
+
+Run: `python test_gstreamer.py`
+
+**Expected output:**
+```
+Available H.265 encoders (server):
+  ✓ nvh265enc (hardware)
+  ✗ vaapih265enc
+  ✗ mfh265enc
+  ✗ vtenc_h265
+  ✓ x265enc (software)
+
+Available H.265 decoders (client):
+  ✓ nvh265dec (hardware)
+  ✗ vaapih265dec
+  ✗ mfh265dec
+  ✗ vtdec_h265
+  ✓ avdec_h265 (software)
+
+Required RTP plugins:
+  ✓ rtpbin
+  ✓ udpsrc
+  ✓ udpsink
+  ✓ rtph265pay
+  ✓ rtph265depay
+  ✓ rtpptdemux
+```
+
+**⚠️ Important:** At least ONE hardware encoder/decoder OR the software fallback must be available. The system will automatically select the best available option.
+
+### Troubleshooting Installation
+
+**"ImportError: cannot import name 'Gst'"**
+- Linux: Install `python3-gst-1.0`
+- macOS: Reinstall with `brew install pygobject3`
+- Windows: Reinstall GStreamer with "Complete" installation
+
+**"No module named 'gi'"**
+```bash
+pip install PyGObject
+```
+
+**NVIDIA encoder not found despite having GPU:**
+- Linux: `sudo apt install gstreamer1.0-plugins-bad`
+- Windows: Reinstall GStreamer with "Complete" installation
+- Check NVIDIA driver version: `nvidia-smi`
+
+**Software encoder is very slow:**
+- This is expected - software encoding is 10-50x slower than hardware
+- Consider getting a compatible GPU or accept lower performance
+- Reduce resolution or framerate in server configuration
 
 ## Usage
 
