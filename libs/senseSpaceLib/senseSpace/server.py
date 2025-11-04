@@ -240,6 +240,9 @@ class SenseSpaceServer:
         """Handle individual client connection"""
         print(f"[CLIENT CONNECTED] {addr}")
         
+        # Send server info to client (backward-compatible - old clients will ignore)
+        self._send_server_info(conn)
+        
         # If video streaming is enabled, notify the streamer about the new client
         if hasattr(self, 'video_streamer') and self.video_streamer is not None:
             client_ip = addr[0]  # Extract IP from (IP, port) tuple
@@ -375,6 +378,66 @@ class SenseSpaceServer:
                     del self._client_sender_threads[conn]
             except Exception:
                 pass
+    
+    def _send_server_info(self, conn):
+        """Send server configuration info to newly connected client.
+        
+        Backward-compatible: Old clients will receive but can ignore this message.
+        New clients use it to auto-configure streaming parameters.
+        """
+        try:
+            info = {
+                "type": "server_info",
+                "data": {
+                    "version": "2.0",  # Protocol version
+                    "streaming": {
+                        "enabled": hasattr(self, 'video_streamer') and self.video_streamer is not None,
+                        "port": self.stream_rgb_port if hasattr(self, 'stream_rgb_port') else 5000,
+                        "num_cameras": 0,
+                        "camera_width": 672,
+                        "camera_height": 376,
+                        "framerate": 60,
+                        "depth_mode": "NEURAL"
+                    },
+                    "tcp_port": self.port
+                }
+            }
+            
+            # Populate actual camera info if available
+            if hasattr(self, 'video_streamer') and self.video_streamer is not None:
+                info["data"]["streaming"]["num_cameras"] = self.video_streamer.num_cameras
+                info["data"]["streaming"]["camera_width"] = self.video_streamer.camera_width
+                info["data"]["streaming"]["camera_height"] = self.video_streamer.camera_height
+                info["data"]["streaming"]["framerate"] = self.video_streamer.framerate
+            
+            # Get depth mode from camera if available
+            if hasattr(self, 'camera') and self.camera is not None:
+                try:
+                    init_params = self.camera.get_init_parameters()
+                    depth_mode = str(init_params.depth_mode).split('.')[-1]  # Extract enum name
+                    info["data"]["streaming"]["depth_mode"] = depth_mode
+                except:
+                    pass
+            elif self.is_fusion_mode and hasattr(self, 'fusion') and self.fusion is not None:
+                # Try to get from fusion cameras
+                try:
+                    for sender in self.fusion.senders:
+                        if hasattr(sender, 'camera') and sender.camera is not None:
+                            init_params = sender.camera.get_init_parameters()
+                            depth_mode = str(init_params.depth_mode).split('.')[-1]
+                            info["data"]["streaming"]["depth_mode"] = depth_mode
+                            break
+                except:
+                    pass
+            
+            # Send as JSON
+            message = json.dumps(info) + "\n"
+            conn.sendall(message.encode('utf-8'))
+            print(f"[INFO] Sent server info to client: {info['data']['streaming']['num_cameras']} cameras, "
+                  f"{info['data']['streaming']['camera_width']}x{info['data']['streaming']['camera_height']}@{info['data']['streaming']['framerate']}fps, "
+                  f"depth mode: {info['data']['streaming']['depth_mode']}")
+        except Exception as e:
+            print(f"[WARNING] Failed to send server info: {e}")
 
     def broadcast_frame(self, frame: Frame):
         """Broadcast a frame to all connected clients (TCP or UDP).
@@ -944,7 +1007,7 @@ class SenseSpaceServer:
         
         try:
             print(f"[INFO] Initializing video streamer for {num_cameras} camera(s)")
-            print(f"[INFO] RGB stream on port {self.stream_rgb_port}, Depth stream on port {self.stream_depth_port}")
+            print(f"[INFO] All streams multiplexed on single port: {self.stream_rgb_port}")
             
             # Get camera resolution from first camera
             camera_width = 672  # VGA width
@@ -1135,8 +1198,11 @@ class SenseSpaceServer:
 
             # Store references for cleanup
             self._fusion_senders = senders
+            # IMPORTANT: Store serial order for video streaming (must match camera index order)
+            self._fusion_serials_ordered = [conf.serial_number for conf in fusion_configurations]
             self.is_fusion_mode = True
             print(f"[INFO] Fusion mode initialized with {len(camera_identifiers)} cameras")
+            print(f"[INFO] Camera order: {self._fusion_serials_ordered}")
             
             # Initialize video streaming if enabled
             if self.enable_streaming:
@@ -1304,13 +1370,22 @@ class SenseSpaceServer:
             last_time = time.time()
 
             # Grab frames from local senders sequentially (essential for fusion to work)
+            # IMPORTANT: Must iterate in same order as camera indices (0, 1, 2...)
             # Note: Sequential is required to avoid USB bandwidth conflicts
             rgb_frames = []
             depth_frames = []
             
             try:
-                if hasattr(self, '_fusion_senders'):
-                    for serial, zed in self._fusion_senders.items():
+                # Use ordered serial list to maintain camera index consistency
+                if hasattr(self, '_fusion_serials_ordered') and hasattr(self, '_fusion_senders'):
+                    for cam_idx, serial in enumerate(self._fusion_serials_ordered):
+                        zed = self._fusion_senders.get(serial)
+                        if not zed:
+                            # Camera not available, add None placeholders
+                            rgb_frames.append(None)
+                            depth_frames.append(None)
+                            continue
+                        
                         try:
                             if zed.grab() == sl.ERROR_CODE.SUCCESS:
                                 try:
@@ -1334,8 +1409,51 @@ class SenseSpaceServer:
                                         depth_frame = depth_mat.get_data()
                                         
                                         # ZED returns BGRA, convert to BGR (remove alpha channel)
+                                        # IMPORTANT: Use .copy() to create independent frame data
+                                        # Without .copy(), all cameras would share the same memory buffer!
                                         if rgb_frame.shape[2] == 4:
-                                            rgb_frame = rgb_frame[:, :, :3]
+                                            rgb_frame = rgb_frame[:, :, :3].copy()
+                                        else:
+                                            rgb_frame = rgb_frame.copy()
+                                        
+                                        # Depth also needs copy to avoid buffer sharing
+                                        depth_frame = depth_frame.copy()
+                                        
+                                        # DEBUG: Log frame hashes for first few frames to verify different data
+                                        if not hasattr(self, '_server_frame_counts'):
+                                            self._server_frame_counts = {}
+                                            self._server_frame_hashes = {}
+                                        if serial not in self._server_frame_counts:
+                                            self._server_frame_counts[serial] = 0
+                                            self._server_frame_hashes[serial] = []
+                                        
+                                        self._server_frame_counts[serial] += 1
+                                        
+                                        # Hash first 100 pixels to detect identical frames
+                                        rgb_hash = hash(rgb_frame[:10, :10, :].tobytes())
+                                        depth_hash = hash(depth_frame[:10, :10].tobytes())
+                                        
+                                        if self._server_frame_counts[serial] <= 5:
+                                            # Check if this frame is identical to another camera
+                                            identical_rgb = []
+                                            identical_depth = []
+                                            for other_serial in self._fusion_serials_ordered:
+                                                if other_serial != serial and other_serial in self._server_frame_hashes:
+                                                    if rgb_hash in self._server_frame_hashes[other_serial]:
+                                                        identical_rgb.append(other_serial)
+                                                    if depth_hash in self._server_frame_hashes[other_serial]:
+                                                        identical_depth.append(other_serial)
+                                            
+                                            if identical_rgb or identical_depth:
+                                                print(f"[WARNING] Camera {serial} (idx={cam_idx}) frame #{self._server_frame_counts[serial]} IDENTICAL to other camera(s)!")
+                                                if identical_rgb:
+                                                    print(f"  RGB hash {rgb_hash} matches: {identical_rgb}")
+                                                if identical_depth:
+                                                    print(f"  Depth hash {depth_hash} matches: {identical_depth}")
+                                            else:
+                                                print(f"[DEBUG] Camera {serial} (idx={cam_idx}) frame #{self._server_frame_counts[serial]} UNIQUE (rgb_hash={rgb_hash}, depth_hash={depth_hash})")
+                                        
+                                        self._server_frame_hashes[serial] = [rgb_hash, depth_hash]
                                         
                                         # Collect frames
                                         rgb_frames.append(rgb_frame)
@@ -1345,8 +1463,19 @@ class SenseSpaceServer:
                                         # Add None placeholders to maintain camera index alignment
                                         rgb_frames.append(None)
                                         depth_frames.append(None)
-                        except Exception:
-                            pass
+                                else:
+                                    # Streaming not enabled, don't collect frames
+                                    pass
+                            else:
+                                # Grab failed for this camera
+                                if self.video_streamer is not None:
+                                    rgb_frames.append(None)
+                                    depth_frames.append(None)
+                        except Exception as e:
+                            print(f"[WARNING] Exception grabbing from camera {serial}: {e}")
+                            if self.video_streamer is not None:
+                                rgb_frames.append(None)
+                                depth_frames.append(None)
             except Exception:
                 pass
             

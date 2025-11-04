@@ -15,6 +15,8 @@ import argparse
 import time
 import numpy as np
 import cv2
+import json
+import socket
 from pathlib import Path
 
 # Add parent directories to path for imports
@@ -70,10 +72,83 @@ class StreamingVisualizationWidget(SkeletonGLWidget):
         Callback for RGB frame reception.
         
         Args:
-            frame: RGB frame data
+            frame: RGB frame data as numpy array (H, W, 3) in BGR format, dtype=uint8
             camera_idx: Camera index (0 for single camera)
+        
+        PERFORMANCE NOTE:
+        ------------------
+        This callback approach is efficient for video streaming because:
+        1. GStreamer handles frame arrival asynchronously in background threads
+        2. Callback is invoked immediately when frame is decoded (minimal latency)
+        3. Only the frame reference is passed (no data copying until .update())
+        4. Qt's update() batches redraws efficiently (won't redraw 60x/sec if GPU can't keep up)
+        
+        Alternative approaches (and why callbacks are better):
+        - Polling with get_latest_frame(): Adds latency, may miss frames
+        - Queue-based: Adds memory overhead, complexity, same thread switching
+        - Shared memory: No benefit since we're already getting zero-copy from GStreamer
+        
+        The frames DO arrive at different times (cameras aren't perfectly synced),
+        but this is expected and handled naturally by independent callbacks.
+        
+        Student Guide - Working with RGB frames:
+        ----------------------------------------
+        The 'frame' parameter is a numpy array ready to use with OpenCV or other libraries.
+        
+        Example 1: Display with OpenCV
+            cv2.imshow('RGB Camera', frame)
+            cv2.waitKey(1)
+        
+        Example 2: Save as PNG with OpenCV
+            cv2.imwrite('rgb_frame.png', frame)
+        
+        Example 3: Save as PNG with Qt (convert BGR to RGB first)
+            from PyQt5.QtGui import QImage
+            height, width, channels = frame.shape
+            bytes_per_line = channels * width
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Convert to RGB
+            qimage = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
+            qimage.save('rgb_frame.png')
+        
+        Example 4: Convert to RGB for processing
+            rgb_array = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # Now rgb_array[:,:,0] is Red, [:,:,1] is Green, [:,:,2] is Blue
+        
+        Example 5: Access pixel values
+            height, width, channels = frame.shape
+            blue_channel = frame[:, :, 0]   # Blue channel
+            green_channel = frame[:, :, 1]  # Green channel
+            red_channel = frame[:, :, 2]    # Red channel
+            pixel_bgr = frame[y, x]  # Get BGR value at position (x, y)
         """
         if camera_idx < self.num_cameras:
+            # Debug: Calculate hash of frame to detect if frames are identical
+            if not hasattr(self, '_rgb_frame_counts'):
+                self._rgb_frame_counts = {}
+                self._rgb_frame_hashes = {}
+            if camera_idx not in self._rgb_frame_counts:
+                self._rgb_frame_counts[camera_idx] = 0
+                self._rgb_frame_hashes[camera_idx] = []
+            
+            self._rgb_frame_counts[camera_idx] += 1
+            
+            # Compute simple hash of first 100 pixels to detect identical frames
+            frame_hash = hash(frame[:10, :10, :].tobytes())
+            self._rgb_frame_hashes[camera_idx].append(frame_hash)
+            
+            if self._rgb_frame_counts[camera_idx] <= 5:
+                # Check if this frame matches any other camera's recent frames
+                identical_to = []
+                for other_idx in range(self.num_cameras):
+                    if other_idx != camera_idx and other_idx in self._rgb_frame_hashes:
+                        if frame_hash in self._rgb_frame_hashes[other_idx][-5:]:  # Check last 5 frames
+                            identical_to.append(other_idx)
+                
+                if identical_to:
+                    logger.warning(f"⚠ RGB camera {camera_idx} frame #{self._rgb_frame_counts[camera_idx]} IDENTICAL to camera(s) {identical_to}! (hash={frame_hash})")
+                else:
+                    logger.info(f"✓ RGB frame received for camera {camera_idx} (frame #{self._rgb_frame_counts[camera_idx]}, shape={frame.shape}, hash={frame_hash})")
+            
             self.rgb_frames[camera_idx] = frame
             # Trigger re-draw
             self.update()
@@ -83,10 +158,94 @@ class StreamingVisualizationWidget(SkeletonGLWidget):
         Callback for depth frame reception.
         
         Args:
-            frame: Depth frame data
+            frame: Depth frame data as numpy array (H, W) in MILLIMETERS, dtype=float32
             camera_idx: Camera index (0 for single camera)
+        
+        Student Guide - Working with Depth frames:
+        ------------------------------------------
+        The 'frame' parameter is a 2D numpy array containing depth values in MILLIMETERS.
+        - Valid depth values: > 0 (typically 300mm to 20000mm depending on camera)
+        - Invalid/unknown depth: 0 or NaN
+        
+        Example 1: Get depth at specific pixel
+            depth_mm = frame[y, x]  # Depth in millimeters at position (x, y)
+            depth_m = depth_mm / 1000.0  # Convert to meters
+            if depth_mm > 0:
+                print(f"Object at ({x},{y}) is {depth_m:.2f} meters away")
+        
+        Example 2: Find closest object
+            valid_depths = frame[frame > 0]  # Get all valid depth values
+            if valid_depths.size > 0:
+                closest_mm = valid_depths.min()
+                closest_m = closest_mm / 1000.0
+                print(f"Closest object: {closest_m:.2f}m")
+        
+        Example 3: Create colored depth visualization for OpenCV/saving
+            # Normalize depth to 0-255 range for visualization
+            depth_valid = frame.copy()
+            depth_valid[depth_valid == 0] = np.nan  # Mark invalid as NaN
+            depth_min = np.nanpercentile(depth_valid, 2)
+            depth_max = np.nanpercentile(depth_valid, 98)
+            depth_norm = np.clip((frame - depth_min) / (depth_max - depth_min), 0, 1)
+            depth_uint8 = (depth_norm * 255).astype(np.uint8)
+            depth_colored = cv2.applyColorMap(depth_uint8, cv2.COLORMAP_TURBO)
+            
+            # Save colored depth map
+            cv2.imwrite('depth_colored.png', depth_colored)
+        
+        Example 4: Save raw depth data (preserves actual distance values)
+            # Save as 32-bit float TIFF (preserves millimeter precision)
+            cv2.imwrite('depth_raw.tiff', frame)
+            
+            # Or save as 16-bit PNG (convert mm to 0.1mm units, max ~6.5m range)
+            depth_uint16 = (frame * 10).astype(np.uint16)  # 0.1mm precision
+            cv2.imwrite('depth_raw.png', depth_uint16)
+        
+        Example 5: Mask objects by distance
+            # Find pixels between 500mm and 2000mm (0.5m to 2m)
+            mask = (frame > 500) & (frame < 2000)
+            close_objects = frame[mask]
+        
+        Example 6: Save with Qt (colored visualization)
+            from PyQt5.QtGui import QImage
+            # First create colored version (see Example 3)
+            depth_uint8 = (depth_norm * 255).astype(np.uint8)
+            depth_colored = cv2.applyColorMap(depth_uint8, cv2.COLORMAP_TURBO)
+            
+            height, width = depth_colored.shape[:2]
+            bytes_per_line = 3 * width
+            rgb_depth = cv2.cvtColor(depth_colored, cv2.COLOR_BGR2RGB)
+            qimage = QImage(rgb_depth.data, width, height, bytes_per_line, QImage.Format_RGB888)
+            qimage.save('depth_visualization.png')
         """
         if camera_idx < self.num_cameras:
+            # Debug: Calculate hash of frame to detect if frames are identical
+            if not hasattr(self, '_depth_frame_counts'):
+                self._depth_frame_counts = {}
+                self._depth_frame_hashes = {}
+            if camera_idx not in self._depth_frame_counts:
+                self._depth_frame_counts[camera_idx] = 0
+                self._depth_frame_hashes[camera_idx] = []
+            
+            self._depth_frame_counts[camera_idx] += 1
+            
+            # Compute simple hash of first 100 pixels to detect identical frames
+            frame_hash = hash(frame[:10, :10].tobytes())
+            self._depth_frame_hashes[camera_idx].append(frame_hash)
+            
+            if self._depth_frame_counts[camera_idx] <= 5:
+                # Check if this frame matches any other camera's recent frames
+                identical_to = []
+                for other_idx in range(self.num_cameras):
+                    if other_idx != camera_idx and other_idx in self._depth_frame_hashes:
+                        if frame_hash in self._depth_frame_hashes[other_idx][-5:]:  # Check last 5 frames
+                            identical_to.append(other_idx)
+                
+                if identical_to:
+                    logger.warning(f"⚠ Depth camera {camera_idx} frame #{self._depth_frame_counts[camera_idx]} IDENTICAL to camera(s) {identical_to}! (hash={frame_hash})")
+                else:
+                    logger.info(f"✓ Depth frame received for camera {camera_idx} (frame #{self._depth_frame_counts[camera_idx]}, shape={frame.shape}, hash={frame_hash})")
+            
             self.depth_frames[camera_idx] = frame
             self.update()
     
@@ -95,24 +254,26 @@ class StreamingVisualizationWidget(SkeletonGLWidget):
         Override to draw video streams below status text.
         Called after skeleton/floor drawing but before 2D overlay.
         Handles both single and multi-camera layouts.
+        Layout: Side-by-side pairs stacked vertically
+        Camera 0: RGB0 | DEPTH0
+        Camera 1: RGB1 | DEPTH1 (below camera 0)
+        Camera N: RGBN | DEPTHN (below camera N-1)
         """
-        # Calculate grid layout for multiple cameras
-        cameras_per_row = 2  # 2 columns for camera grid
+        # Calculate layout - horizontal RGB+Depth pairs, stacked vertically for multiple cameras
         overlay_width = int(self.width() * 0.2)
         x_offset = 10
-        y_offset = 80  # Position below status text (was 10, now 80 to clear text at y=58)
+        y_offset = 80  # Position below status text
         spacing = 10
         
+        current_y = y_offset
+        
         for cam_idx in range(self.num_cameras):
-            # Calculate grid position
-            col = cam_idx % cameras_per_row
-            row = cam_idx // cameras_per_row
-            
-            # RGB stream position
-            rgb_x = x_offset + col * (overlay_width + spacing) * 2  # *2 for RGB+depth side-by-side
-            rgb_y = y_offset + row * (int(overlay_width * 0.75) + spacing)  # Estimate height
+            # RGB on left
+            rgb_x = x_offset
+            rgb_y = current_y
             
             # Draw RGB if available
+            rgb_height = 0
             if self.rgb_frames[cam_idx] is not None:
                 self._draw_video_overlay(
                     self.rgb_frames[cam_idx], 
@@ -121,16 +282,16 @@ class StreamingVisualizationWidget(SkeletonGLWidget):
                     position=(rgb_x, rgb_y)
                 )
                 
-                # Calculate depth position (next to RGB)
-                overlay_height = int(self.rgb_frames[cam_idx].shape[0] * overlay_width / self.rgb_frames[cam_idx].shape[1])
-                depth_x = rgb_x + overlay_width + spacing
-                depth_y = rgb_y
-            else:
-                # Use estimated position if RGB not available yet
-                depth_x = rgb_x + overlay_width + spacing
-                depth_y = rgb_y
+                # Calculate actual height for proper spacing
+                frame_height, frame_width = self.rgb_frames[cam_idx].shape[:2]
+                rgb_height = int(overlay_width * frame_height / frame_width)
+            
+            # Depth on right (next to RGB)
+            depth_x = x_offset + overlay_width + spacing
+            depth_y = current_y  # Same Y as RGB
             
             # Draw depth if available
+            depth_height = 0
             if self.depth_frames[cam_idx] is not None:
                 self._draw_video_overlay(
                     self.depth_frames[cam_idx], 
@@ -138,11 +299,20 @@ class StreamingVisualizationWidget(SkeletonGLWidget):
                     camera_idx=cam_idx, 
                     position=(depth_x, depth_y)
                 )
+                
+                # Calculate depth height
+                frame_height, frame_width = self.depth_frames[cam_idx].shape[:2]
+                depth_height = int(overlay_width * frame_height / frame_width)
+            
+            # Update Y position for next camera (below current pair + spacing)
+            max_height = max(rgb_height, depth_height) if rgb_height > 0 or depth_height > 0 else 150
+            current_y += max_height + spacing * 2  # Extra spacing between camera pairs
     
     def _draw_video_overlay(self, frame: np.ndarray, stream_type: str, camera_idx: int = 0, position=(10, 10)):
         """
         Draw video frame as 2D overlay in top-left corner.
         Optimized with texture caching and minimal memory copies.
+        IMPORTANT: Respects aspect ratio of source frame.
         
         Args:
             frame: Video frame (RGB or depth)
@@ -150,9 +320,12 @@ class StreamingVisualizationWidget(SkeletonGLWidget):
             camera_idx: Camera index for multi-camera display
             position: (x, y) position in pixels from top-left
         """
-        # Calculate overlay size (20% of window size)
+        # Calculate overlay size (20% of window width, height preserves aspect ratio)
         overlay_width = int(self.width() * 0.2)
-        overlay_height = int(frame.shape[0] * overlay_width / frame.shape[1])
+        # IMPORTANT: Preserve aspect ratio by calculating height from frame dimensions
+        frame_height, frame_width = frame.shape[:2]
+        frame_aspect_ratio = frame_width / frame_height  # width / height
+        overlay_height = int(overlay_width / frame_aspect_ratio)
         
         x, y = position
         
@@ -348,14 +521,68 @@ class StreamingVisualizationWidget(SkeletonGLWidget):
                     pass
 
 
+def get_server_info(server_ip, tcp_port=12345, timeout=5.0):
+    """
+    Connect to server via TCP and retrieve streaming configuration.
+    
+    Args:
+        server_ip: Server IP address
+        tcp_port: TCP port for skeleton/control data
+        timeout: Connection timeout in seconds
+    
+    Returns:
+        dict with server_info data, or None if failed/not available
+    """
+    try:
+        logger.info(f"Querying server info from {server_ip}:{tcp_port}...")
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((server_ip, tcp_port))
+        
+        # Read first message (should be server_info)
+        buffer = b""
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                
+                # Check if we have a complete JSON message (ends with \n)
+                if b'\n' in buffer:
+                    line, buffer = buffer.split(b'\n', 1)
+                    try:
+                        message = json.loads(line.decode('utf-8'))
+                        if message.get('type') == 'server_info':
+                            sock.close()
+                            logger.info(f"✓ Received server info: {message['data']['streaming']['num_cameras']} cameras, "
+                                      f"{message['data']['streaming']['camera_width']}x{message['data']['streaming']['camera_height']}@{message['data']['streaming']['framerate']}fps")
+                            return message['data']
+                    except (json.JSONDecodeError, KeyError):
+                        # Not a server_info message, keep reading
+                        pass
+            except socket.timeout:
+                break
+        
+        sock.close()
+        logger.warning("Server did not send server_info message (old server version?)")
+        return None
+        
+    except Exception as e:
+        logger.warning(f"Could not retrieve server info: {e}")
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description='senseSpace Streaming Client')
     parser.add_argument('--server', type=str, required=True,
                        help='Server IP address (e.g., 192.168.1.100)')
-    parser.add_argument('--stream-port', type=int, default=5000,
-                       help='Single multiplexed stream port (default: 5000)')
-    parser.add_argument('--num-cameras', type=int, default=1,
-                       help='Number of cameras in multiplexed stream (default: 1)')
+    parser.add_argument('--stream-port', type=int, default=None,
+                       help='Single multiplexed stream port (default: auto-detect from server)')
+    parser.add_argument('--num-cameras', type=int, default=None,
+                       help='Number of cameras (default: auto-detect from server)')
     parser.add_argument('--skeleton-server', type=str, default=None,
                        help='Optional: Skeleton data server IP (if different from stream server)')
     parser.add_argument('--skeleton-port', type=int, default=12345,
@@ -365,28 +592,53 @@ def main():
     
     logger.info(f"Starting streaming client...")
     logger.info(f"Server: {args.server}")
-    logger.info(f"Stream Port: {args.stream_port}")
-    logger.info(f"Number of cameras: {args.num_cameras}")
+    
+    # Auto-detect server configuration via TCP
+    server_info = get_server_info(args.server, args.skeleton_port)
+    
+    # Determine streaming parameters (command-line args override auto-detection)
+    if args.stream_port is not None:
+        stream_port = args.stream_port
+    elif server_info and server_info.get('streaming', {}).get('enabled'):
+        stream_port = server_info['streaming']['port']
+    else:
+        stream_port = 5000  # Default fallback
+    
+    if args.num_cameras is not None:
+        num_cameras = args.num_cameras
+    elif server_info and server_info.get('streaming', {}).get('num_cameras'):
+        num_cameras = server_info['streaming']['num_cameras']
+    else:
+        num_cameras = 1  # Default fallback
+    
+    logger.info(f"Stream Port: {stream_port}")
+    logger.info(f"Number of cameras: {num_cameras}")
+    
+    if server_info:
+        logger.info(f"Depth mode: {server_info['streaming'].get('depth_mode', 'UNKNOWN')}")
+        logger.info(f"Resolution: {server_info['streaming'].get('camera_width')}x{server_info['streaming'].get('camera_height')}@{server_info['streaming'].get('framerate')}fps")
     
     # Create Qt application
     app = QApplication(sys.argv)
     
     # Create visualization widget with multi-camera support
-    viz_widget = StreamingVisualizationWidget(num_cameras=args.num_cameras)
-    viz_widget.setWindowTitle(f'senseSpace Streaming Client - {args.server} ({args.num_cameras} cam)')
+    viz_widget = StreamingVisualizationWidget(num_cameras=num_cameras)
+    viz_widget.setWindowTitle(f'senseSpace Streaming Client - {args.server} ({num_cameras} cam)')
     viz_widget.resize(1280, 720)
     viz_widget.show()
     
     # Create video receiver with single stream port (no heartbeat needed with udpsink)
+    # IMPORTANT: Callbacks receive (frame, camera_idx) - must handle multi-camera!
+    # NOTE: Lambda captures cam_idx at call time, not definition time
     video_receiver = VideoReceiver(
         server_ip=args.server,
-        stream_port=args.stream_port,
-        num_cameras=args.num_cameras,
-        rgb_callback=lambda frame: viz_widget.on_rgb_frame(frame, camera_idx=0),
-        depth_callback=lambda frame: viz_widget.on_depth_frame(frame, camera_idx=0),
+        stream_port=stream_port,
+        num_cameras=num_cameras,
+        rgb_callback=lambda frame, cam_idx: viz_widget.on_rgb_frame(frame, camera_idx=cam_idx),
+        depth_callback=lambda frame, cam_idx: viz_widget.on_depth_frame(frame, camera_idx=cam_idx),
         send_heartbeat=False  # Disable heartbeat - using direct udpsink now
     )
-    logger.info(f"Using single multiplexed stream on port {args.stream_port}")
+    logger.info(f"Using single multiplexed stream on port {stream_port}")
     
     viz_widget.set_video_receiver(video_receiver)
     

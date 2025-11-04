@@ -708,12 +708,17 @@ class MultiCameraVideoStreamer:
                 logger.warning(f"Failed to push RGB frame {camera_idx}: {ret}")
                 print(f"[WARNING] Failed to push RGB frame {camera_idx}: {ret}")
             else:
-                # Print first few successful pushes only
-                if not hasattr(self, '_rgb_push_count'):
-                    self._rgb_push_count = 0
-                self._rgb_push_count += 1
-                if self._rgb_push_count <= 5:
-                    print(f"[DEBUG] RGB frame {self._rgb_push_count} pushed successfully ({frame.shape})")
+                # Print first few successful pushes only - WITH CAMERA INDEX AND HASH
+                if not hasattr(self, '_rgb_push_counts_per_cam'):
+                    self._rgb_push_counts_per_cam = {}
+                if camera_idx not in self._rgb_push_counts_per_cam:
+                    self._rgb_push_counts_per_cam[camera_idx] = 0
+                self._rgb_push_counts_per_cam[camera_idx] += 1
+                if self._rgb_push_counts_per_cam[camera_idx] <= 5:
+                    # Hash first 100 pixels to verify different data
+                    frame_hash = hash(frame[:10, :10, :].tobytes())
+                    pt = 96 + (camera_idx * 2)
+                    print(f"[DEBUG] RGB CAM{camera_idx} frame #{self._rgb_push_counts_per_cam[camera_idx]} pushed to PT={pt} (shape={frame.shape}, hash={frame_hash})")
         except Exception as e:
             logger.error(f"Error pushing RGB frame {camera_idx}: {e}")
             print(f"[ERROR] Error pushing RGB frame {camera_idx}: {e}")
@@ -1514,6 +1519,15 @@ class VideoReceiver:
             if not sample:
                 return Gst.FlowReturn.OK
             
+            # Extract camera index from appsink name (format: "depth_sink_0", "depth_sink_1", etc.)
+            appsink_name = appsink.get_name()
+            camera_idx = 0  # default
+            if '_' in appsink_name:
+                try:
+                    camera_idx = int(appsink_name.split('_')[-1])
+                except (ValueError, IndexError):
+                    pass
+            
             buf = sample.get_buffer()
             caps = sample.get_caps()
             
@@ -1536,33 +1550,38 @@ class VideoReceiver:
             
             # Debug
             if not hasattr(self, '_depth_recv_count'):
-                self._depth_recv_count = 0
-                self._depth_recv_start_time = None
+                self._depth_recv_count = {}
             
-            self._depth_recv_count += 1
+            if camera_idx not in self._depth_recv_count:
+                self._depth_recv_count[camera_idx] = 0
+                if not hasattr(self, '_depth_recv_start_time'):
+                    self._depth_recv_start_time = {}
+                self._depth_recv_start_time[camera_idx] = None
+            
+            self._depth_recv_count[camera_idx] += 1
             
             # FPS monitoring
             import time
             current_time = time.time()
-            if self._depth_recv_start_time is None:
-                self._depth_recv_start_time = current_time
+            if self._depth_recv_start_time[camera_idx] is None:
+                self._depth_recv_start_time[camera_idx] = current_time
             
-            elapsed = current_time - self._depth_recv_start_time
-            fps = self._depth_recv_count / elapsed if elapsed > 0 else 0
+            elapsed = current_time - self._depth_recv_start_time[camera_idx]
+            fps = self._depth_recv_count[camera_idx] / elapsed if elapsed > 0 else 0
             
-            if self._depth_recv_count <= 5:
+            if self._depth_recv_count[camera_idx] <= 5:
                 valid_depth = depth_mm[depth_mm > 0]
                 if valid_depth.size > 0:
-                    print(f"[DEBUG] Depth frame {self._depth_recv_count}: {width}x{height} H.265, "
+                    print(f"[DEBUG] Depth frame CAM{camera_idx} #{self._depth_recv_count[camera_idx]}: {width}x{height} H.265, "
                           f"range: {valid_depth.min():.1f}mm-{valid_depth.max():.1f}mm, FPS: {fps:.1f}")
                 else:
-                    print(f"[DEBUG] Depth frame {self._depth_recv_count}: {width}x{height} H.265, NO VALID DEPTH, FPS: {fps:.1f}")
-            elif self._depth_recv_count % 60 == 0:
-                print(f"[INFO] Depth H.265 streaming: {self._depth_recv_count} frames, avg FPS: {fps:.1f}")
+                    print(f"[DEBUG] Depth frame CAM{camera_idx} #{self._depth_recv_count[camera_idx]}: {width}x{height} H.265, NO VALID DEPTH, FPS: {fps:.1f}")
+            elif self._depth_recv_count[camera_idx] % 60 == 0:
+                print(f"[INFO] Depth CAM{camera_idx} H.265 streaming: {self._depth_recv_count[camera_idx]} frames, avg FPS: {fps:.1f}")
             
-            # Call user callback
+            # Call user callback with camera index
             if self.depth_callback:
-                self.depth_callback(depth_mm)
+                self.depth_callback(depth_mm, camera_idx)
             
             return Gst.FlowReturn.OK
             
@@ -1580,6 +1599,15 @@ class VideoReceiver:
             return Gst.FlowReturn.OK
         
         try:
+            # Extract camera index from appsink name (format: "rgb_sink_0", "rgb_sink_1", etc.)
+            appsink_name = appsink.get_name()
+            camera_idx = 0  # default
+            if '_' in appsink_name:
+                try:
+                    camera_idx = int(appsink_name.split('_')[-1])
+                except (ValueError, IndexError):
+                    pass
+            
             buf = sample.get_buffer()
             caps = sample.get_caps()
             
@@ -1599,11 +1627,11 @@ class VideoReceiver:
             
             buf.unmap(map_info)
             
-            #print(f"[DEBUG] RGB frame received: {width}x{height}")
+            #print(f"[DEBUG] RGB frame CAM{camera_idx} received: {width}x{height}")
             
-            # Call callback
+            # Call callback with camera index
             if self.rgb_callback:
-                self.rgb_callback(frame)
+                self.rgb_callback(frame, camera_idx)
             
         except Exception as e:
             logger.error(f"Error processing RGB sample: {e}")
