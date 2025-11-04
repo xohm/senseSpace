@@ -142,6 +142,43 @@ class BodyTrackingFilter:
         id_remapping = {}  # new_id -> keep_id
         
         person_ids = list(current_persons.keys())
+        
+        # FIRST: Check if any current persons match recently lost tracks
+        # This handles the case where ZED assigns a new ID to the same person
+        for person_id in person_ids:
+            if person_id in ids_to_remove:
+                continue
+            
+            person = current_persons[person_id]
+            
+            # Check against recently lost tracks
+            for lost_id, lost_track in self.lost_tracks.items():
+                if lost_id == person_id:
+                    continue  # Same ID
+                
+                # Calculate distance to lost track's last known position
+                if lost_track.position_history:
+                    last_pos = lost_track.position_history[-1]
+                    distance = np.linalg.norm(person['position'] - last_pos)
+                    
+                    # If very close to where lost track was last seen
+                    if distance < self.duplicate_distance_threshold:
+                        # Height check if available
+                        height_matches = True
+                        if person['height'] and lost_track.height:
+                            height_diff = abs(person['height'] - lost_track.height) / max(person['height'], lost_track.height)
+                            height_matches = height_diff < self.height_similarity_threshold
+                        
+                        if height_matches:
+                            # This new person is likely the lost track with a new ID
+                            # Keep the OLD ID (lost_id), remove the NEW ID (person_id)
+                            ids_to_remove.add(person_id)
+                            id_remapping[person_id] = lost_id
+                            print(f"[FILTER] Reassigned new ID {person_id} -> old ID {lost_id} "
+                                  f"(distance: {distance:.2f}m, lost {current_time - lost_track.last_seen:.1f}s ago)")
+                            break
+        
+        # SECOND: Check current persons against each other for duplicates
         for i, id1 in enumerate(person_ids):
             if id1 in ids_to_remove:
                 continue
