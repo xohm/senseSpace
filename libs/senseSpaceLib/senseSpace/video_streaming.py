@@ -513,7 +513,7 @@ class MultiCameraVideoStreamer:
                     f"{encoder_name} {props_str} ! "
                     f"h265parse ! "
                     f"rtph265pay config-interval=1 pt={pt} ! "
-                    f"udpsink host=224.1.1.1 port={self.stream_port} auto-multicast=true sync=false async=false"
+                    f"udpsink host=0.0.0.0 port={self.stream_port} sync=false async=false"
                 )
                 
                 pipeline = Gst.parse_launch(pipeline_str)
@@ -620,7 +620,7 @@ class MultiCameraVideoStreamer:
                     f"{depth_encoder_name} {depth_encoder_props_str} {lossless_props} ! "
                     f"h265parse ! "
                     f"rtph265pay config-interval=1 mtu={mtu_size} pt={pt} ! "
-                    f"udpsink host=224.1.1.1 port={self.stream_port} auto-multicast=true sync=false async=false"
+                    f"udpsink host=0.0.0.0 port={self.stream_port} sync=false async=false"
                 )
                 
                 pipeline = Gst.parse_launch(pipeline_str)
@@ -1787,7 +1787,7 @@ class MultiCameraVideoReceiver:
             
             # udpsrc -> rtpmp2tdepay -> tsdemux -> (dynamically link to decoders)
             pipeline_str = (
-                f"udpsrc address=224.1.1.1 port={self.rgb_port} auto-multicast=true ! "
+                f"udpsrc port={self.rgb_port} ! "
                 f"application/x-rtp ! "
                 f"rtpmp2tdepay ! "
                 f"tsdemux name=demux "
@@ -1811,7 +1811,7 @@ class MultiCameraVideoReceiver:
             decoder_name = GStreamerPlatform.get_decoder()
             
             pipeline_str = (
-                f"udpsrc address=224.1.1.1 port={self.depth_port} auto-multicast=true ! "
+                f"udpsrc port={self.depth_port} ! "
                 f"application/x-rtp ! "
                 f"rtpmp2tdepay ! "
                 f"tsdemux name=demux "
