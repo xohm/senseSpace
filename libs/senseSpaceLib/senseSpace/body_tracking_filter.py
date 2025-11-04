@@ -201,8 +201,10 @@ class BodyTrackingFilter:
                     ids_to_remove.add(remove_id)
                     id_remapping[remove_id] = keep_id
                     
-                    print(f"[FILTER] Merged duplicate persons: {remove_id} -> {keep_id} "
-                          f"(distance: {np.linalg.norm(p1['position'] - p2['position']):.2f}m)")
+                    dist = np.linalg.norm(p1['position'] - p2['position'])
+                    print(f"[FILTER] Merged duplicate: ID {remove_id} -> ID {keep_id} "
+                          f"(dist:{dist:.2f}m, conf:{p1['confidence']:.0f}/{p2['confidence']:.0f}, "
+                          f"state:{p1['tracking_state'].name}/{p2['tracking_state'].name})")
         
         # Update active tracks
         new_active_tracks = {}
@@ -228,7 +230,9 @@ class BodyTrackingFilter:
                     first_seen=current_time,
                     last_seen=current_time
                 )
-                print(f"[FILTER] New person tracked: ID {actual_id}")
+                print(f"[FILTER] New person: ID {actual_id} "
+                      f"(pos:[{person['position'][0]:.1f}, {person['position'][1]:.1f}, {person['position'][2]:.1f}], "
+                      f"conf:{person['confidence']:.0f}, state:{person['tracking_state'].name})")
             
             track.update(
                 person['position'],
@@ -286,18 +290,20 @@ class BodyTrackingFilter:
             if height_diff > self.height_similarity_threshold:
                 return False
         
-        # Relax the stability check - allow merging even if both are stable
-        # This handles the case where ZED assigns a new ID with immediately good tracking
+        # Be more conservative: require at least one to have weak tracking
+        # This prevents merging two genuinely different people who happen to be close
         both_very_stable = (
             p1['tracking_state'] == sl.OBJECT_TRACKING_STATE.OK and 
             p2['tracking_state'] == sl.OBJECT_TRACKING_STATE.OK and
-            p1['confidence'] > 85 and p2['confidence'] > 85  # Increased threshold
+            p1['confidence'] > 80 and p2['confidence'] > 80
         )
         
         if both_very_stable:
-            # If both are very confident and stable, require closer proximity
-            return distance < 0.25  # Relaxed from 0.2 to 0.25m
+            # If both are very confident and stable, require very close proximity
+            # This is likely two different people standing close
+            return distance < 0.15  # 15cm - very conservative
         
+        # If at least one has weak tracking, be more lenient with distance
         return True
     
     def _choose_better_id(self, id1: int, p1: dict, id2: int, p2: dict) -> Tuple[int, int]:

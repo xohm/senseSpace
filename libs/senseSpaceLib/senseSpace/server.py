@@ -898,7 +898,9 @@ class SenseSpaceServer:
                 body_params.enable_tracking = True
                 body_params.enable_body_fitting = True
                 body_params.body_format = sl.BODY_FORMAT.BODY_34
-                body_params.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_FAST  # Faster model
+                body_params.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE  # Changed from FAST to ACCURATE for better stability
+                body_params.prediction_timeout_s = 0.5  # Increased from default 0.2s - keep tracking longer during occlusions
+                body_params.max_range = 10.0  # Limit tracking range to 10m for better accuracy
 
                 status = self.camera.enable_body_tracking(body_params)
                 if status != sl.ERROR_CODE.SUCCESS:
@@ -1096,10 +1098,12 @@ class SenseSpaceServer:
             positional_tracking_parameters.set_as_static = True
 
             body_tracking_parameters = sl.BodyTrackingParameters()
-            body_tracking_parameters.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_FAST  # Faster model
+            body_tracking_parameters.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE  # Changed from FAST to ACCURATE for better stability
             body_tracking_parameters.body_format = sl.BODY_FORMAT.BODY_34
             body_tracking_parameters.enable_body_fitting = True  # Enable to get local_orientation_per_joint
             body_tracking_parameters.enable_tracking = True
+            body_tracking_parameters.prediction_timeout_s = 0.5  # Increased from default 0.2s - keep tracking longer during occlusions
+            body_tracking_parameters.max_range = 10.0  # Limit tracking range to 10m for better accuracy
 
             # Start local senders
             senders = {}
