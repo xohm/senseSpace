@@ -513,7 +513,7 @@ class MultiCameraVideoStreamer:
                     f"{encoder_name} {props_str} ! "
                     f"h265parse ! "
                     f"rtph265pay config-interval=1 pt={pt} ! "
-                    f"udpsink host={self.host} port={self.stream_port} auto-multicast=true loop=false sync=false async=false"
+                    f"udpsink host={self.host} port={self.stream_port} sync=false async=false"
                 )
                 
                 pipeline = Gst.parse_launch(pipeline_str)
@@ -620,7 +620,7 @@ class MultiCameraVideoStreamer:
                     f"{depth_encoder_name} {depth_encoder_props_str} {lossless_props} ! "
                     f"h265parse ! "
                     f"rtph265pay config-interval=1 mtu={mtu_size} pt={pt} ! "
-                    f"udpsink host={self.host} port={self.stream_port} auto-multicast=true loop=false sync=false async=false"
+                    f"udpsink host={self.host} port={self.stream_port} sync=false async=false"
                 )
                 
                 pipeline = Gst.parse_launch(pipeline_str)
