@@ -40,6 +40,17 @@ except ImportError:
         STREAMING_AVAILABLE = False
         MultiCameraVideoStreamer = None
 
+# Import body tracking filter
+try:
+    from .body_tracking_filter import BodyTrackingFilter
+except ImportError:
+    try:
+        from senseSpaceLib.senseSpace.body_tracking_filter import BodyTrackingFilter
+    except ImportError:
+        import sys
+        sys.path.append(os.path.join(os.path.dirname(__file__)))
+        from body_tracking_filter import BodyTrackingFilter
+
 
 def get_local_ip():
     """Get the local IP address of this machine"""
@@ -94,6 +105,14 @@ class SenseSpaceServer:
         self.camera = None
         self.fusion = None
         self.is_fusion_mode = False
+        
+        # Body tracking filter
+        self.body_filter = BodyTrackingFilter(
+            duplicate_distance_threshold=0.4,   # 40cm
+            height_similarity_threshold=0.15,    # 15% height difference
+            memory_duration=2.0,                 # 2 seconds memory
+            confidence_diff_threshold=30.0       # 30 points confidence diff
+        )
         
         # Floor detection
         self.detected_floor_height = None
@@ -1337,6 +1356,9 @@ class SenseSpaceServer:
                     except Exception as e:
                         print(f'[WARNING] retrieve_bodies failed: {e}')
                         continue
+                
+                # Apply body tracking filter to remove duplicates
+                bodies = self.body_filter.filter_bodies(bodies)
 
                 # Process bodies - use helper function only
                 frame = self._process_bodies_single_camera(bodies)
@@ -1501,6 +1523,9 @@ class SenseSpaceServer:
                 except Exception as e:
                     print(f'[WARNING] Fusion retrieve_bodies failed: {e}')
                     continue
+
+                # Apply body tracking filter to remove duplicates
+                bodies = self.body_filter.filter_bodies(bodies)
 
                 # Process bodies
                 frame = self._process_bodies_fusion(bodies)
