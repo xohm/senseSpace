@@ -101,6 +101,10 @@ def main():
     parser.add_argument("--stream-port", type=int, default=5000,
                        help="Single multiplexed stream UDP port (default: 5000)")
     
+    # Body tracking filter
+    parser.add_argument("--no-filter", action="store_true",
+                       help="Disable body tracking duplicate filter (use raw ZED SDK output)")
+    
     args = parser.parse_args()
     
     # Handle --viz flag as alternative to --mode viz
@@ -115,7 +119,8 @@ def main():
         use_udp=args.udp,
         enable_streaming=args.stream,
         stream_host=args.stream_host if args.stream else None,
-        stream_rgb_port=args.stream_port if args.stream else None  # Use single stream port
+        stream_rgb_port=args.stream_port if args.stream else None,  # Use single stream port
+        enable_body_filter=not args.no_filter  # Disable filter if --no-filter flag
     )
     
     try:
