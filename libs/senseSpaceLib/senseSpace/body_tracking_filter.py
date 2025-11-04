@@ -207,11 +207,12 @@ class BodyTrackingFilter:
         # Update active tracks
         new_active_tracks = {}
         for person_id, person in current_persons.items():
-            if person_id in ids_to_remove:
-                continue
-                
-            # Check if this is a remapped ID
-            actual_id = id_remapping.get(person_id, person_id)
+            # Check if this ID was remapped to another ID
+            if person_id in id_remapping:
+                # Use the mapped ID instead
+                actual_id = id_remapping[person_id]
+            else:
+                actual_id = person_id
             
             # Update or create track
             if actual_id in self.active_tracks:
@@ -252,21 +253,23 @@ class BodyTrackingFilter:
         
         self.active_tracks = new_active_tracks
         
-        # If no duplicates found, return original bodies object
-        if not ids_to_remove:
+        # If no remapping needed, return original bodies object
+        if not id_remapping:
             return bodies
         
-        # Create filtered bodies object only if we found duplicates
+        # Create filtered bodies object, removing duplicates
         filtered_bodies = sl.Bodies()
         filtered_bodies.is_new = bodies.is_new
         filtered_bodies.is_tracked = bodies.is_tracked
         
-        # Add non-duplicate bodies to filtered list
+        # Add only the bodies we're keeping (not the ones being removed/remapped)
         for person_id, person in current_persons.items():
-            if person_id not in ids_to_remove:
+            # Skip IDs that were marked as duplicates (keys in id_remapping are the IDs to remove)
+            if person_id not in id_remapping:
                 filtered_bodies.body_list.append(person['body'])
         
-        print(f"[FILTER] Removed {len(ids_to_remove)} duplicate(s): {len(current_persons)} -> {len(filtered_bodies.body_list)} bodies")
+        print(f"[FILTER] Removed {len(id_remapping)} duplicate ID(s): {dict(id_remapping)} | Output: {len(filtered_bodies.body_list)} bodies")
+
         
         return filtered_bodies
     
