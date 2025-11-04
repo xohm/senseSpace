@@ -280,22 +280,23 @@ class BodyTrackingFilter:
         if distance > self.duplicate_distance_threshold:
             return False
         
-        # Height similarity check (if available)
+        # Height similarity check (if available for both)
         if p1['height'] is not None and p2['height'] is not None:
             height_diff = abs(p1['height'] - p2['height']) / max(p1['height'], p2['height'])
             if height_diff > self.height_similarity_threshold:
                 return False
         
-        # At least one should have low confidence or non-OK tracking state
-        both_stable = (
+        # Relax the stability check - allow merging even if both are stable
+        # This handles the case where ZED assigns a new ID with immediately good tracking
+        both_very_stable = (
             p1['tracking_state'] == sl.OBJECT_TRACKING_STATE.OK and 
             p2['tracking_state'] == sl.OBJECT_TRACKING_STATE.OK and
-            p1['confidence'] > 70 and p2['confidence'] > 70
+            p1['confidence'] > 85 and p2['confidence'] > 85  # Increased threshold
         )
         
-        if both_stable:
-            # If both are very confident, require very close proximity
-            return distance < 0.2
+        if both_very_stable:
+            # If both are very confident and stable, require closer proximity
+            return distance < 0.25  # Relaxed from 0.2 to 0.25m
         
         return True
     
@@ -303,25 +304,43 @@ class BodyTrackingFilter:
         """
         Choose which person ID to keep when merging duplicates.
         
+        Priority:
+        1. Prefer ID that exists in active_tracks (established track)
+        2. Prefer older first_seen timestamp (from active_tracks)
+        3. Prefer lower ID number (likely older)
+        4. Prefer better tracking_state
+        5. Prefer higher confidence
+        
         Returns:
             (keep_id, remove_id)
         """
-        # Prefer older track (in active tracks)
-        track1_age = self.active_tracks.get(id1)
-        track2_age = self.active_tracks.get(id2)
+        # PRIORITY 1: Prefer track that exists in active_tracks (established vs new)
+        track1_exists = id1 in self.active_tracks
+        track2_exists = id2 in self.active_tracks
         
-        if track1_age and track2_age:
-            # Both are known - prefer older
-            if track1_age.first_seen < track2_age.first_seen:
+        if track1_exists and not track2_exists:
+            # ID1 is established, ID2 is new -> keep ID1
+            return (id1, id2)
+        elif track2_exists and not track1_exists:
+            # ID2 is established, ID1 is new -> keep ID2
+            return (id2, id1)
+        
+        # PRIORITY 2: If both are established, prefer older
+        if track1_exists and track2_exists:
+            track1 = self.active_tracks[id1]
+            track2 = self.active_tracks[id2]
+            if track1.first_seen < track2.first_seen:
                 return (id1, id2)
             else:
                 return (id2, id1)
-        elif track1_age:
+        
+        # PRIORITY 3: If both are new, prefer lower ID (likely older from ZED's perspective)
+        if id1 < id2:
             return (id1, id2)
-        elif track2_age:
+        elif id2 < id1:
             return (id2, id1)
         
-        # Prefer better tracking state
+        # Fallback: Prefer better tracking state
         state_priority = {
             sl.OBJECT_TRACKING_STATE.OK: 3,
             sl.OBJECT_TRACKING_STATE.SEARCHING: 2,
@@ -336,13 +355,13 @@ class BodyTrackingFilter:
         elif priority2 > priority1:
             return (id2, id1)
         
-        # Prefer higher confidence
+        # Fallback: Prefer higher confidence
         if p1['confidence'] > p2['confidence'] + self.confidence_diff_threshold:
             return (id1, id2)
         elif p2['confidence'] > p1['confidence'] + self.confidence_diff_threshold:
             return (id2, id1)
         
-        # Default: keep lower ID (probably older)
+        # Default: keep lower ID
         return (id1, id2) if id1 < id2 else (id2, id1)
     
     def _calculate_height(self, body: sl.BodyData) -> Optional[float]:
