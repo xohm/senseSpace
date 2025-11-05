@@ -16,6 +16,22 @@ from senseSpaceLib.senseSpace.vizClient import VisualizationClient
 from senseSpaceLib.senseSpace.vizWidget import SkeletonGLWidget
 from senseSpaceLib.senseSpace.protocol import Frame
 
+class CustomSkeletonWidget(SkeletonGLWidget):
+    
+    def onInit(self):
+        """Initialize custom state"""
+        pass
+    
+    def keyPressEvent(self, event):
+        """Handle keyboard input"""
+        # do your own key handling here
+
+        # pass is to the parent class for default handling
+        super().keyPressEvent(event)
+       
+    def draw_custom(self, frame: Frame):
+        print("[DEBUG] Custom drawing logic can be implemented here")
+        pass
 
 def main():
     parser = argparse.ArgumentParser(description="Recording Example")
@@ -30,7 +46,7 @@ def main():
     # Create visualization client
     title = "Recording Example - R:record | P:pause/play (playback)"
     client = VisualizationClient(
-        viewer_class=SkeletonGLWidget,
+        viewer_class=CustomSkeletonWidget,  # Use YOUR custom widget!
         server_ip=args.server,
         server_port=args.port,
         playback_file=args.rec,
