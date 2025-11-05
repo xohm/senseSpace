@@ -1184,11 +1184,29 @@ class VideoReceiver:
         logger.info(f"VideoReceiver initialized: {server_ip}:{self.stream_port}")
         logger.info(f"Cameras: {num_cameras}, Heartbeat: {'enabled' if send_heartbeat else 'disabled'}")
     
+    def _check_multicast_route(self):
+        """Check if multicast route exists, suggest fix if not"""
+        try:
+            import subprocess
+            result = subprocess.run(['ip', 'route', 'show'], capture_output=True, text=True, timeout=2)
+            if '224.0.0.0/4' not in result.stdout:
+                print("[WARNING] No multicast route detected!")
+                print("[WARNING] For WiFi/remote streaming, add multicast route:")
+                print("[WARNING]   sudo ip route add 224.0.0.0/4 dev <your-interface>")
+                print("[WARNING] Example: sudo ip route add 224.0.0.0/4 dev wlp0s20f3")
+                print("[WARNING] Find your interface: ip -br a")
+                logger.warning("No multicast route detected - remote streaming may not work")
+        except:
+            pass  # Silently ignore if route check fails
+    
     def start(self):
         """Start receiving RGB and depth streams"""
         if self.is_receiving:
             logger.warning("Already receiving")
             return
+        
+        # Check multicast routing (especially important for WiFi/remote connections)
+        self._check_multicast_route()
         
         self._create_rgb_receiver()
         self._create_depth_receiver()
@@ -1382,8 +1400,13 @@ class VideoReceiver:
             # Match the working test command caps exactly
             # IMPORTANT: Use multicast address (239.255.0.1), not server IP
             multicast_address = "239.255.0.1"  # Organization-local multicast group
+            
+            # For WiFi/remote connections, explicitly set multicast-iface to ensure proper routing
+            # The udpsrc will automatically join the multicast group on the default interface
+            # If you have multiple network interfaces, you may need to set multicast-iface=<interface>
             pipeline_str = (
-                f"udpsrc address={multicast_address} port={self.stream_port} auto-multicast=true "
+                f"udpsrc address={multicast_address} port={self.stream_port} "
+                f"auto-multicast=true reuse=true "
                 f'caps="application/x-rtp, media=(string)video, encoding-name=(string)H265, '
                 f'clock-rate=(int)90000" ! '
                 f"rtpptdemux name=demux"
