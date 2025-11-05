@@ -506,27 +506,8 @@ class MultiCameraVideoStreamer:
             is_multicast = self.host.startswith("239.") or self.host.startswith("224.")
             
             if is_multicast:
-                # Multicast: auto-detect network interface for multicast
-                # Find the interface with default route (typically eth0 or wlan0)
-                import subprocess
-                multicast_iface = None
-                try:
-                    result = subprocess.run(['ip', 'route', 'get', '8.8.8.8'], 
-                                          capture_output=True, text=True, timeout=2)
-                    if result.returncode == 0:
-                        for part in result.stdout.split():
-                            if part == 'dev':
-                                iface_idx = result.stdout.split().index(part) + 1
-                                multicast_iface = result.stdout.split()[iface_idx]
-                                break
-                except:
-                    pass
-                
-                if multicast_iface:
-                    udpsink_params = f"auto-multicast=true multicast-iface={multicast_iface} ttl-mc=10 sync=false async=false"
-                    print(f"[INFO] Using multicast interface: {multicast_iface}")
-                else:
-                    udpsink_params = "auto-multicast=true ttl-mc=10 sync=false async=false"
+                # Multicast: simple auto-multicast, like standard GStreamer examples
+                udpsink_params = "auto-multicast=true sync=false async=false"
             else:
                 # Unicast: simple host/port, no multicast params
                 udpsink_params = "sync=false async=false"
