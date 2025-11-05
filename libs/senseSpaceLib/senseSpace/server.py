@@ -881,7 +881,7 @@ class SenseSpaceServer:
             # Set initialization parameters
             init_params = sl.InitParameters()
             init_params.camera_resolution = sl.RESOLUTION.HD720  # 1280x720 @ 60fps
-            init_params.camera_fps = 60  # Higher FPS for smoother tracking
+            init_params.camera_fps = 30  # Higher FPS for smoother tracking
             init_params.depth_mode = sl.DEPTH_MODE.NEURAL  # Neural depth for better quality (replaces deprecated PERFORMANCE)
             init_params.coordinate_units = sl.UNIT.MILLIMETER
             init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
@@ -1098,7 +1098,7 @@ class SenseSpaceServer:
             init_params.coordinate_units = sl.UNIT.MILLIMETER
             init_params.depth_mode = sl.DEPTH_MODE.NEURAL  # Neural depth for better quality (replaces deprecated PERFORMANCE)
             init_params.camera_resolution = sl.RESOLUTION.HD720  # 1280x720 @ 60fps
-            init_params.camera_fps = 60  # Higher FPS for smoother tracking
+            init_params.camera_fps = 30  # Higher FPS for smoother tracking
 
             communication_parameters = sl.CommunicationParameters()
             communication_parameters.set_for_shared_memory()
