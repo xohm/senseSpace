@@ -1051,6 +1051,7 @@ class SenseSpaceServer:
                 camera_height = res.height
                 fps = camera_info.camera_configuration.fps
                 framerate = fps
+                print(f"[INFO] Detected camera resolution: {camera_width}x{camera_height}@{framerate}fps")
             
             self.video_streamer = MultiCameraVideoStreamer(
                 stream_port=self.stream_rgb_port,  # Use RGB port as the single stream port
