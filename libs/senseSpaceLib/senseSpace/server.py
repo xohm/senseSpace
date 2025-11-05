@@ -418,10 +418,11 @@ class SenseSpaceServer:
                     "version": "2.0",  # Protocol version
                     "streaming": {
                         "enabled": hasattr(self, 'video_streamer') and self.video_streamer is not None,
+                        "host": self.stream_host if hasattr(self, 'stream_host') else "239.0.0.1",  # Multicast address
                         "port": self.stream_rgb_port if hasattr(self, 'stream_rgb_port') else 5000,
                         "num_cameras": 0,
-                        "camera_width": 672,
-                        "camera_height": 376,
+                        "camera_width": 1280,
+                        "camera_height": 720,
                         "framerate": 60,
                         "depth_mode": "NEURAL"
                     },
@@ -879,7 +880,7 @@ class SenseSpaceServer:
 
             # Set initialization parameters
             init_params = sl.InitParameters()
-            init_params.camera_resolution = sl.RESOLUTION.VGA  # 672x376 @ 60fps
+            init_params.camera_resolution = sl.RESOLUTION.HD720  # 1280x720 @ 60fps
             init_params.camera_fps = 60  # Higher FPS for smoother tracking
             init_params.depth_mode = sl.DEPTH_MODE.NEURAL  # Neural depth for better quality (replaces deprecated PERFORMANCE)
             init_params.coordinate_units = sl.UNIT.MILLIMETER
@@ -1038,8 +1039,8 @@ class SenseSpaceServer:
             print(f"[INFO] All streams multiplexed on single port: {self.stream_rgb_port}")
             
             # Get camera resolution from first camera
-            camera_width = 672  # VGA width
-            camera_height = 376  # VGA height
+            camera_width = 1280  # HD720 width
+            camera_height = 720  # HD720 height
             framerate = 60 if self.is_fusion_mode else 30
             
             # Try to get actual resolution from camera

@@ -1381,7 +1381,7 @@ class VideoReceiver:
             # CRITICAL: Must specify RTP caps with encoding-name=H265 for proper demuxing
             # Match the working test command caps exactly
             pipeline_str = (
-                f"udpsrc address={self.host} port={self.stream_port} auto-multicast=true "
+                f"udpsrc address={self.server_ip} port={self.stream_port} auto-multicast=true "
                 f'caps="application/x-rtp, media=(string)video, encoding-name=(string)H265, '
                 f'clock-rate=(int)90000" ! '
                 f"rtpptdemux name=demux"

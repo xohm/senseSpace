@@ -604,6 +604,12 @@ def main():
     else:
         stream_port = 5000  # Default fallback
     
+    # Get multicast host from server_info (or use default)
+    if server_info and server_info.get('streaming', {}).get('host'):
+        stream_host = server_info['streaming']['host']
+    else:
+        stream_host = args.server  # Fallback to server IP (for non-multicast)
+    
     if args.num_cameras is not None:
         num_cameras = args.num_cameras
     elif server_info and server_info.get('streaming', {}).get('num_cameras'):
@@ -611,6 +617,7 @@ def main():
     else:
         num_cameras = 1  # Default fallback
     
+    logger.info(f"Stream Host: {stream_host}")
     logger.info(f"Stream Port: {stream_port}")
     logger.info(f"Number of cameras: {num_cameras}")
     
@@ -630,8 +637,9 @@ def main():
     # Create video receiver with single stream port (no heartbeat needed with udpsink)
     # IMPORTANT: Callbacks receive (frame, camera_idx) - must handle multi-camera!
     # NOTE: Lambda captures cam_idx at call time, not definition time
+    # Use stream_host (multicast address) instead of server IP for udpsrc binding
     video_receiver = VideoReceiver(
-        server_ip=args.server,
+        server_ip=stream_host,  # Use multicast address from server_info
         stream_port=stream_port,
         num_cameras=num_cameras,
         rgb_callback=lambda frame, cam_idx: viz_widget.on_rgb_frame(frame, camera_idx=cam_idx),
