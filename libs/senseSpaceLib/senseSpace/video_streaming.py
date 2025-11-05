@@ -1503,7 +1503,12 @@ class VideoReceiver:
                     # Connect appsink callback
                     appsink = bin.get_by_name(f'rgb_sink_{cam_idx}')
                     if appsink:
-                        appsink.connect('new-sample', self._on_rgb_sample)
+                        # Verify emit-signals is set
+                        emit_signals = appsink.get_property('emit-signals')
+                        print(f"[DEBUG] RGB CAM{cam_idx} appsink emit-signals={emit_signals}")
+                        
+                        handler_id = appsink.connect('new-sample', self._on_rgb_sample)
+                        print(f"[DEBUG] RGB CAM{cam_idx} connected new-sample handler (ID={handler_id})")
                         self.rgb_sinks[cam_idx] = appsink
                         
                         # Add probe to appsink to monitor data flow
