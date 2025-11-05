@@ -1518,11 +1518,36 @@ class SenseSpaceServer:
             # Push all frames together if we have any
             if self.video_streamer is not None and len(rgb_frames) > 0:
                 try:
-                    # Replace None with dummy frames if needed, or filter them out
-                    valid_rgb = [f for f in rgb_frames if f is not None]
-                    valid_depth = [f for f in depth_frames if f is not None]
-                    if len(valid_rgb) == len(rgb_frames):  # All frames captured successfully
-                        self.video_streamer.push_camera_frames(rgb_frames, depth_frames)
+                    # Check if we have at least some valid frames
+                    valid_rgb_count = sum(1 for f in rgb_frames if f is not None)
+                    valid_depth_count = sum(1 for f in depth_frames if f is not None)
+                    
+                    if valid_rgb_count > 0 or valid_depth_count > 0:
+                        # Replace None frames with black/zero frames to maintain camera index alignment
+                        final_rgb_frames = []
+                        final_depth_frames = []
+                        
+                        for i in range(self.num_cameras):
+                            # RGB: Use existing frame or create black frame
+                            if i < len(rgb_frames) and rgb_frames[i] is not None:
+                                final_rgb_frames.append(rgb_frames[i])
+                            else:
+                                # Create black BGR frame matching expected resolution
+                                black_frame = np.zeros((self.video_streamer.camera_height, 
+                                                       self.video_streamer.camera_width, 3), dtype=np.uint8)
+                                final_rgb_frames.append(black_frame)
+                            
+                            # Depth: Use existing frame or create zero depth frame
+                            if i < len(depth_frames) and depth_frames[i] is not None:
+                                final_depth_frames.append(depth_frames[i])
+                            else:
+                                # Create zero depth frame matching expected resolution
+                                zero_depth = np.zeros((self.video_streamer.camera_height, 
+                                                      self.video_streamer.camera_width), dtype=np.float32)
+                                final_depth_frames.append(zero_depth)
+                        
+                        # Push frames (with placeholders for failed cameras)
+                        self.video_streamer.push_camera_frames(final_rgb_frames, final_depth_frames)
                 except Exception as e:
                     print(f"[WARNING] Failed to stream video frames: {e}")
 
