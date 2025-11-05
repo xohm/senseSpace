@@ -1527,7 +1527,8 @@ class SenseSpaceServer:
                         final_rgb_frames = []
                         final_depth_frames = []
                         
-                        for i in range(self.num_cameras):
+                        num_cameras = len(rgb_frames)  # Use actual number of frames collected
+                        for i in range(num_cameras):
                             # RGB: Use existing frame or create black frame
                             if i < len(rgb_frames) and rgb_frames[i] is not None:
                                 final_rgb_frames.append(rgb_frames[i])
