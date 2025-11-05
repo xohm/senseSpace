@@ -1043,13 +1043,24 @@ class SenseSpaceServer:
             print(f"[INFO] Initializing video streamer for {num_cameras} camera(s)")
             print(f"[INFO] All streams multiplexed on single port: {self.stream_rgb_port}")
             
-            # Get camera resolution from first camera
-            camera_width = 1280  # HD720 width
-            camera_height = 720  # HD720 height
-            framerate = 60 if self.is_fusion_mode else 30
+            # Get camera resolution from actual camera
+            camera_width = 1280  # Default fallback
+            camera_height = 720  # Default fallback
+            framerate = 60  # Default fallback
             
             # Try to get actual resolution from camera
-            if hasattr(self, 'camera') and self.camera is not None:
+            if self.is_fusion_mode and hasattr(self, '_fusion_senders') and self._fusion_senders:
+                # Get resolution from first fusion sender camera
+                first_cam = next(iter(self._fusion_senders.values()))
+                camera_info = first_cam.get_camera_information()
+                res = camera_info.camera_configuration.resolution
+                camera_width = res.width
+                camera_height = res.height
+                fps = camera_info.camera_configuration.fps
+                framerate = fps
+                print(f"[INFO] Detected fusion camera resolution: {camera_width}x{camera_height}@{framerate}fps")
+            elif hasattr(self, 'camera') and self.camera is not None:
+                # Get resolution from single camera
                 camera_info = self.camera.get_camera_information()
                 res = camera_info.camera_configuration.resolution
                 camera_width = res.width
@@ -1057,6 +1068,8 @@ class SenseSpaceServer:
                 fps = camera_info.camera_configuration.fps
                 framerate = fps
                 print(f"[INFO] Detected camera resolution: {camera_width}x{camera_height}@{framerate}fps")
+            else:
+                print(f"[WARNING] Could not detect camera resolution, using default: {camera_width}x{camera_height}@{framerate}fps")
             
             self.video_streamer = MultiCameraVideoStreamer(
                 stream_port=self.stream_rgb_port,  # Use RGB port as the single stream port
