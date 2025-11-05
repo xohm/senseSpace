@@ -96,8 +96,8 @@ def main():
     # Video streaming arguments
     parser.add_argument("--stream", action="store_true", 
                        help="Enable RGB/depth video streaming to clients via GStreamer MPEG-TS")
-    parser.add_argument("--stream-host", default="0.0.0.0",
-                       help="Video stream host IP (default: 0.0.0.0)")
+    parser.add_argument("--stream-host", default="239.255.0.1",
+                       help="Video stream multicast address (default: 239.255.0.1)")
     parser.add_argument("--stream-port", type=int, default=5000,
                        help="Single multiplexed stream UDP port (default: 5000)")
     

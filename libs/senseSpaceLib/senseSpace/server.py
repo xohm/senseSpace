@@ -418,7 +418,7 @@ class SenseSpaceServer:
                     "version": "2.0",  # Protocol version
                     "streaming": {
                         "enabled": hasattr(self, 'video_streamer') and self.video_streamer is not None,
-                        "host": self.stream_host if hasattr(self, 'stream_host') else "239.0.0.1",  # Multicast address
+                        "host": self.stream_host if hasattr(self, 'stream_host') else "239.255.0.1",  # Multicast address
                         "port": self.stream_rgb_port if hasattr(self, 'stream_rgb_port') else 5000,
                         "num_cameras": 0,
                         "camera_width": 1280,
@@ -1112,7 +1112,7 @@ class SenseSpaceServer:
             body_tracking_parameters.enable_body_fitting = True  # Enable to get local_orientation_per_joint
             body_tracking_parameters.enable_tracking = True
             body_tracking_parameters.prediction_timeout_s = 0.5  # Increased from default 0.2s - keep tracking longer during occlusions
-            body_tracking_parameters.max_range = 10.0  # Limit tracking range to 10m for better accuracy
+            body_tracking_parameters.max_range = 3.0  # Limit tracking range to 10m for better accuracy
 
             # Start local senders
             senders = {}

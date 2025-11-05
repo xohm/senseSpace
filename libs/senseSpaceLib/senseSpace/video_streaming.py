@@ -226,7 +226,7 @@ class MultiCameraVideoStreamer:
     Automatically starts/stops streaming based on active client count.
     """
     
-    def __init__(self, num_cameras=1, host='239.0.0.1', stream_port=5000,
+    def __init__(self, num_cameras=1, host='239.255.0.1', stream_port=5000,
                  camera_width=1280, camera_height=720, framerate=30,
                  enable_client_detection=True, client_timeout=5.0):
         """
@@ -234,7 +234,7 @@ class MultiCameraVideoStreamer:
         
         Args:
             num_cameras: Number of cameras to multiplex (RGB + Depth each)
-            host: Multicast group address (default: 239.0.0.1 - organization-local)
+            host: Multicast group address (default: 239.255.0.1 - organization-local)
             stream_port: Single UDP port for ALL streams (default: 5000)
             camera_width: Width of each individual camera
             camera_height: Height of each individual camera
