@@ -87,13 +87,31 @@ class SenseSpaceServer:
         
         # Video streaming configuration
         self.enable_streaming = enable_streaming
-        self.stream_host = stream_host or host
+        
+        # Auto-detect: Use unicast for localhost-only, multicast if on LAN
+        if stream_host is None:
+            # Check if we have a real LAN IP (not localhost)
+            if self.local_ip and self.local_ip not in ["127.0.0.1", "localhost", "::1"]:
+                # We're on a real network - use multicast
+                self.stream_host = "239.255.0.1"
+            else:
+                # Localhost only - use unicast
+                self.stream_host = "127.0.0.1"
+                print(f"[INFO] No LAN connection detected - using unicast streaming")
+        elif stream_host in ["localhost", "127.0.0.1", "::1"]:
+            # Force unicast for localhost testing
+            self.stream_host = "127.0.0.1"
+            print(f"[INFO] Using unicast streaming for localhost")
+        else:
+            self.stream_host = stream_host
+            
         self.stream_rgb_port = stream_rgb_port
         self.stream_depth_port = stream_depth_port
         self.video_streamer = None
         
         if enable_streaming:
-            print(f"[INFO] Video streaming enabled")
+            stream_mode = "unicast" if self.stream_host == "127.0.0.1" else "multicast"
+            print(f"[INFO] Video streaming enabled ({stream_mode})")
             print(f"[INFO]   Stream host: {self.stream_host}")
             print(f"[INFO]   Stream port: {self.stream_rgb_port}")
         
@@ -421,13 +439,16 @@ class SenseSpaceServer:
         New clients use it to auto-configure streaming parameters.
         """
         try:
+            # Use the actual stream host (multicast works on localhost with loop=true)
+            effective_stream_host = self.stream_host
+            
             info = {
                 "type": "server_info",
                 "data": {
                     "version": "2.0",  # Protocol version
                     "streaming": {
                         "enabled": hasattr(self, 'video_streamer') and self.video_streamer is not None,
-                        "host": self.stream_host if hasattr(self, 'stream_host') else "239.255.0.1",  # Multicast address
+                        "host": effective_stream_host if hasattr(self, 'stream_host') else "239.255.0.1",
                         "port": self.stream_rgb_port if hasattr(self, 'stream_rgb_port') else 5000,
                         "num_cameras": 0,
                         "camera_width": 1280,
@@ -469,6 +490,10 @@ class SenseSpaceServer:
             # Send as JSON
             message = json.dumps(info) + "\n"
             conn.sendall(message.encode('utf-8'))
+            
+            # Small delay to ensure server_info is received before skeleton frames start
+            time.sleep(0.1)
+            
             print(f"[INFO] Sent server info to client: {info['data']['streaming']['num_cameras']} cameras, "
                   f"{info['data']['streaming']['camera_width']}x{info['data']['streaming']['camera_height']}@{info['data']['streaming']['framerate']}fps, "
                   f"depth mode: {info['data']['streaming']['depth_mode']}")
@@ -910,13 +935,14 @@ class SenseSpaceServer:
                 self.camera.close()
                 return False
 
-            # Enable body tracking if requested (optimized for performance)
+            # Enable body tracking if requested
             if enable_body_tracking:
                 body_params = sl.BodyTrackingParameters()
-                body_params.enable_tracking = True
-                body_params.enable_body_fitting = True
+                body_params.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE
                 body_params.body_format = sl.BODY_FORMAT.BODY_34
-                body_params.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_FAST
+                body_params.enable_body_fitting = True
+                body_params.enable_tracking = True
+                # Note: prediction_timeout_s and max_range can cause issues in single camera mode
 
                 status = self.camera.enable_body_tracking(body_params)
                 if status != sl.ERROR_CODE.SUCCESS:
@@ -1074,9 +1100,10 @@ class SenseSpaceServer:
             else:
                 print(f"[WARNING] Could not detect camera resolution, using default: {camera_width}x{camera_height}@{framerate}fps")
             
-            # TEMP: Override framerate to 1fps for WiFi bandwidth testing
-            framerate = 1
-            print(f"[WARNING] Framerate overridden to {framerate}fps for WiFi testing")
+            # Cap streaming framerate at 30 FPS for bandwidth efficiency
+            streaming_framerate = min(framerate, 30)
+            if streaming_framerate != framerate:
+                print(f"[INFO] Streaming framerate capped at {streaming_framerate}fps (camera runs at {framerate}fps)")
             
             self.video_streamer = MultiCameraVideoStreamer(
                 stream_port=self.stream_rgb_port,  # Use RGB port as the single stream port
@@ -1084,7 +1111,7 @@ class SenseSpaceServer:
                 host=self.stream_host,
                 camera_width=camera_width,
                 camera_height=camera_height,
-                framerate=framerate,
+                framerate=streaming_framerate,
                 enable_client_detection=False  # Using udpsink - no client detection needed
             )
             

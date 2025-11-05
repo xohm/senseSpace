@@ -502,6 +502,16 @@ class MultiCameraVideoStreamer:
             self.rgb_pipelines = []
             self.rgb_appsrcs = []
             
+            # Determine if this is multicast or unicast
+            is_multicast = self.host.startswith("239.") or self.host.startswith("224.")
+            
+            if is_multicast:
+                # Multicast: use auto-multicast, loop for loopback, ttl-mc
+                udpsink_params = "auto-multicast=true multicast-iface=lo loop=true ttl-mc=1 sync=false async=false"
+            else:
+                # Unicast: simple host/port, no multicast params
+                udpsink_params = "sync=false async=false"
+            
             for cam_idx in range(self.num_cameras):
                 pt = 96 + (cam_idx * 2)  # PT: 96, 98, 100, ...
                 
@@ -514,8 +524,7 @@ class MultiCameraVideoStreamer:
                     f"{encoder_name} {props_str} ! "
                     f"h265parse ! "
                     f"rtph265pay config-interval=1 pt={pt} ! "
-                    f"udpsink host={self.host} port={self.stream_port} "
-                    f"auto-multicast=true ttl-mc=1 sync=false async=false"
+                    f"udpsink host={self.host} port={self.stream_port} {udpsink_params}"
                 )
                 
                 pipeline = Gst.parse_launch(pipeline_str)
@@ -610,6 +619,16 @@ class MultiCameraVideoStreamer:
             print(f"[INFO] Depth encoding mode: {quality_desc}")
             logger.info(f"Depth encoding: {depth_encoder_name} with {quality_desc}")
             
+            # Determine if this is multicast or unicast (same as RGB)
+            is_multicast = self.host.startswith("239.") or self.host.startswith("224.")
+            
+            if is_multicast:
+                # Multicast: use auto-multicast, loop for loopback, ttl-mc
+                udpsink_params = "auto-multicast=true multicast-iface=lo loop=true ttl-mc=1 sync=false async=false"
+            else:
+                # Unicast: simple host/port, no multicast params
+                udpsink_params = "sync=false async=false"
+            
             for cam_idx in range(self.num_cameras):
                 pt = 97 + (cam_idx * 2)  # PT: 97, 99, 101, ...
                 
@@ -622,8 +641,7 @@ class MultiCameraVideoStreamer:
                     f"{depth_encoder_name} {depth_encoder_props_str} {lossless_props} ! "
                     f"h265parse ! "
                     f"rtph265pay config-interval=1 mtu={mtu_size} pt={pt} ! "
-                    f"udpsink host={self.host} port={self.stream_port} "
-                    f"auto-multicast=true ttl-mc=1 sync=false async=false"
+                    f"udpsink host={self.host} port={self.stream_port} {udpsink_params}"
                 )
                 
                 pipeline = Gst.parse_launch(pipeline_str)
@@ -1381,12 +1399,25 @@ class VideoReceiver:
             # Single udpsrc → rtpptdemux (pads created dynamically)
             # CRITICAL: Must specify RTP caps with encoding-name=H265 for proper demuxing
             # Match the working test command caps exactly
-            pipeline_str = (
-                f"udpsrc address={self.server_ip} port={self.stream_port} auto-multicast=true "
-                f'caps="application/x-rtp, media=(string)video, encoding-name=(string)H265, '
-                f'clock-rate=(int)90000" ! '
-                f"rtpptdemux name=demux"
-            )
+            # For unicast (127.0.0.1), don't use address binding - let it receive on all interfaces
+            # For multicast (239.x.x.x), use address to join the multicast group
+            is_multicast = self.server_ip.startswith("239.") or self.server_ip.startswith("224.")
+            
+            if is_multicast:
+                pipeline_str = (
+                    f"udpsrc address={self.server_ip} port={self.stream_port} auto-multicast=true "
+                    f'caps="application/x-rtp, media=(string)video, encoding-name=(string)H265, '
+                    f'clock-rate=(int)90000" ! '
+                    f"rtpptdemux name=demux"
+                )
+            else:
+                # Unicast: bind to port only, receive from any source
+                pipeline_str = (
+                    f"udpsrc port={self.stream_port} "
+                    f'caps="application/x-rtp, media=(string)video, encoding-name=(string)H265, '
+                    f'clock-rate=(int)90000" ! '
+                    f"rtpptdemux name=demux"
+                )
             
             logger.debug(f"RTP demux receiver base pipeline: {pipeline_str}")
             print(f"[DEBUG] RTP demux receiver pipeline (single port {self.stream_port})")
@@ -1441,7 +1472,7 @@ class VideoReceiver:
                 # Create RGB decoder chain with proper RTP caps + jitter buffer for WiFi (500ms for 1fps)
                 elements_str = (
                     f"capsfilter caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H265,payload={pt}\" ! "
-                    f"rtpjitterbuffer latency=500 drop-on-latency=true ! "
+                    f"rtpjitterbuffer latency=1000 drop-on-latency=true do-lost=false mode=1 ! "
                     f"queue ! "
                     f"rtph265depay ! "
                     f"h265parse ! "
@@ -1456,8 +1487,14 @@ class VideoReceiver:
                 
                 # Link demux pad to bin
                 sink_pad = bin.get_static_pad('sink')
-                if pad.link(sink_pad) == Gst.PadLinkReturn.OK:
-                    bin.sync_state_with_parent()
+                link_result = pad.link(sink_pad)
+                if link_result == Gst.PadLinkReturn.OK:
+                    # Sync state and verify
+                    state_result = bin.sync_state_with_parent()
+                    print(f"[DEBUG] RGB bin state sync result: {state_result}")
+                    
+                    # Explicitly set to PLAYING to ensure it's active
+                    bin.set_state(Gst.State.PLAYING)
                     
                     # Connect appsink callback
                     appsink = bin.get_by_name(f'rgb_sink_{cam_idx}')
@@ -1465,13 +1502,15 @@ class VideoReceiver:
                         appsink.connect('new-sample', self._on_rgb_sample)
                         self.rgb_sinks[cam_idx] = appsink
                         print(f"[INFO] RGB receiver connected: Camera {cam_idx}, PT={pt}")
+                    else:
+                        print(f"[ERROR] Could not find rgb_sink_{cam_idx} in bin")
                 else:
-                    print(f"[ERROR] Failed to link RGB pad for camera {cam_idx}")
+                    print(f"[ERROR] Failed to link RGB pad for camera {cam_idx}: {link_result}")
             else:
                 # Create Depth decoder chain with proper RTP caps + jitter buffer for WiFi (500ms for 1fps)
                 elements_str = (
                     f"capsfilter caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H265,payload={pt}\" ! "
-                    f"rtpjitterbuffer latency=500 drop-on-latency=true ! "
+                    f"rtpjitterbuffer latency=1000 drop-on-latency=true do-lost=false mode=1 ! "
                     f"queue ! "
                     f"rtph265depay ! "
                     f"h265parse ! "
@@ -1486,8 +1525,14 @@ class VideoReceiver:
                 
                 # Link demux pad to bin
                 sink_pad = bin.get_static_pad('sink')
-                if pad.link(sink_pad) == Gst.PadLinkReturn.OK:
-                    bin.sync_state_with_parent()
+                link_result = pad.link(sink_pad)
+                if link_result == Gst.PadLinkReturn.OK:
+                    # Sync state and verify
+                    state_result = bin.sync_state_with_parent()
+                    print(f"[DEBUG] Depth bin state sync result: {state_result}")
+                    
+                    # Explicitly set to PLAYING to ensure it's active
+                    bin.set_state(Gst.State.PLAYING)
                     
                     # Connect appsink callback
                     appsink = bin.get_by_name(f'depth_sink_{cam_idx}')
@@ -1495,8 +1540,10 @@ class VideoReceiver:
                         appsink.connect('new-sample', self._on_depth_sample)
                         self.depth_sinks[cam_idx] = appsink
                         print(f"[INFO] Depth receiver connected: Camera {cam_idx}, PT={pt}")
+                    else:
+                        print(f"[ERROR] Could not find depth_sink_{cam_idx} in bin")
                 else:
-                    print(f"[ERROR] Failed to link Depth pad for camera {cam_idx}")
+                    print(f"[ERROR] Failed to link Depth pad for camera {cam_idx}: {link_result}")
                     
         except Exception as e:
             print(f"[ERROR] Failed to handle demux pad: {e}")
@@ -1636,7 +1683,17 @@ class VideoReceiver:
             
             buf.unmap(map_info)
             
-            #print(f"[DEBUG] RGB frame CAM{camera_idx} received: {width}x{height}")
+            # Debug: Log first few frames
+            if not hasattr(self, '_rgb_recv_count'):
+                self._rgb_recv_count = {}
+            if camera_idx not in self._rgb_recv_count:
+                self._rgb_recv_count[camera_idx] = 0
+            self._rgb_recv_count[camera_idx] += 1
+            
+            if self._rgb_recv_count[camera_idx] <= 5:
+                print(f"[DEBUG] RGB frame CAM{camera_idx} #{self._rgb_recv_count[camera_idx]} received: {width}x{height}")
+            elif self._rgb_recv_count[camera_idx] % 60 == 0:
+                print(f"[INFO] RGB CAM{camera_idx} streaming: {self._rgb_recv_count[camera_idx]} frames")
             
             # Call callback with camera index
             if self.rgb_callback:

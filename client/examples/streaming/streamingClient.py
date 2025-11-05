@@ -608,7 +608,7 @@ def main():
     if server_info and server_info.get('streaming', {}).get('host'):
         stream_host = server_info['streaming']['host']
     else:
-        stream_host = args.server  # Fallback to server IP (for non-multicast)
+        stream_host = "239.255.0.1"  # Default multicast
     
     if args.num_cameras is not None:
         num_cameras = args.num_cameras

@@ -704,11 +704,7 @@ class SegmentationPointCloudServer(SenseSpaceServer):
                             self.fusion.retrieve_bodies(bodies, sl.BodyTrackingFusionRuntimeParameters())
                         else:
                             self.fusion.retrieve_bodies(bodies)
-                        
-                        # Log body count periodically
-                        if loop_count % 60 == 0:
-                            print(f"[DEBUG] Retrieved {len(bodies.body_list)} bodies from fusion at loop {loop_count}")
-                            
+                                                    
                     except Exception as e:
                         print(f'[WARNING] Fusion retrieve_bodies failed: {e}')
                         continue
