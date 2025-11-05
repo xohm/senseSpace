@@ -1075,6 +1075,10 @@ class SenseSpaceServer:
             else:
                 print(f"[WARNING] Could not detect camera resolution, using default: {camera_width}x{camera_height}@{framerate}fps")
             
+            # TEMP: Override framerate to 1fps for WiFi bandwidth testing
+            framerate = 1
+            print(f"[WARNING] Framerate overridden to {framerate}fps for WiFi testing")
+            
             self.video_streamer = MultiCameraVideoStreamer(
                 stream_port=self.stream_rgb_port,  # Use RGB port as the single stream port
                 num_cameras=num_cameras,
