@@ -513,7 +513,8 @@ class MultiCameraVideoStreamer:
                     f"{encoder_name} {props_str} ! "
                     f"h265parse ! "
                     f"rtph265pay config-interval=1 pt={pt} ! "
-                    f"udpsink host={self.host} port={self.stream_port} auto-multicast=true ttl-mc=10 sync=false async=false"
+                    f"udpsink host={self.host} port={self.stream_port} "
+                    f"auto-multicast=true ttl-mc=1 sync=false async=false"
                 )
                 
                 pipeline = Gst.parse_launch(pipeline_str)
@@ -620,7 +621,8 @@ class MultiCameraVideoStreamer:
                     f"{depth_encoder_name} {depth_encoder_props_str} {lossless_props} ! "
                     f"h265parse ! "
                     f"rtph265pay config-interval=1 mtu={mtu_size} pt={pt} ! "
-                    f"udpsink host={self.host} port={self.stream_port} auto-multicast=true ttl-mc=10 sync=false async=false"
+                    f"udpsink host={self.host} port={self.stream_port} "
+                    f"auto-multicast=true ttl-mc=1 sync=false async=false"
                 )
                 
                 pipeline = Gst.parse_launch(pipeline_str)
@@ -1377,9 +1379,11 @@ class VideoReceiver:
             
             # Single udpsrc → rtpptdemux (pads created dynamically)
             # CRITICAL: Must specify RTP caps with encoding-name=H265 for proper demuxing
+            # Match the working test command caps exactly
             pipeline_str = (
-                f"udpsrc address=239.0.0.1 port={self.stream_port} auto-multicast=true "
-                f'caps="application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H265" ! '
+                f"udpsrc address={self.host} port={self.stream_port} auto-multicast=true "
+                f'caps="application/x-rtp, media=(string)video, encoding-name=(string)H265, '
+                f'clock-rate=(int)90000" ! '
                 f"rtpptdemux name=demux"
             )
             
