@@ -71,6 +71,10 @@ def get_local_ip():
 
 class SenseSpaceServer:
     """Main server class for ZED SDK body tracking and TCP broadcasting"""
+    
+    # Camera configuration - used for both single and fusion modes
+    CAMERA_RESOLUTION = sl.RESOLUTION.VGA  # 672x376 @ 60fps
+    CAMERA_FPS = 60
 
     def __init__(self, host: str = "0.0.0.0", port: int = 12345, use_udp: bool = False,
                  enable_streaming: bool = False, stream_host: str = None,
@@ -885,8 +889,8 @@ class SenseSpaceServer:
 
             # Set initialization parameters
             init_params = sl.InitParameters()
-            init_params.camera_resolution = sl.RESOLUTION.VGA  # 1280x720 @ 60fps
-            init_params.camera_fps = 60  # Higher FPS for smoother tracking
+            init_params.camera_resolution = self.CAMERA_RESOLUTION
+            init_params.camera_fps = self.CAMERA_FPS
             init_params.depth_mode = sl.DEPTH_MODE.NEURAL  # Neural depth for better quality (replaces deprecated PERFORMANCE)
             init_params.coordinate_units = sl.UNIT.MILLIMETER
             init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
@@ -1134,8 +1138,8 @@ class SenseSpaceServer:
             init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
             init_params.coordinate_units = sl.UNIT.MILLIMETER
             init_params.depth_mode = sl.DEPTH_MODE.NEURAL  # Neural depth for better quality (replaces deprecated PERFORMANCE)
-            init_params.camera_resolution = sl.RESOLUTION.VGA  # 1280x720 @ 60fps
-            init_params.camera_fps = 60  # Higher FPS for smoother tracking
+            init_params.camera_resolution = self.CAMERA_RESOLUTION
+            init_params.camera_fps = self.CAMERA_FPS
 
             communication_parameters = sl.CommunicationParameters()
             communication_parameters.set_for_shared_memory()
