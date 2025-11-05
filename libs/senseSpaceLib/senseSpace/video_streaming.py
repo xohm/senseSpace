@@ -506,8 +506,27 @@ class MultiCameraVideoStreamer:
             is_multicast = self.host.startswith("239.") or self.host.startswith("224.")
             
             if is_multicast:
-                # Multicast: use auto-multicast, loop for loopback, ttl-mc
-                udpsink_params = "auto-multicast=true multicast-iface=lo loop=true ttl-mc=1 sync=false async=false"
+                # Multicast: auto-detect network interface for multicast
+                # Find the interface with default route (typically eth0 or wlan0)
+                import subprocess
+                multicast_iface = None
+                try:
+                    result = subprocess.run(['ip', 'route', 'get', '8.8.8.8'], 
+                                          capture_output=True, text=True, timeout=2)
+                    if result.returncode == 0:
+                        for part in result.stdout.split():
+                            if part == 'dev':
+                                iface_idx = result.stdout.split().index(part) + 1
+                                multicast_iface = result.stdout.split()[iface_idx]
+                                break
+                except:
+                    pass
+                
+                if multicast_iface:
+                    udpsink_params = f"auto-multicast=true multicast-iface={multicast_iface} ttl-mc=10 sync=false async=false"
+                    print(f"[INFO] Using multicast interface: {multicast_iface}")
+                else:
+                    udpsink_params = "auto-multicast=true ttl-mc=10 sync=false async=false"
             else:
                 # Unicast: simple host/port, no multicast params
                 udpsink_params = "sync=false async=false"
@@ -623,8 +642,27 @@ class MultiCameraVideoStreamer:
             is_multicast = self.host.startswith("239.") or self.host.startswith("224.")
             
             if is_multicast:
-                # Multicast: use auto-multicast, loop for loopback, ttl-mc
-                udpsink_params = "auto-multicast=true multicast-iface=lo loop=true ttl-mc=1 sync=false async=false"
+                # Multicast: auto-detect network interface for multicast
+                # Find the interface with default route (typically eth0 or wlan0)
+                import subprocess
+                multicast_iface = None
+                try:
+                    result = subprocess.run(['ip', 'route', 'get', '8.8.8.8'], 
+                                          capture_output=True, text=True, timeout=2)
+                    if result.returncode == 0:
+                        for part in result.stdout.split():
+                            if part == 'dev':
+                                iface_idx = result.stdout.split().index(part) + 1
+                                multicast_iface = result.stdout.split()[iface_idx]
+                                break
+                except:
+                    pass
+                
+                if multicast_iface:
+                    udpsink_params = f"auto-multicast=true multicast-iface={multicast_iface} ttl-mc=10 sync=false async=false"
+                    # Already printed in RGB pipeline creation
+                else:
+                    udpsink_params = "auto-multicast=true ttl-mc=10 sync=false async=false"
             else:
                 # Unicast: simple host/port, no multicast params
                 udpsink_params = "sync=false async=false"
@@ -1232,8 +1270,8 @@ class VideoReceiver:
             self._start_heartbeat()
         
         self.is_receiving = True
-    logger.info("RGB/Depth receiving started")
-    print("[INFO] RGB/Depth receiving started")
+        logger.info("RGB/Depth receiving started")
+        print("[INFO] RGB/Depth receiving started")
     
     def _start_heartbeat(self):
         """Start sending heartbeat messages to server"""
@@ -1393,6 +1431,7 @@ class VideoReceiver:
         Uses rtpptdemux to separate RGB and Depth streams by payload type on single port.
         Dynamically connects pads as streams are detected.
         """
+        print(f"[DEBUG] Creating RGB receiver pipeline for {self.server_ip}:{self.stream_port}")
         try:
             decoder_name = GStreamerPlatform.get_decoder()
             
@@ -1404,12 +1443,15 @@ class VideoReceiver:
             is_multicast = self.server_ip.startswith("239.") or self.server_ip.startswith("224.")
             
             if is_multicast:
+                # Use auto-multicast which should handle interface selection automatically
                 pipeline_str = (
-                    f"udpsrc address={self.server_ip} port={self.stream_port} auto-multicast=true "
+                    f"udpsrc address={self.server_ip} port={self.stream_port} "
+                    f"auto-multicast=true "
                     f'caps="application/x-rtp, media=(string)video, encoding-name=(string)H265, '
                     f'clock-rate=(int)90000" ! '
                     f"rtpptdemux name=demux"
                 )
+                print(f"[INFO] Multicast receiver: {self.server_ip}:{self.stream_port}")
             else:
                 # Unicast: bind to port only, receive from any source
                 pipeline_str = (
