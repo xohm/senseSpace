@@ -1380,8 +1380,10 @@ class VideoReceiver:
             # Single udpsrc → rtpptdemux (pads created dynamically)
             # CRITICAL: Must specify RTP caps with encoding-name=H265 for proper demuxing
             # Match the working test command caps exactly
+            # IMPORTANT: Use multicast address (239.255.0.1), not server IP
+            multicast_address = "239.255.0.1"  # Organization-local multicast group
             pipeline_str = (
-                f"udpsrc address={self.server_ip} port={self.stream_port} auto-multicast=true "
+                f"udpsrc address={multicast_address} port={self.stream_port} auto-multicast=true "
                 f'caps="application/x-rtp, media=(string)video, encoding-name=(string)H265, '
                 f'clock-rate=(int)90000" ! '
                 f"rtpptdemux name=demux"
