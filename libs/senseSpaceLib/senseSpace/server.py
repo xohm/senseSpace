@@ -903,6 +903,7 @@ class SenseSpaceServer:
 
             # Enable positional tracking (required for body tracking)
             tracking_params = sl.PositionalTrackingParameters()
+            tracking_params.set_as_static = True  # Camera is static, improves tracking stability
             status = self.camera.enable_positional_tracking(tracking_params)
             if status != sl.ERROR_CODE.SUCCESS:
                 print(f"[ERROR] Failed to enable positional tracking: {status}")
@@ -915,9 +916,7 @@ class SenseSpaceServer:
                 body_params.enable_tracking = True
                 body_params.enable_body_fitting = True
                 body_params.body_format = sl.BODY_FORMAT.BODY_34
-                body_params.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE  # Changed from FAST to ACCURATE for better stability
-                body_params.prediction_timeout_s = 0.5  # Increased from default 0.2s - keep tracking longer during occlusions
-                body_params.max_range = 10.0  # Limit tracking range to 10m for better accuracy
+                body_params.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_FAST
 
                 status = self.camera.enable_body_tracking(body_params)
                 if status != sl.ERROR_CODE.SUCCESS:
@@ -1402,18 +1401,12 @@ class SenseSpaceServer:
                     except Exception as e:
                         print(f"[WARNING] Failed to stream video frame: {e}")
                 
-                # Retrieve bodies with proper error handling for different SDK versions
+                # Retrieve bodies (simplified - match fusion approach)
                 try:
-                    if hasattr(sl, 'BodyTrackingRuntimeParameters'):
-                        self.camera.retrieve_bodies(bodies, sl.BodyTrackingRuntimeParameters(), 0)
-                    else:
-                        self.camera.retrieve_bodies(bodies)
-                except TypeError:
-                    try:
-                        self.camera.retrieve_bodies(bodies, 0)
-                    except Exception as e:
-                        print(f'[WARNING] retrieve_bodies failed: {e}')
-                        continue
+                    self.camera.retrieve_bodies(bodies)
+                except Exception as e:
+                    print(f'[WARNING] retrieve_bodies failed: {e}')
+                    continue
                 
                 # Apply body tracking filter to remove duplicates (if enabled)
                 if self.enable_body_filter:
