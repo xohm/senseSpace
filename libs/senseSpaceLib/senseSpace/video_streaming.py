@@ -13,8 +13,10 @@ Supports:
 # MUST set GST_DEBUG before importing GStreamer
 import os
 if os.getenv('GST_DEBUG') is None:
+    # TEMP: Enable verbose debugging for RTP and H.265
+    os.environ['GST_DEBUG'] = 'rtph265depay:5,h265parse:5,nvh265dec:5'
     # Set debug level: 2 for warnings and errors only (less verbose)
-    os.environ['GST_DEBUG'] = '2'
+    #os.environ['GST_DEBUG'] = '2'
     # Uncomment for verbose debugging: os.environ['GST_DEBUG'] = 'udpsrc:6,rtph265depay:5'
 
 import gi
@@ -1437,9 +1439,10 @@ class VideoReceiver:
             decoder_name = GStreamerPlatform.get_decoder()
             
             if is_rgb:
-                # Create RGB decoder chain with proper RTP caps
+                # Create RGB decoder chain with proper RTP caps + jitter buffer for WiFi
                 elements_str = (
                     f"capsfilter caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H265,payload={pt}\" ! "
+                    f"rtpjitterbuffer latency=200 drop-on-latency=true ! "
                     f"queue ! "
                     f"rtph265depay ! "
                     f"h265parse ! "
@@ -1466,9 +1469,10 @@ class VideoReceiver:
                 else:
                     print(f"[ERROR] Failed to link RGB pad for camera {cam_idx}")
             else:
-                # Create Depth decoder chain with proper RTP caps
+                # Create Depth decoder chain with proper RTP caps + jitter buffer for WiFi
                 elements_str = (
                     f"capsfilter caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H265,payload={pt}\" ! "
+                    f"rtpjitterbuffer latency=200 drop-on-latency=true ! "
                     f"queue ! "
                     f"rtph265depay ! "
                     f"h265parse ! "
