@@ -1482,6 +1482,21 @@ class VideoReceiver:
                     if appsink:
                         appsink.connect('new-sample', self._on_rgb_sample)
                         self.rgb_sinks[cam_idx] = appsink
+                        
+                        # Add probe to appsink to monitor data flow
+                        appsink_pad = appsink.get_static_pad('sink')
+                        if appsink_pad:
+                            def rgb_appsink_probe(pad, info, cam_idx=cam_idx):
+                                if not hasattr(self, f'_rgb_appsink_probe_count_{cam_idx}'):
+                                    setattr(self, f'_rgb_appsink_probe_count_{cam_idx}', 0)
+                                count = getattr(self, f'_rgb_appsink_probe_count_{cam_idx}')
+                                count += 1
+                                setattr(self, f'_rgb_appsink_probe_count_{cam_idx}', count)
+                                if count <= 3:
+                                    print(f"[DEBUG] RGB CAM{cam_idx} appsink received buffer #{count}")
+                                return Gst.PadProbeReturn.OK
+                            appsink_pad.add_probe(Gst.PadProbeType.BUFFER, rgb_appsink_probe)
+                        
                         print(f"[INFO] RGB receiver connected: Camera {cam_idx}, PT={pt}")
                 else:
                     print(f"[ERROR] Failed to link RGB pad for camera {cam_idx}")
@@ -1511,6 +1526,21 @@ class VideoReceiver:
                     if appsink:
                         appsink.connect('new-sample', self._on_depth_sample)
                         self.depth_sinks[cam_idx] = appsink
+                        
+                        # Add probe to appsink to monitor data flow
+                        appsink_pad = appsink.get_static_pad('sink')
+                        if appsink_pad:
+                            def depth_appsink_probe(pad, info, cam_idx=cam_idx):
+                                if not hasattr(self, f'_depth_appsink_probe_count_{cam_idx}'):
+                                    setattr(self, f'_depth_appsink_probe_count_{cam_idx}', 0)
+                                count = getattr(self, f'_depth_appsink_probe_count_{cam_idx}')
+                                count += 1
+                                setattr(self, f'_depth_appsink_probe_count_{cam_idx}', count)
+                                if count <= 3:
+                                    print(f"[DEBUG] Depth CAM{cam_idx} appsink received buffer #{count}")
+                                return Gst.PadProbeReturn.OK
+                            appsink_pad.add_probe(Gst.PadProbeType.BUFFER, depth_appsink_probe)
+                        
                         print(f"[INFO] Depth receiver connected: Camera {cam_idx}, PT={pt}")
                 else:
                     print(f"[ERROR] Failed to link Depth pad for camera {cam_idx}")
