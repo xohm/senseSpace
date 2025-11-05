@@ -13,9 +13,10 @@ Supports:
 # MUST set GST_DEBUG before importing GStreamer
 import os
 if os.getenv('GST_DEBUG') is None:
-    # Set debug level: 2 for warnings and errors only (less verbose)
-    os.environ['GST_DEBUG'] = '2'
-    # Uncomment for verbose debugging: os.environ['GST_DEBUG'] = 'udpsrc:6,rtph265depay:5'
+    # Set debug level: 3 for warnings, errors, and info
+    # Enable verbose debugging for H.265 decoder chain
+    os.environ['GST_DEBUG'] = '3,rtph265depay:5,h265parse:5,nvh265dec:5'
+    # Uncomment for less verbose: os.environ['GST_DEBUG'] = '2'
 
 import gi
 gi.require_version('Gst', '1.0')
@@ -1492,8 +1493,13 @@ class VideoReceiver:
                     f"appsink name=rgb_sink_{cam_idx} emit-signals=true sync=false max-buffers=1 drop=true"
                 )
                 
+                print(f"[DEBUG] Creating RGB bin for CAM{cam_idx}: {elements_str}")
+                
                 bin = Gst.parse_bin_from_description(elements_str, True)
                 self.rgb_pipeline.add(bin)
+                
+                # Add bus watch for this bin to catch decoder errors
+                bin.set_name(f'rgb_bin_{cam_idx}')
                 
                 # Link demux pad to bin
                 sink_pad = bin.get_static_pad('sink')
