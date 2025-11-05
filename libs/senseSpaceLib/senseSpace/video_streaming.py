@@ -1481,9 +1481,11 @@ class VideoReceiver:
             decoder_name = GStreamerPlatform.get_decoder()
             
             if is_rgb:
-                # Create RGB decoder chain with proper RTP caps
+                # Create RGB decoder chain with RTP jitter buffer for WiFi streaming
+                # rtpjitterbuffer handles packet reordering and loss over unreliable networks
                 elements_str = (
                     f"capsfilter caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H265,payload={pt}\" ! "
+                    f"rtpjitterbuffer latency=200 drop-on-latency=true mode=1 ! "
                     f"queue ! "
                     f"rtph265depay ! "
                     f"h265parse ! "
@@ -1535,9 +1537,11 @@ class VideoReceiver:
                 else:
                     print(f"[ERROR] Failed to link RGB pad for camera {cam_idx}")
             else:
-                # Create Depth decoder chain with proper RTP caps
+                # Create Depth decoder chain with RTP jitter buffer for WiFi streaming
+                # rtpjitterbuffer handles packet reordering and loss over unreliable networks
                 elements_str = (
                     f"capsfilter caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H265,payload={pt}\" ! "
+                    f"rtpjitterbuffer latency=200 drop-on-latency=true mode=1 ! "
                     f"queue ! "
                     f"rtph265depay ! "
                     f"h265parse ! "
