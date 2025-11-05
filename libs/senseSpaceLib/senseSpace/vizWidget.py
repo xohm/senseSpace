@@ -103,14 +103,6 @@ class SkeletonGLWidget(QGLWidget):
         with QtCore.QMutexLocker(self.frame_lock):
             self.current_frame = frame
             self.last_frame_time = time.time()
-            
-            # Debug: Log frame updates
-            if not hasattr(self, '_frame_update_count'):
-                self._frame_update_count = 0
-            self._frame_update_count += 1
-            if self._frame_update_count <= 5 or self._frame_update_count % 60 == 0:
-                people_count = len(frame.people) if hasattr(frame, 'people') and frame.people else 0
-                print(f"[DEBUG] update_frame called #{self._frame_update_count}: {people_count} people")
     
     def get_current_frame(self) -> Optional[Frame]:
         """Thread-safe getter for current frame"""
@@ -200,25 +192,10 @@ class SkeletonGLWidget(QGLWidget):
 
         # Get current frame
         frame = self.get_current_frame()
-        
-        # Debug: Log when paintGL is called without a frame
-        if not hasattr(self, '_paint_count'):
-            self._paint_count = 0
-            self._paint_with_frame = 0
-            self._paint_without_frame = 0
-        self._paint_count += 1
-        
+
         if frame is None:
-            self._paint_without_frame += 1
-            if self._paint_count <= 10 or self._paint_count % 120 == 0:
-                print(f"[DEBUG] paintGL #{self._paint_count}: NO FRAME (total no-frame: {self._paint_without_frame})")
             self.draw_no_data()
             return
-        
-        self._paint_with_frame += 1
-        if self._paint_count <= 10 or self._paint_count % 120 == 0:
-            people_count = len(frame.people) if hasattr(frame, 'people') and frame.people else 0
-            print(f"[DEBUG] paintGL #{self._paint_count}: HAS FRAME with {people_count} people (calling draw_custom)")
 
         # Draw scene components (override individual methods for custom viz)
         self.draw_floor(frame)
