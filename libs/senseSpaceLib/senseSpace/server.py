@@ -1074,6 +1074,22 @@ class SenseSpaceServer:
             self.video_streamer.start()
             
             print("[INFO] Video streamer started - pipelines should be PLAYING")
+            
+            # Test: Push a test frame to verify pipeline works
+            try:
+                import numpy as np
+                test_rgb = np.zeros((camera_height, camera_width, 3), dtype=np.uint8)
+                test_depth = np.zeros((camera_height, camera_width), dtype=np.float32)
+                test_frames_rgb = [test_rgb] * num_cameras
+                test_frames_depth = [test_depth] * num_cameras
+                print(f"[DEBUG] Pushing test frame to verify pipeline...")
+                self.video_streamer.push_camera_frames(test_frames_rgb, test_frames_depth)
+                print(f"[DEBUG] Test frame pushed successfully!")
+            except Exception as e:
+                print(f"[ERROR] Failed to push test frame: {e}")
+                import traceback
+                traceback.print_exc()
+            
             print("[INFO] Video streamer initialized successfully")
         except Exception as e:
             print(f"[ERROR] Failed to initialize video streamer: {e}")
