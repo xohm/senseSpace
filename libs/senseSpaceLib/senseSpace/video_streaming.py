@@ -1405,11 +1405,14 @@ class VideoReceiver:
             # For WiFi/remote connections, explicitly set multicast-iface to ensure proper routing
             # The udpsrc will automatically join the multicast group on the default interface
             # If you have multiple network interfaces, you may need to set multicast-iface=<interface>
+            # CRITICAL: Add rtpjitterbuffer BEFORE rtpptdemux to handle packet reordering/loss
+            # This ensures all payload types get proper packet ordering before demuxing
             pipeline_str = (
                 f"udpsrc address={multicast_address} port={self.stream_port} "
                 f"auto-multicast=true reuse=true "
                 f'caps="application/x-rtp, media=(string)video, encoding-name=(string)H265, '
                 f'clock-rate=(int)90000" ! '
+                f"rtpjitterbuffer latency=200 drop-on-latency=true mode=1 ! "
                 f"rtpptdemux name=demux"
             )
             
@@ -1481,11 +1484,10 @@ class VideoReceiver:
             decoder_name = GStreamerPlatform.get_decoder()
             
             if is_rgb:
-                # Create RGB decoder chain with RTP jitter buffer for WiFi streaming
-                # rtpjitterbuffer handles packet reordering and loss over unreliable networks
+                # Create RGB decoder chain with proper RTP caps
+                # Jitter buffering now handled at udpsrc level (before rtpptdemux)
                 elements_str = (
                     f"capsfilter caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H265,payload={pt}\" ! "
-                    f"rtpjitterbuffer latency=200 drop-on-latency=true mode=1 ! "
                     f"queue ! "
                     f"rtph265depay ! "
                     f"h265parse ! "
@@ -1537,11 +1539,10 @@ class VideoReceiver:
                 else:
                     print(f"[ERROR] Failed to link RGB pad for camera {cam_idx}")
             else:
-                # Create Depth decoder chain with RTP jitter buffer for WiFi streaming
-                # rtpjitterbuffer handles packet reordering and loss over unreliable networks
+                # Create Depth decoder chain with proper RTP caps
+                # Jitter buffering now handled at udpsrc level (before rtpptdemux)
                 elements_str = (
                     f"capsfilter caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H265,payload={pt}\" ! "
-                    f"rtpjitterbuffer latency=200 drop-on-latency=true mode=1 ! "
                     f"queue ! "
                     f"rtph265depay ! "
                     f"h265parse ! "
@@ -1891,10 +1892,12 @@ class MultiCameraVideoReceiver:
         try:
             decoder_name = GStreamerPlatform.get_decoder()
             
-            # udpsrc -> rtpmp2tdepay -> tsdemux -> (dynamically link to decoders)
+            # udpsrc -> jitterbuffer -> rtpmp2tdepay -> tsdemux -> (dynamically link to decoders)
+            # Add jitter buffer for WiFi/remote streaming reliability
             pipeline_str = (
                 f"udpsrc port={self.rgb_port} ! "
                 f"application/x-rtp ! "
+                f"rtpjitterbuffer latency=200 drop-on-latency=true mode=1 ! "
                 f"rtpmp2tdepay ! "
                 f"tsdemux name=demux "
             )
@@ -1916,9 +1919,11 @@ class MultiCameraVideoReceiver:
         try:
             decoder_name = GStreamerPlatform.get_decoder()
             
+            # Add jitter buffer for WiFi/remote streaming reliability
             pipeline_str = (
                 f"udpsrc port={self.depth_port} ! "
                 f"application/x-rtp ! "
+                f"rtpjitterbuffer latency=200 drop-on-latency=true mode=1 ! "
                 f"rtpmp2tdepay ! "
                 f"tsdemux name=demux "
             )
