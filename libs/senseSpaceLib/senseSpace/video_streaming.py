@@ -1391,8 +1391,26 @@ class VideoReceiver:
             
             logger.debug(f"RTP demux receiver base pipeline: {pipeline_str}")
             print(f"[DEBUG] RTP demux receiver pipeline (single port {self.stream_port})")
+            print(f"[DEBUG] Multicast address: {multicast_address}")
             
             self.rgb_pipeline = Gst.parse_launch(pipeline_str)
+            
+            # Get udpsrc element and add probe to monitor packet reception
+            udpsrc = self.rgb_pipeline.get_by_name('udpsrc0')
+            if udpsrc:
+                srcpad = udpsrc.get_static_pad('src')
+                if srcpad:
+                    # Add probe to count packets
+                    self._udp_packet_count = 0
+                    def udp_probe_callback(pad, info):
+                        self._udp_packet_count += 1
+                        if self._udp_packet_count <= 5:
+                            print(f"[DEBUG] UDP packet #{self._udp_packet_count} received from multicast {multicast_address}:{self.stream_port}")
+                        elif self._udp_packet_count == 100:
+                            print(f"[DEBUG] Received 100 UDP packets from multicast stream")
+                        return Gst.PadProbeReturn.OK
+                    srcpad.add_probe(Gst.PadProbeType.BUFFER, udp_probe_callback)
+                    print(f"[DEBUG] Added UDP packet probe to monitor multicast reception")
             
             # Get demux element to connect pad-added signal
             demux = self.rgb_pipeline.get_by_name('demux')
@@ -1604,6 +1622,7 @@ class VideoReceiver:
         """Callback for new RGB sample"""
         sample = appsink.emit('pull-sample')
         if sample is None:
+            print("[DEBUG] _on_rgb_sample: No sample available")
             return Gst.FlowReturn.OK
         
         try:
@@ -1627,6 +1646,7 @@ class VideoReceiver:
             # Extract data
             success, map_info = buf.map(Gst.MapFlags.READ)
             if not success:
+                print(f"[DEBUG] RGB CAM{camera_idx}: Failed to map buffer")
                 return Gst.FlowReturn.OK
             
             # Convert to numpy array
@@ -1635,11 +1655,21 @@ class VideoReceiver:
             
             buf.unmap(map_info)
             
-            #print(f"[DEBUG] RGB frame CAM{camera_idx} received: {width}x{height}")
+            # Debug counter
+            if not hasattr(self, '_rgb_recv_count'):
+                self._rgb_recv_count = {}
+            if camera_idx not in self._rgb_recv_count:
+                self._rgb_recv_count[camera_idx] = 0
+            self._rgb_recv_count[camera_idx] += 1
+            
+            if self._rgb_recv_count[camera_idx] <= 5:
+                print(f"[DEBUG] RGB frame CAM{camera_idx} #{self._rgb_recv_count[camera_idx]} received: {width}x{height}")
             
             # Call callback with camera index
             if self.rgb_callback:
                 self.rgb_callback(frame, camera_idx)
+            else:
+                print(f"[WARNING] RGB frame CAM{camera_idx} received but no callback set!")
             
         except Exception as e:
             logger.error(f"Error processing RGB sample: {e}")
