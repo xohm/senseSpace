@@ -13,10 +13,9 @@ Supports:
 # MUST set GST_DEBUG before importing GStreamer
 import os
 if os.getenv('GST_DEBUG') is None:
-    # Set debug level: 3 for warnings, errors, and info
-    # Enable verbose debugging for H.265 decoder chain
-    os.environ['GST_DEBUG'] = '3,rtph265depay:5,h265parse:5,nvh265dec:5'
-    # Uncomment for less verbose: os.environ['GST_DEBUG'] = '2'
+    # Set debug level: 2 for warnings and errors only (less verbose)
+    os.environ['GST_DEBUG'] = '2'
+    # Uncomment for verbose debugging: os.environ['GST_DEBUG'] = 'udpsrc:6,rtph265depay:5'
 
 import gi
 gi.require_version('Gst', '1.0')
@@ -227,7 +226,7 @@ class MultiCameraVideoStreamer:
     Automatically starts/stops streaming based on active client count.
     """
     
-    def __init__(self, num_cameras=1, host='239.255.0.1', stream_port=5000,
+    def __init__(self, num_cameras=1, host='239.0.0.1', stream_port=5000,
                  camera_width=1280, camera_height=720, framerate=30,
                  enable_client_detection=True, client_timeout=5.0):
         """
@@ -235,7 +234,7 @@ class MultiCameraVideoStreamer:
         
         Args:
             num_cameras: Number of cameras to multiplex (RGB + Depth each)
-            host: Multicast group address (default: 239.255.0.1 - organization-local)
+            host: Multicast group address (default: 239.0.0.1 - organization-local)
             stream_port: Single UDP port for ALL streams (default: 5000)
             camera_width: Width of each individual camera
             camera_height: Height of each individual camera
@@ -1185,29 +1184,11 @@ class VideoReceiver:
         logger.info(f"VideoReceiver initialized: {server_ip}:{self.stream_port}")
         logger.info(f"Cameras: {num_cameras}, Heartbeat: {'enabled' if send_heartbeat else 'disabled'}")
     
-    def _check_multicast_route(self):
-        """Check if multicast route exists, suggest fix if not"""
-        try:
-            import subprocess
-            result = subprocess.run(['ip', 'route', 'show'], capture_output=True, text=True, timeout=2)
-            if '224.0.0.0/4' not in result.stdout:
-                print("[WARNING] No multicast route detected!")
-                print("[WARNING] For WiFi/remote streaming, add multicast route:")
-                print("[WARNING]   sudo ip route add 224.0.0.0/4 dev <your-interface>")
-                print("[WARNING] Example: sudo ip route add 224.0.0.0/4 dev wlp0s20f3")
-                print("[WARNING] Find your interface: ip -br a")
-                logger.warning("No multicast route detected - remote streaming may not work")
-        except:
-            pass  # Silently ignore if route check fails
-    
     def start(self):
         """Start receiving RGB and depth streams"""
         if self.is_receiving:
             logger.warning("Already receiving")
             return
-        
-        # Check multicast routing (especially important for WiFi/remote connections)
-        self._check_multicast_route()
         
         self._create_rgb_receiver()
         self._create_depth_receiver()
@@ -1399,45 +1380,17 @@ class VideoReceiver:
             # Single udpsrc → rtpptdemux (pads created dynamically)
             # CRITICAL: Must specify RTP caps with encoding-name=H265 for proper demuxing
             # Match the working test command caps exactly
-            # IMPORTANT: Use multicast address (239.255.0.1), not server IP
-            multicast_address = "239.255.0.1"  # Organization-local multicast group
-            
-            # For WiFi/remote connections, explicitly set multicast-iface to ensure proper routing
-            # The udpsrc will automatically join the multicast group on the default interface
-            # If you have multiple network interfaces, you may need to set multicast-iface=<interface>
-            # CRITICAL: Add rtpjitterbuffer BEFORE rtpptdemux to handle packet reordering/loss
-            # This ensures all payload types get proper packet ordering before demuxing
             pipeline_str = (
-                f"udpsrc address={multicast_address} port={self.stream_port} "
-                f"auto-multicast=true reuse=true "
+                f"udpsrc address={self.server_ip} port={self.stream_port} auto-multicast=true "
                 f'caps="application/x-rtp, media=(string)video, encoding-name=(string)H265, '
                 f'clock-rate=(int)90000" ! '
-                f"rtpjitterbuffer latency=200 drop-on-latency=true mode=1 ! "
                 f"rtpptdemux name=demux"
             )
             
             logger.debug(f"RTP demux receiver base pipeline: {pipeline_str}")
             print(f"[DEBUG] RTP demux receiver pipeline (single port {self.stream_port})")
-            print(f"[DEBUG] Multicast address: {multicast_address}")
             
             self.rgb_pipeline = Gst.parse_launch(pipeline_str)
-            
-            # Get udpsrc element and add probe to monitor packet reception
-            udpsrc = self.rgb_pipeline.get_by_name('udpsrc0')
-            if udpsrc:
-                srcpad = udpsrc.get_static_pad('src')
-                if srcpad:
-                    # Add probe to count packets
-                    self._udp_packet_count = 0
-                    def udp_probe_callback(pad, info):
-                        self._udp_packet_count += 1
-                        if self._udp_packet_count <= 5:
-                            print(f"[DEBUG] UDP packet #{self._udp_packet_count} received from multicast {multicast_address}:{self.stream_port}")
-                        elif self._udp_packet_count == 100:
-                            print(f"[DEBUG] Received 100 UDP packets from multicast stream")
-                        return Gst.PadProbeReturn.OK
-                    srcpad.add_probe(Gst.PadProbeType.BUFFER, udp_probe_callback)
-                    print(f"[DEBUG] Added UDP packet probe to monitor multicast reception")
             
             # Get demux element to connect pad-added signal
             demux = self.rgb_pipeline.get_by_name('demux')
@@ -1485,7 +1438,6 @@ class VideoReceiver:
             
             if is_rgb:
                 # Create RGB decoder chain with proper RTP caps
-                # Jitter buffering now handled at udpsrc level (before rtpptdemux)
                 elements_str = (
                     f"capsfilter caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H265,payload={pt}\" ! "
                     f"queue ! "
@@ -1497,13 +1449,8 @@ class VideoReceiver:
                     f"appsink name=rgb_sink_{cam_idx} emit-signals=true sync=false max-buffers=1 drop=true"
                 )
                 
-                print(f"[DEBUG] Creating RGB bin for CAM{cam_idx}: {elements_str}")
-                
                 bin = Gst.parse_bin_from_description(elements_str, True)
                 self.rgb_pipeline.add(bin)
-                
-                # Add bus watch for this bin to catch decoder errors
-                bin.set_name(f'rgb_bin_{cam_idx}')
                 
                 # Link demux pad to bin
                 sink_pad = bin.get_static_pad('sink')
@@ -1513,34 +1460,13 @@ class VideoReceiver:
                     # Connect appsink callback
                     appsink = bin.get_by_name(f'rgb_sink_{cam_idx}')
                     if appsink:
-                        # Verify emit-signals is set
-                        emit_signals = appsink.get_property('emit-signals')
-                        print(f"[DEBUG] RGB CAM{cam_idx} appsink emit-signals={emit_signals}")
-                        
-                        handler_id = appsink.connect('new-sample', self._on_rgb_sample)
-                        print(f"[DEBUG] RGB CAM{cam_idx} connected new-sample handler (ID={handler_id})")
+                        appsink.connect('new-sample', self._on_rgb_sample)
                         self.rgb_sinks[cam_idx] = appsink
-                        
-                        # Add probe to appsink to monitor data flow
-                        appsink_pad = appsink.get_static_pad('sink')
-                        if appsink_pad:
-                            def rgb_appsink_probe(pad, info, cam_idx=cam_idx):
-                                if not hasattr(self, f'_rgb_appsink_probe_count_{cam_idx}'):
-                                    setattr(self, f'_rgb_appsink_probe_count_{cam_idx}', 0)
-                                count = getattr(self, f'_rgb_appsink_probe_count_{cam_idx}')
-                                count += 1
-                                setattr(self, f'_rgb_appsink_probe_count_{cam_idx}', count)
-                                if count <= 3:
-                                    print(f"[DEBUG] RGB CAM{cam_idx} appsink received buffer #{count}")
-                                return Gst.PadProbeReturn.OK
-                            appsink_pad.add_probe(Gst.PadProbeType.BUFFER, rgb_appsink_probe)
-                        
                         print(f"[INFO] RGB receiver connected: Camera {cam_idx}, PT={pt}")
                 else:
                     print(f"[ERROR] Failed to link RGB pad for camera {cam_idx}")
             else:
                 # Create Depth decoder chain with proper RTP caps
-                # Jitter buffering now handled at udpsrc level (before rtpptdemux)
                 elements_str = (
                     f"capsfilter caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H265,payload={pt}\" ! "
                     f"queue ! "
@@ -1565,21 +1491,6 @@ class VideoReceiver:
                     if appsink:
                         appsink.connect('new-sample', self._on_depth_sample)
                         self.depth_sinks[cam_idx] = appsink
-                        
-                        # Add probe to appsink to monitor data flow
-                        appsink_pad = appsink.get_static_pad('sink')
-                        if appsink_pad:
-                            def depth_appsink_probe(pad, info, cam_idx=cam_idx):
-                                if not hasattr(self, f'_depth_appsink_probe_count_{cam_idx}'):
-                                    setattr(self, f'_depth_appsink_probe_count_{cam_idx}', 0)
-                                count = getattr(self, f'_depth_appsink_probe_count_{cam_idx}')
-                                count += 1
-                                setattr(self, f'_depth_appsink_probe_count_{cam_idx}', count)
-                                if count <= 3:
-                                    print(f"[DEBUG] Depth CAM{cam_idx} appsink received buffer #{count}")
-                                return Gst.PadProbeReturn.OK
-                            appsink_pad.add_probe(Gst.PadProbeType.BUFFER, depth_appsink_probe)
-                        
                         print(f"[INFO] Depth receiver connected: Camera {cam_idx}, PT={pt}")
                 else:
                     print(f"[ERROR] Failed to link Depth pad for camera {cam_idx}")
@@ -1691,7 +1602,6 @@ class VideoReceiver:
         """Callback for new RGB sample"""
         sample = appsink.emit('pull-sample')
         if sample is None:
-            print("[DEBUG] _on_rgb_sample: No sample available")
             return Gst.FlowReturn.OK
         
         try:
@@ -1715,7 +1625,6 @@ class VideoReceiver:
             # Extract data
             success, map_info = buf.map(Gst.MapFlags.READ)
             if not success:
-                print(f"[DEBUG] RGB CAM{camera_idx}: Failed to map buffer")
                 return Gst.FlowReturn.OK
             
             # Convert to numpy array
@@ -1724,21 +1633,11 @@ class VideoReceiver:
             
             buf.unmap(map_info)
             
-            # Debug counter
-            if not hasattr(self, '_rgb_recv_count'):
-                self._rgb_recv_count = {}
-            if camera_idx not in self._rgb_recv_count:
-                self._rgb_recv_count[camera_idx] = 0
-            self._rgb_recv_count[camera_idx] += 1
-            
-            if self._rgb_recv_count[camera_idx] <= 5:
-                print(f"[DEBUG] RGB frame CAM{camera_idx} #{self._rgb_recv_count[camera_idx]} received: {width}x{height}")
+            #print(f"[DEBUG] RGB frame CAM{camera_idx} received: {width}x{height}")
             
             # Call callback with camera index
             if self.rgb_callback:
                 self.rgb_callback(frame, camera_idx)
-            else:
-                print(f"[WARNING] RGB frame CAM{camera_idx} received but no callback set!")
             
         except Exception as e:
             logger.error(f"Error processing RGB sample: {e}")
@@ -1892,12 +1791,10 @@ class MultiCameraVideoReceiver:
         try:
             decoder_name = GStreamerPlatform.get_decoder()
             
-            # udpsrc -> jitterbuffer -> rtpmp2tdepay -> tsdemux -> (dynamically link to decoders)
-            # Add jitter buffer for WiFi/remote streaming reliability
+            # udpsrc -> rtpmp2tdepay -> tsdemux -> (dynamically link to decoders)
             pipeline_str = (
                 f"udpsrc port={self.rgb_port} ! "
                 f"application/x-rtp ! "
-                f"rtpjitterbuffer latency=200 drop-on-latency=true mode=1 ! "
                 f"rtpmp2tdepay ! "
                 f"tsdemux name=demux "
             )
@@ -1919,11 +1816,9 @@ class MultiCameraVideoReceiver:
         try:
             decoder_name = GStreamerPlatform.get_decoder()
             
-            # Add jitter buffer for WiFi/remote streaming reliability
             pipeline_str = (
                 f"udpsrc port={self.depth_port} ! "
                 f"application/x-rtp ! "
-                f"rtpjitterbuffer latency=200 drop-on-latency=true mode=1 ! "
                 f"rtpmp2tdepay ! "
                 f"tsdemux name=demux "
             )
