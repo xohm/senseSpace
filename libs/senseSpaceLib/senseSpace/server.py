@@ -88,6 +88,11 @@ class SenseSpaceServer:
         self.stream_depth_port = stream_depth_port
         self.video_streamer = None
         
+        if enable_streaming:
+            print(f"[INFO] Video streaming enabled")
+            print(f"[INFO]   Stream host: {self.stream_host}")
+            print(f"[INFO]   Stream port: {self.stream_rgb_port}")
+        
         # Server state
         self.running = True
         
@@ -1063,9 +1068,12 @@ class SenseSpaceServer:
                 enable_client_detection=False  # Using udpsink - no client detection needed
             )
             
+            print(f"[INFO] Video streamer created with host={self.stream_host}, port={self.stream_rgb_port}")
+            
             # Start streaming immediately (using udpsink, no heartbeat needed)
             self.video_streamer.start()
             
+            print("[INFO] Video streamer started - pipelines should be PLAYING")
             print("[INFO] Video streamer initialized successfully")
         except Exception as e:
             print(f"[ERROR] Failed to initialize video streamer: {e}")
