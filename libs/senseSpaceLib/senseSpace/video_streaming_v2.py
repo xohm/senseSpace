@@ -164,6 +164,12 @@ class PerCameraStreamerClient:
         # Both streams go through the same rtpbin, different sessions, same RTP port
         # Simple approach like v1: separate pipelines to same port
         # rtpptdemux on receiver will demultiplex by PT
+        
+        # Configure encoder with frequent keyframes for faster recovery
+        # idr-interval=15 means keyframe every 15 frames (~0.5 seconds at 30fps)
+        # This provides faster video startup and recovery from packet loss
+        encoder_config = f"{encoder_name} bitrate=3000 idr-interval=15"
+        
         pipeline_str = (
             # RGB branch - PT 96, to same port
             f"appsrc name=src_rgb format=time is-live=true do-timestamp=true "
@@ -171,7 +177,7 @@ class PerCameraStreamerClient:
             f"framerate=(fraction){int(self.effective_fps)}/1 ! "
             f"queue max-size-buffers=2 leaky=downstream ! "
             f"videoconvert ! video/x-raw,format=NV12 ! "
-            f"{encoder_name} bitrate=3000 ! "
+            f"{encoder_config} ! "
             f"h265parse config-interval=1 ! "
             f"rtph265pay pt={rgb_pt} config-interval=1 ! "
             f"udpsink host={self.client_ip} port={rtp_port} sync=false async=false "
@@ -182,7 +188,7 @@ class PerCameraStreamerClient:
             f"framerate=(fraction){int(self.effective_fps)}/1 ! "
             f"queue max-size-buffers=2 leaky=downstream ! "
             f"videoconvert ! "
-            f"{encoder_name} bitrate=3000 ! "
+            f"{encoder_config} ! "
             f"h265parse config-interval=1 ! "
             f"rtph265pay pt={depth_pt} config-interval=1 ! "
             f"udpsink host={self.client_ip} port={rtp_port} sync=false async=false"
