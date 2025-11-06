@@ -1,12 +1,64 @@
 #!/usr/bin/env python3
 """
 Example: Interactive polygon fence creation on the floor
-- Arrow keys: Select tracked person (visualize with sphere at head)
-- SPACE: Add polygon point at selected person's floor position
-- BACKSPACE: Remove last polygon point
-- ENTER: Close polygon (finish)
-- SPACE (after closing): Clear polygon and start new one
-- Red circle appears on ground when person enters the polygon
+
+This example demonstrates creating a custom polygon fence on the floor plane
+by selecting tracked people and placing vertices at their ground positions.
+
+HOW TO USE:
+-----------
+1. Start the server with skeleton tracking running
+2. Run this script: python fence.py --server <SERVER_IP>
+3. Make sure at least one person is being tracked
+
+CONTROLS:
+---------
+Arrow Keys (Up/Down/Left/Right):
+    - Cycle through all tracked people
+    - Selected person is highlighted with a YELLOW SPHERE at their head
+
+SPACE:
+    - While building: Add a polygon point at the selected person's floor position
+    - After closing: Clear the polygon and start a new one
+
+BACKSPACE:
+    - Remove the last polygon point (only while building)
+
+ENTER:
+    - Close the polygon (requires minimum 3 points)
+    - Polygon becomes filled with semi-transparent green
+
+R:
+    - Toggle recording on/off
+
+VISUALIZATION:
+--------------
+- Building polygon: Orange outline with yellow point markers
+- Closed polygon: Green filled area with 50% transparency
+- Person inside polygon: RED CIRCLE appears on the ground under them
+- Selected person: Yellow sphere at head position
+
+WORKFLOW:
+---------
+1. Press arrow keys to select a person
+2. Press SPACE to place a vertex where they're standing
+3. Move to another position/person and press SPACE again
+4. Repeat until you have at least 3 points
+5. Press ENTER to close the polygon
+6. Anyone walking into the polygon will trigger a red circle on the ground
+7. Press SPACE to clear and start a new polygon
+
+TECHNICAL DETAILS:
+------------------
+- Uses vecMathHelper.insidePoly() for accurate 3D-to-2D projection
+- Polygon vertices are placed on the floor plane (y=0)
+- Detection projects pelvis position onto polygon plane
+- Ray casting algorithm determines if person is inside polygon
+
+Example use cases:
+- Define restricted zones in a space
+- Track when people enter/exit specific areas
+- Create virtual boundaries for interactive installations
 """
 
 import argparse
