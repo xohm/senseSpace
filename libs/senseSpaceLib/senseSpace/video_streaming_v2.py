@@ -165,10 +165,11 @@ class PerCameraStreamerClient:
         # Simple approach like v1: separate pipelines to same port
         # rtpptdemux on receiver will demultiplex by PT
         
-        # Configure encoder with frequent keyframes for faster recovery
-        # idr-interval=15 means keyframe every 15 frames (~0.5 seconds at 30fps)
-        # This provides faster video startup and recovery from packet loss
-        encoder_config = f"{encoder_name} bitrate=3000 idr-interval=15"
+        # Configure encoder with frequent keyframes for RGB (faster startup)
+        # RGB: idr-interval=15 (~0.5s at 30fps) - critical for fast visual recovery
+        # Depth: idr-interval=60 (~2s at 30fps) - less critical since lossless, saves bandwidth
+        rgb_encoder_config = f"{encoder_name} bitrate=3000 idr-interval=15"
+        depth_encoder_config = f"{encoder_name} bitrate=3000 idr-interval=60"
         
         pipeline_str = (
             # RGB branch - PT 96, to same port
@@ -177,7 +178,7 @@ class PerCameraStreamerClient:
             f"framerate=(fraction){int(self.effective_fps)}/1 ! "
             f"queue max-size-buffers=2 leaky=downstream ! "
             f"videoconvert ! video/x-raw,format=NV12 ! "
-            f"{encoder_config} ! "
+            f"{rgb_encoder_config} ! "
             f"h265parse config-interval=1 ! "
             f"rtph265pay pt={rgb_pt} config-interval=1 ! "
             f"udpsink host={self.client_ip} port={rtp_port} sync=false async=false "
@@ -188,7 +189,7 @@ class PerCameraStreamerClient:
             f"framerate=(fraction){int(self.effective_fps)}/1 ! "
             f"queue max-size-buffers=2 leaky=downstream ! "
             f"videoconvert ! "
-            f"{encoder_config} ! "
+            f"{depth_encoder_config} ! "
             f"h265parse config-interval=1 ! "
             f"rtph265pay pt={depth_pt} config-interval=1 ! "
             f"udpsink host={self.client_ip} port={rtp_port} sync=false async=false"
