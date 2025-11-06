@@ -199,108 +199,81 @@ class SkeletonVisualizer3D:
     
     def _draw_joint_orientations(self, skeleton, axis_length=100.0):
         """
-        Draw RGB coordinate axes showing world-space orientation of each joint.
-        Properly chains local rotations from root to leaves for rigging compatibility.
+        Draw RGB coordinate axes showing bone-aligned orientation of each joint.
         
-        According to ZED SDK docs:
-        - local_orientation_per_joint[i] = rotation of bone i relative to its parent
-        - To get world-space orientation: multiply all parent rotations from root
+        **CRITICAL FIX**: ZED SDK's local_orientation_per_joint does NOT align Y with bone!
+        Instead, we compute proper bone-aligned orientations from skeleton geometry:
+        - Y-axis = bone direction (parent → child)
+        - Z-axis = perpendicular to bone (computed from world-up)
+        - X-axis = cross product (right-handed system)
         
         :param skeleton: List of joint data (dict or objects with pos and ori)
         :param axis_length: Length of each axis in mm
         """
         import math
+        import numpy as np
         
         # Define BODY_34 skeleton hierarchy (parent index for each joint)
-        # Verified from ZED SDK diagram - bone structure for forward kinematics
         BODY34_PARENTS = [
             -1,  # 0: PELVIS (root, no parent)
-            0,   # 1: SPINE_NAVAL (parent: PELVIS)
-            1,   # 2: SPINE_CHEST (parent: SPINE_NAVAL)
-            2,   # 3: NECK (parent: SPINE_CHEST)
-            3,   # 4: LEFT_CLAVICLE (parent: NECK) ⚠️ clavicles branch from neck, not chest!
-            4,   # 5: LEFT_SHOULDER (parent: LEFT_CLAVICLE)
-            5,   # 6: LEFT_ELBOW (parent: LEFT_SHOULDER)
-            6,   # 7: LEFT_WRIST (parent: LEFT_ELBOW)
-            7,   # 8: LEFT_HAND (parent: LEFT_WRIST)
-            8,   # 9: LEFT_HANDTIP (parent: LEFT_HAND)
-            8,   # 10: LEFT_THUMB (parent: LEFT_HAND)
-            3,   # 11: RIGHT_CLAVICLE (parent: NECK) ⚠️ clavicles branch from neck, not chest!
-            11,  # 12: RIGHT_SHOULDER (parent: RIGHT_CLAVICLE)
-            12,  # 13: RIGHT_ELBOW (parent: RIGHT_SHOULDER)
-            13,  # 14: RIGHT_WRIST (parent: RIGHT_ELBOW)
-            14,  # 15: RIGHT_HAND (parent: RIGHT_WRIST)
-            15,  # 16: RIGHT_HANDTIP (parent: RIGHT_HAND)
-            15,  # 17: RIGHT_THUMB (parent: RIGHT_HAND)
-            0,   # 18: LEFT_HIP (parent: PELVIS)
-            18,  # 19: LEFT_KNEE (parent: LEFT_HIP)
-            19,  # 20: LEFT_ANKLE (parent: LEFT_KNEE)
-            20,  # 21: LEFT_FOOT (parent: LEFT_ANKLE)
-            0,   # 22: RIGHT_HIP (parent: PELVIS)
-            22,  # 23: RIGHT_KNEE (parent: RIGHT_HIP)
-            23,  # 24: RIGHT_ANKLE (parent: RIGHT_KNEE)
-            24,  # 25: RIGHT_FOOT (parent: RIGHT_ANKLE)
-            3,   # 26: HEAD (parent: NECK)
-            26,  # 27: NOSE (parent: HEAD)
-            26,  # 28: LEFT_EYE (parent: HEAD)
-            26,  # 29: LEFT_EAR (parent: HEAD) ⚠️ Note enum has LEFT_EYE=28, LEFT_EAR=29
-            26,  # 30: RIGHT_EYE (parent: HEAD)
-            26,  # 31: RIGHT_EAR (parent: HEAD)
-            20,  # 32: LEFT_HEEL (parent: LEFT_ANKLE) - heels connect to ankles per diagram
-            24,  # 33: RIGHT_HEEL (parent: RIGHT_ANKLE) - heels connect to ankles per diagram
+            0,   # 1: SPINE_NAVAL
+            1,   # 2: SPINE_CHEST
+            2,   # 3: NECK
+            3,   # 4: LEFT_CLAVICLE
+            4,   # 5: LEFT_SHOULDER
+            5,   # 6: LEFT_ELBOW
+            6,   # 7: LEFT_WRIST
+            7,   # 8: LEFT_HAND
+            8,   # 9: LEFT_HANDTIP
+            8,   # 10: LEFT_THUMB
+            3,   # 11: RIGHT_CLAVICLE
+            11,  # 12: RIGHT_SHOULDER
+            12,  # 13: RIGHT_ELBOW
+            13,  # 14: RIGHT_WRIST
+            14,  # 15: RIGHT_HAND
+            15,  # 16: RIGHT_HANDTIP
+            15,  # 17: RIGHT_THUMB
+            0,   # 18: LEFT_HIP
+            18,  # 19: LEFT_KNEE
+            19,  # 20: LEFT_ANKLE
+            20,  # 21: LEFT_FOOT
+            0,   # 22: RIGHT_HIP
+            22,  # 23: RIGHT_KNEE
+            23,  # 24: RIGHT_ANKLE
+            24,  # 25: RIGHT_FOOT
+            3,   # 26: HEAD
+            26,  # 27: NOSE
+            26,  # 28: LEFT_EYE
+            26,  # 29: LEFT_EAR
+            26,  # 30: RIGHT_EYE
+            26,  # 31: RIGHT_EAR
+            20,  # 32: LEFT_HEEL
+            24,  # 33: RIGHT_HEEL
         ]
         
-        def quat_multiply(q1, q2):
-            """Multiply quaternions: result = q1 * q2 (q1 applied first, then q2)"""
-            x1, y1, z1, w1 = q1
-            x2, y2, z2, w2 = q2
+        def normalize(v):
+            """Normalize a 3D vector"""
+            length = math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
+            if length < 0.0001:
+                return [0, 1, 0]  # Default to up if zero vector
+            return [v[0]/length, v[1]/length, v[2]/length]
+        
+        def cross(a, b):
+            """Cross product of two 3D vectors"""
             return [
-                w1*x2 + x1*w2 + y1*z2 - z1*y2,
-                w1*y2 - x1*z2 + y1*w2 + z1*x2,
-                w1*z2 + x1*y2 - y1*x2 + z1*w2,
-                w1*w2 - x1*x2 - y1*y2 - z1*z2
+                a[1]*b[2] - a[2]*b[1],
+                a[2]*b[0] - a[0]*b[2],
+                a[0]*b[1] - a[1]*b[0]
             ]
         
-        # Build world-space orientations by chaining from root
-        world_quats = {}
-        
-        for i in range(min(len(skeleton), len(BODY34_PARENTS))):
-            joint = skeleton[i]
-            
-            # Get local orientation quaternion
-            ori = joint.get('ori') if isinstance(joint, dict) else getattr(joint, 'ori', None)
-            if ori is None:
-                continue
-            
-            if isinstance(ori, dict):
-                local_q = [ori.get('x', 0), ori.get('y', 0), ori.get('z', 0), ori.get('w', 1)]
-            elif hasattr(ori, 'x'):
-                local_q = [ori.x, ori.y, ori.z, ori.w]
-            else:
-                continue
-            
-            parent_idx = BODY34_PARENTS[i]
-            
-            if parent_idx < 0:
-                # Root joint - local orientation IS world orientation
-                world_quats[i] = local_q
-            elif parent_idx in world_quats:
-                # Chain: world[i] = world[parent] * local[i]
-                world_quats[i] = quat_multiply(world_quats[parent_idx], local_q)
-            else:
-                # Parent not computed (shouldn't happen with proper ordering)
-                world_quats[i] = local_q
-        
-        # Draw orientation axes for all joints
+        # Draw bone-aligned orientations
         glDisable(GL_DEPTH_TEST)
         glLineWidth(2.0)
         
+        world_up = [0, 1, 0]  # World up direction
+        
         for i, joint in enumerate(skeleton):
-            # Skip if no world orientation computed
-            if i not in world_quats:
-                continue
-            
-            # Get position
+            # Get current joint position
             pos = joint['pos'] if isinstance(joint, dict) else getattr(joint, 'pos', None)
             if pos is None:
                 continue
@@ -310,54 +283,78 @@ class SkeletonVisualizer3D:
             else:
                 px, py, pz = pos["x"], pos["y"], pos["z"]
             
-            # Get world quaternion
-            qx, qy, qz, qw = world_quats[i]
-            
-            # Normalize quaternion
-            norm = math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw)
-            if norm < 0.001:
+            # Get parent joint
+            parent_idx = BODY34_PARENTS[i]
+            if parent_idx < 0:
+                # Root joint - draw at joint position with world orientation
+                draw_x, draw_y, draw_z = px, py, pz
+                y_axis = normalize([0, 1, 0])  # World up
+                z_axis = normalize([0, 0, 1])  # World forward
+                x_axis = normalize([1, 0, 0])  # World right
+            elif parent_idx < len(skeleton):
+                parent_joint = skeleton[parent_idx]
+                parent_pos = parent_joint['pos'] if isinstance(parent_joint, dict) else getattr(parent_joint, 'pos', None)
+                
+                if parent_pos is not None:
+                    # Get parent position - THIS is where we draw the orientation
+                    if hasattr(parent_pos, 'x'):
+                        ppx, ppy, ppz = parent_pos.x, parent_pos.y, parent_pos.z
+                    else:
+                        ppx, ppy, ppz = parent_pos["x"], parent_pos["y"], parent_pos["z"]
+                    
+                    # Draw orientation at parent joint (start of bone)
+                    draw_x, draw_y, draw_z = ppx, ppy, ppz
+                    
+                    # Compute bone direction (parent → child)
+                    bone_vec = [px - ppx, py - ppy, pz - ppz]
+                    bone_len = math.sqrt(bone_vec[0]**2 + bone_vec[1]**2 + bone_vec[2]**2)
+                    
+                    if bone_len < 1.0:
+                        # Skip very short bones, use world frame
+                        y_axis = [0, 1, 0]
+                        z_axis = [0, 0, 1]
+                        x_axis = [1, 0, 0]
+                    else:
+                        # Y-axis = normalized bone direction
+                        y_axis = normalize(bone_vec)
+                        
+                        # Z-axis = perpendicular to bone (in plane with world-up)
+                        # If bone is parallel to world-up, use world-forward instead
+                        dot_up = abs(y_axis[0]*world_up[0] + y_axis[1]*world_up[1] + y_axis[2]*world_up[2])
+                        if dot_up > 0.99:  # Nearly parallel
+                            z_axis = normalize(cross(y_axis, [0, 0, 1]))  # Use world forward
+                        else:
+                            z_axis = normalize(cross(y_axis, world_up))
+                        
+                        # X-axis = cross(Y, Z) to complete right-handed system
+                        x_axis = normalize(cross(y_axis, z_axis))
+                else:
+                    continue
+            else:
                 continue
-            qx, qy, qz, qw = qx/norm, qy/norm, qz/norm, qw/norm
             
-            # Convert quaternion to rotation matrix (column vectors)
-            # X-axis (red)
-            x_axis = [
-                (1 - 2*(qy*qy + qz*qz)) * axis_length,
-                (2*(qx*qy + qz*qw)) * axis_length,
-                (2*(qx*qz - qy*qw)) * axis_length
-            ]
+            # Scale axes
+            x_vec = [x_axis[0]*axis_length, x_axis[1]*axis_length, x_axis[2]*axis_length]
+            y_vec = [y_axis[0]*axis_length, y_axis[1]*axis_length, y_axis[2]*axis_length]
+            z_vec = [z_axis[0]*axis_length, z_axis[1]*axis_length, z_axis[2]*axis_length]
             
-            # Y-axis (green)
-            y_axis = [
-                (2*(qx*qy - qz*qw)) * axis_length,
-                (1 - 2*(qx*qx + qz*qz)) * axis_length,
-                (2*(qy*qz + qx*qw)) * axis_length
-            ]
-            
-            # Z-axis (blue)
-            z_axis = [
-                (2*(qx*qz + qy*qw)) * axis_length,
-                (2*(qy*qz - qx*qw)) * axis_length,
-                (1 - 2*(qx*qx + qy*qy)) * axis_length
-            ]
-            
-            # Draw axes
+            # Draw axes at the joint position (draw_x, draw_y, draw_z = parent position)
             glBegin(GL_LINES)
             
-            # X-axis (red)
+            # X-axis (red - right)
             glColor3f(1.0, 0.0, 0.0)
-            glVertex3f(px, py, pz)
-            glVertex3f(px + x_axis[0], py + x_axis[1], pz + x_axis[2])
+            glVertex3f(draw_x, draw_y, draw_z)
+            glVertex3f(draw_x + x_vec[0], draw_y + x_vec[1], draw_z + x_vec[2])
             
-            # Y-axis (green)
+            # Y-axis (green - bone direction)
             glColor3f(0.0, 1.0, 0.0)
-            glVertex3f(px, py, pz)
-            glVertex3f(px + y_axis[0], py + y_axis[1], pz + y_axis[2])
+            glVertex3f(draw_x, draw_y, draw_z)
+            glVertex3f(draw_x + y_vec[0], draw_y + y_vec[1], draw_z + y_vec[2])
             
-            # Z-axis (blue)
+            # Z-axis (blue - perpendicular)
             glColor3f(0.0, 0.0, 1.0)
-            glVertex3f(px, py, pz)
-            glVertex3f(px + z_axis[0], py + z_axis[1], pz + z_axis[2])
+            glVertex3f(draw_x, draw_y, draw_z)
+            glVertex3f(draw_x + z_vec[0], draw_y + z_vec[1], draw_z + z_vec[2])
             
             glEnd()
         

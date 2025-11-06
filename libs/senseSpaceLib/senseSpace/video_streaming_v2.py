@@ -162,21 +162,55 @@ class PerCameraStreamerClient:
         rgb_pt = 96
         depth_pt = 97
         
-        # Get hardware encoder
+        # Get hardware encoder based on platform
         from .video_streaming import GStreamerPlatform
+        import platform
+        
         encoder_name, encoder_props = GStreamerPlatform.get_encoder()
+        system = platform.system()
         
-        # Create SINGLE pipeline with multiplexed RGB+Depth using rtpbin
-        # Both streams go through the same rtpbin, different sessions, same RTP port
-        # Simple approach like v1: separate pipelines to same port
-        # rtpptdemux on receiver will demultiplex by PT
+        # Platform-specific encoder configuration for keyframe intervals
+        # RGB: Frequent keyframes (~0.5s) for fast video startup
+        # Depth: Less frequent keyframes (~2s) to save bandwidth (lossless anyway)
         
-        # Configure encoder with frequent keyframes for RGB (faster startup)
-        # RGB: gop-size=15 (~0.5s at 30fps) - critical for fast visual recovery
-        # Depth: gop-size=60 (~2s at 30fps) - less critical since lossless, saves bandwidth
-        # Note: nvh265enc uses 'gop-size', x265enc uses 'key-int-max'
-        rgb_encoder_config = f"{encoder_name} bitrate=3000 gop-size=15"
-        depth_encoder_config = f"{encoder_name} bitrate=3000 gop-size=60"
+        if system == 'Linux':
+            # Linux: nvh265enc (NVIDIA) or vaapih265enc (Intel/AMD) or x265enc (software)
+            if 'nvh265enc' in encoder_name:
+                rgb_encoder_config = f"{encoder_name} bitrate=3000 gop-size=15"
+                depth_encoder_config = f"{encoder_name} bitrate=3000 gop-size=60"
+            elif 'vaapi' in encoder_name:
+                rgb_encoder_config = f"{encoder_name} bitrate=3000 keyframe-period=15"
+                depth_encoder_config = f"{encoder_name} bitrate=3000 keyframe-period=60"
+            else:  # x265enc software fallback
+                rgb_encoder_config = f"{encoder_name} bitrate=3000 key-int-max=15"
+                depth_encoder_config = f"{encoder_name} bitrate=3000 key-int-max=60"
+        
+        elif system == 'Windows':
+            # Windows: nvh265enc (NVIDIA) or mfh265enc (Media Foundation) or x265enc (software)
+            if 'nvh265enc' in encoder_name:
+                rgb_encoder_config = f"{encoder_name} bitrate=3000 gop-size=15"
+                depth_encoder_config = f"{encoder_name} bitrate=3000 gop-size=60"
+            elif 'mf' in encoder_name:
+                # Media Foundation - use low-latency mode
+                rgb_encoder_config = f"{encoder_name} bitrate=3000 low-latency=true"
+                depth_encoder_config = f"{encoder_name} bitrate=3000"
+            else:  # x265enc software fallback
+                rgb_encoder_config = f"{encoder_name} bitrate=3000 key-int-max=15"
+                depth_encoder_config = f"{encoder_name} bitrate=3000 key-int-max=60"
+        
+        elif system == 'Darwin':  # macOS
+            # macOS: vtenc_h265 (VideoToolbox) or x265enc (software)
+            if 'vtenc' in encoder_name:
+                rgb_encoder_config = f"{encoder_name} bitrate=3000 realtime=true max-keyframe-interval=15"
+                depth_encoder_config = f"{encoder_name} bitrate=3000 realtime=true max-keyframe-interval=60"
+            else:  # x265enc software fallback
+                rgb_encoder_config = f"{encoder_name} bitrate=3000 key-int-max=15"
+                depth_encoder_config = f"{encoder_name} bitrate=3000 key-int-max=60"
+        
+        else:
+            # Unknown platform - use software encoder with standard settings
+            rgb_encoder_config = f"{encoder_name} bitrate=3000 key-int-max=15"
+            depth_encoder_config = f"{encoder_name} bitrate=3000 key-int-max=60"
         
         pipeline_str = (
             # RGB branch - PT 96, to same port

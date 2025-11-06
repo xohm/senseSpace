@@ -30,7 +30,6 @@ class CustomSkeletonWidget(SkeletonGLWidget):
         super().keyPressEvent(event)
        
     def draw_custom(self, frame: Frame):
-        print("[DEBUG] Custom drawing logic can be implemented here")
         pass
 
 def main():

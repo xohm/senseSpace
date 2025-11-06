@@ -2034,6 +2034,21 @@ class SenseSpaceServer:
             # Get global root orientation for pelvis (joint 0)
             global_root_ori = getattr(person, 'global_root_orientation', None)
             
+            # DEBUG: Check what orientation data we're getting
+            if not hasattr(self, '_orientation_data_logged'):
+                self._orientation_data_logged = True
+                print("[ORIENTATION DATA DEBUG]")
+                print(f"  local_orientation_per_joint: {type(local_orientations)}, shape={getattr(local_orientations, 'shape', 'N/A')}")
+                print(f"  global_root_orientation: {type(global_root_ori)}, shape={getattr(global_root_ori, 'shape', 'N/A')}")
+                if local_orientations is not None and hasattr(local_orientations, 'shape'):
+                    if len(local_orientations.shape) == 2:
+                        print(f"  local_orientation_per_joint has {local_orientations.shape[0]} joints")
+                        # Sample first few orientations
+                        for idx in [0, 5, 12, 18]:  # Pelvis, left shoulder, right shoulder, left hip
+                            if idx < len(local_orientations):
+                                ori = local_orientations[idx]
+                                print(f"    Joint {idx}: [{ori[0]:.3f}, {ori[1]:.3f}, {ori[2]:.3f}, {ori[3]:.3f}]")
+            
             # Fallback to global root orientation if per-joint not available
             if local_orientations is None:
                 global_ori = getattr(person, 'global_orientation', None)
