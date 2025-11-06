@@ -14,6 +14,12 @@ Design:
 - RTCP provides automatic heartbeat/keepalive
 """
 
+# Set GST_DEBUG before importing GStreamer
+import os
+if os.getenv('GST_DEBUG') is None:
+    # Set debug level: 1 for errors only (minimal output)
+    os.environ['GST_DEBUG'] = '1'
+
 import gi
 gi.require_version('Gst', '1.0')
 gi.require_version('GLib', '2.0')
@@ -196,8 +202,6 @@ class PerCameraStreamerClient:
             f"udpsink host={self.client_ip} port={rtp_port} sync=false async=false"
         )
         
-        print(f"[DEBUG] Camera {camera_idx} multiplexed pipeline: RTP={rtp_port} (PT {rgb_pt}/{depth_pt}), RTCP={rtcp_port}")
-        
         try:
             pipeline = Gst.parse_launch(pipeline_str)
             
@@ -210,7 +214,6 @@ class PerCameraStreamerClient:
                 if t == Gst.MessageType.ERROR:
                     err, debug_info = message.parse_error()
                     print(f"[GSTREAMER ERROR] Camera {camera_idx}: {err.message}")
-                    print(f"[GSTREAMER DEBUG] {debug_info}")
                 elif t == Gst.MessageType.WARNING:
                     warn, debug_info = message.parse_warning()
                     print(f"[GSTREAMER WARNING] Camera {camera_idx}: {warn.message}")
@@ -259,12 +262,6 @@ class PerCameraStreamerClient:
         
         # Frame decimation: only push every Nth frame based on fps_factor
         self.frame_counters[camera_idx] += 1
-        
-        # Debug first few frames
-        if self.frame_counters[camera_idx] <= 10:
-            print(f"[DEBUG] Client {self.client_id} cam {camera_idx} frame {self.frame_counters[camera_idx]}, "
-                  f"fps_factor={self.stream_request.fps_factor}, "
-                  f"skip={(self.frame_counters[camera_idx] % self.stream_request.fps_factor != 0)}")
         
         if self.frame_counters[camera_idx] % self.stream_request.fps_factor != 0:
             return  # Skip this frame
@@ -407,12 +404,6 @@ class PerCameraVideoStreamer:
         with self.clients_lock:
             if len(self.clients) == 0:
                 return  # No clients, skip silently
-            
-            # Debug first few calls
-            self._frame_count += 1
-            if self._frame_count <= 5:
-                print(f"[DEBUG] PerCameraVideoStreamer.push_frames called (frame {self._frame_count}), "
-                      f"clients={len(self.clients)}, rgb_frames={len(rgb_frames)}, depth_frames={len(depth_frames)}")
             
             for client_id, client in list(self.clients.items()):
                 for cam_idx in client.stream_request.cameras:

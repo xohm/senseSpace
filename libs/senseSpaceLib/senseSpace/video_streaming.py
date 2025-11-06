@@ -13,10 +13,8 @@ Supports:
 # MUST set GST_DEBUG before importing GStreamer
 import os
 if os.getenv('GST_DEBUG') is None:
-    # Set debug level: 2 for warnings and errors only (less verbose)
-    os.environ['GST_DEBUG'] = '2'
-    # TEMP: Verbose debugging for RTP and H.265 (disabled - working)
-    #os.environ['GST_DEBUG'] = 'rtph265depay:5,h265parse:5,nvh265dec:5'
+    # Set debug level: 1 for errors only (minimal output)
+    os.environ['GST_DEBUG'] = '1'
 
 import gi
 gi.require_version('Gst', '1.0')

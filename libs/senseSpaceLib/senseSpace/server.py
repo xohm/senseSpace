@@ -1835,7 +1835,7 @@ class SenseSpaceServer:
                                         
                                         self._server_frame_counts[serial] += 1
                                         
-                                        # Hash first 100 pixels to detect identical frames
+                                        # Hash first 100 pixels to detect identical frames (debug first few frames only)
                                         rgb_hash = hash(rgb_frame[:10, :10, :].tobytes())
                                         depth_hash = hash(depth_frame[:10, :10].tobytes())
                                         
@@ -1856,8 +1856,6 @@ class SenseSpaceServer:
                                                     print(f"  RGB hash {rgb_hash} matches: {identical_rgb}")
                                                 if identical_depth:
                                                     print(f"  Depth hash {depth_hash} matches: {identical_depth}")
-                                            else:
-                                                print(f"[DEBUG] Camera {serial} (idx={cam_idx}) frame #{self._server_frame_counts[serial]} UNIQUE (rgb_hash={rgb_hash}, depth_hash={depth_hash})")
                                         
                                         self._server_frame_hashes[serial] = [rgb_hash, depth_hash]
                                         

@@ -417,11 +417,6 @@ class StreamingVisualizationWidget(SkeletonGLWidget):
                 depth_min = np.percentile(depth_nonzero, 2)   # 2nd percentile
                 depth_max = np.percentile(depth_nonzero, 98)  # 98th percentile
                 
-                # DEBUG: Show depth statistics once
-                if not hasattr(self, '_depth_viz_debug_done'):
-                    self._depth_viz_debug_done = True
-                    print(f"[DEBUG] Client depth visualization: min={depth_min:.1f}mm, max={depth_max:.1f}mm, range={depth_max-depth_min:.1f}mm")
-                
                 # Ensure we have a valid range
                 if depth_max - depth_min < 100:  # Less than 10cm range
                     depth_min = depth_nonzero.min()
