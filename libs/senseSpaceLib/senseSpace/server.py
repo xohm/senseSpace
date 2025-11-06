@@ -1803,8 +1803,8 @@ class SenseSpaceServer:
                                 except Exception:
                                     pass
                                 
-                                # Capture video frames if streaming enabled
-                                if self.video_streamer is not None:
+                                # Capture video frames if streaming enabled (v1 or v2)
+                                if self.video_streamer is not None or self.per_camera_streaming_manager is not None:
                                     try:
                                         # Create image containers
                                         rgb_mat = sl.Mat()
@@ -1878,12 +1878,12 @@ class SenseSpaceServer:
                                     pass
                             else:
                                 # Grab failed for this camera
-                                if self.video_streamer is not None:
+                                if self.video_streamer is not None or self.per_camera_streaming_manager is not None:
                                     rgb_frames.append(None)
                                     depth_frames.append(None)
                         except Exception as e:
                             print(f"[WARNING] Exception grabbing from camera {serial}: {e}")
-                            if self.video_streamer is not None:
+                            if self.video_streamer is not None or self.per_camera_streaming_manager is not None:
                                 rgb_frames.append(None)
                                 depth_frames.append(None)
             except Exception:
