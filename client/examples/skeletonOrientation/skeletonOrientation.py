@@ -84,21 +84,23 @@ class OrientationWidget(SkeletonGLWidget):
                         
                         # Get SDK local orientation
                         if hasattr(ori, 'x'):
-                            quat = [ori.x, ori.y, ori.z, ori.w]
+                            quat_raw = [ori.x, ori.y, ori.z, ori.w]
                         else:
-                            quat = [ori["x"], ori["y"], ori["z"], ori["w"]]
+                            quat_raw = [ori["x"], ori["y"], ori["z"], ori["w"]]
                         
-                        # Normalize (Unity does this)
+                        # Normalize quaternion (as Unity/Unreal do)
                         import math
-                        length = math.sqrt(quat[0]**2 + quat[1]**2 + quat[2]**2 + quat[3]**2)
+                        length = math.sqrt(quat_raw[0]**2 + quat_raw[1]**2 + quat_raw[2]**2 + quat_raw[3]**2)
                         if length > 0.0001:
-                            quat = [quat[0]/length, quat[1]/length, quat[2]/length, quat[3]/length]
+                            quat_norm = [quat_raw[0]/length, quat_raw[1]/length, quat_raw[2]/length, quat_raw[3]/length]
+                        else:
+                            quat_norm = quat_raw
                         
-                        # Convert to Euler
-                        euler = quaternion_to_euler(quat, order='XYZ')
+                        # Convert to Euler angles
+                        euler = quaternion_to_euler(quat_norm, order='XYZ')
                         
                         # Format for TouchDesigner (joint index, euler angles)
-                        print(f"  Joint {i:2d}: euler_x={euler[0]:7.2f}°, euler_y={euler[1]:7.2f}°, euler_z={euler[2]:7.2f}°")
+                        print(f"  Joint {i:2d}: rx={euler[0]:7.2f}°, ry={euler[1]:7.2f}°, rz={euler[2]:7.2f}°")
                 
                 print("\n" + "="*80)
                 print("SEND THIS DATA TO TOUCHDESIGNER:")
