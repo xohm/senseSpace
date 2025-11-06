@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Example: Print bone-aligned joint orientations
-Press SPACE to print bone-aligned orientations for all skeletons
+Example: Show TouchDesigner-ready orientation data
+
+Press SPACE: Show SDK local orientations as Euler angles (ready for TouchDesigner)
+Press '1': Show raw SDK quaternions
+Press '2': Show bone-aligned orientations (alternative approach)
 """
 
 import argparse
@@ -34,36 +37,126 @@ class OrientationWidget(SkeletonGLWidget):
         super().__init__(parent)
         # Enable orientation visualization by default
         self.show_joint_orientation = True
+        # Store T-pose reference (captured with 'T' key)
+        self.tpose_reference = None
+    
+    def _quat_multiply(self, q1, q2):
+        """Multiply two quaternions: q1 * q2"""
+        x1, y1, z1, w1 = q1
+        x2, y2, z2, w2 = q2
+        return [
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2,
+            w1*w2 - x1*x2 - y1*y2 - z1*z2
+        ]
+    
+    def _quat_inverse(self, q):
+        """Compute quaternion inverse (conjugate for unit quaternions)"""
+        x, y, z, w = q
+        return [-x, -y, -z, w]
     
     def keyPressEvent(self, event):
         """Handle keyboard input"""
         if event.key() == Qt.Key_Space:
-            # Print orientations for all skeletons
+            # TOUCHDESIGNER OUTPUT: SDK local orientations as Euler angles
             if hasattr(self, 'latest_frame') and self.latest_frame and hasattr(self.latest_frame, 'people'):
                 print("\n" + "="*80)
-                print("BONE-ALIGNED JOINT ORIENTATIONS")
+                print("TOUCHDESIGNER OUTPUT - SDK Local Orientations (Euler XYZ)")
                 print("="*80)
+                print("\nThis is what you should send to TouchDesigner:")
+                print("- SDK provides local orientations (relative to parent)")
+                print("- Already close to zero in T-pose")
+                print("- Just normalize quaternions and convert to Euler")
+                print()
                 
                 for person_idx, person in enumerate(self.latest_frame.people):
-                    print(f"\nPerson {person_idx}:")
-                    
-                    # Get skeleton data
+                    print(f"Person {person_idx}:")
                     skeleton = person.skeleton if hasattr(person, 'skeleton') else person.get('skeleton')
                     if not skeleton:
                         print("  No skeleton data")
                         continue
                     
-                    # Compute bone-aligned local orientations
-                    local_orientations = compute_bone_aligned_local_orientations(skeleton)
-                    
-                    # Print each joint's orientation
-                    for joint_idx, quat in sorted(local_orientations.items()):
-                        # Convert to Euler angles
+                    for i, joint in enumerate(skeleton):
+                        ori = joint.ori if hasattr(joint, 'ori') else joint.get('ori')
+                        if not ori:
+                            continue
+                        
+                        # Get SDK local orientation
+                        if hasattr(ori, 'x'):
+                            quat = [ori.x, ori.y, ori.z, ori.w]
+                        else:
+                            quat = [ori["x"], ori["y"], ori["z"], ori["w"]]
+                        
+                        # Normalize (Unity does this)
+                        import math
+                        length = math.sqrt(quat[0]**2 + quat[1]**2 + quat[2]**2 + quat[3]**2)
+                        if length > 0.0001:
+                            quat = [quat[0]/length, quat[1]/length, quat[2]/length, quat[3]/length]
+                        
+                        # Convert to Euler
                         euler = quaternion_to_euler(quat, order='XYZ')
                         
-                        print(f"  Joint {joint_idx:2d}: "
-                              f"Quat=[{quat[0]:7.4f}, {quat[1]:7.4f}, {quat[2]:7.4f}, {quat[3]:7.4f}]  "
-                              f"Euler=[{euler[0]:7.2f}°, {euler[1]:7.2f}°, {euler[2]:7.2f}°]")
+                        # Format for TouchDesigner (joint index, euler angles)
+                        print(f"  Joint {i:2d}: euler_x={euler[0]:7.2f}°, euler_y={euler[1]:7.2f}°, euler_z={euler[2]:7.2f}°")
+                
+                print("\n" + "="*80)
+                print("SEND THIS DATA TO TOUCHDESIGNER:")
+                print("For each joint: joint_index, euler_x, euler_y, euler_z")
+                print("="*80 + "\n")
+            else:
+                print("[WARNING] No skeleton data available")
+        
+        elif event.key() == Qt.Key_1:
+            # Option 1: Show raw SDK quaternions
+            if hasattr(self, 'latest_frame') and self.latest_frame and hasattr(self.latest_frame, 'people'):
+                print("\n" + "="*80)
+                print("RAW SDK LOCAL ORIENTATIONS (Quaternions)")
+                print("="*80)
+                
+                for person_idx, person in enumerate(self.latest_frame.people):
+                    print(f"\nPerson {person_idx}:")
+                    skeleton = person.skeleton if hasattr(person, 'skeleton') else person.get('skeleton')
+                    if not skeleton:
+                        print("  No skeleton data")
+                        continue
+                    
+                    for i, joint in enumerate(skeleton):
+                        ori = joint.ori if hasattr(joint, 'ori') else joint.get('ori')
+                        if not ori:
+                            continue
+                        
+                        if hasattr(ori, 'x'):
+                            quat = [ori.x, ori.y, ori.z, ori.w]
+                        else:
+                            quat = [ori["x"], ori["y"], ori["z"], ori["w"]]
+                        
+                        print(f"  Joint {i:2d}: quat=[{quat[0]:7.4f}, {quat[1]:7.4f}, {quat[2]:7.4f}, {quat[3]:7.4f}]")
+                
+                print("="*80 + "\n")
+            else:
+                print("[WARNING] No skeleton data available")
+        
+        elif event.key() == Qt.Key_2:
+            # Option 2: Show bone-aligned local orientations
+            if hasattr(self, 'latest_frame') and self.latest_frame and hasattr(self.latest_frame, 'people'):
+                print("\n" + "="*80)
+                print("OPTION 2: BONE-ALIGNED LOCAL ORIENTATIONS (Y along bone)")
+                print("="*80)
+                
+                for person_idx, person in enumerate(self.latest_frame.people):
+                    print(f"\nPerson {person_idx}:")
+                    skeleton = person.skeleton if hasattr(person, 'skeleton') else person.get('skeleton')
+                    if not skeleton:
+                        print("  No skeleton data")
+                        continue
+                    
+                    # Compute bone-aligned orientations
+                    local_orientations = compute_bone_aligned_local_orientations(skeleton)
+                    
+                    for joint_idx, quat in sorted(local_orientations.items()):
+                        euler = quaternion_to_euler(quat, order='XYZ')
+                        print(f"  Joint {joint_idx:2d}: Euler = [{euler[0]:7.2f}°, {euler[1]:7.2f}°, {euler[2]:7.2f}°]")
                 
                 print("="*80 + "\n")
             else:
