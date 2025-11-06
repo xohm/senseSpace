@@ -201,17 +201,17 @@ class SkeletonVisualizer3D:
         """
         Draw RGB coordinate axes showing bone-aligned orientation of each joint.
         
-        **CRITICAL FIX**: ZED SDK's local_orientation_per_joint does NOT align Y with bone!
-        Instead, we compute proper bone-aligned orientations from skeleton geometry:
-        - Y-axis = bone direction (parent → child)
-        - Z-axis = perpendicular to bone (computed from world-up)
-        - X-axis = cross product (right-handed system)
+        Computes a bone-aligned coordinate frame from the SDK's local orientations:
+        - Y-axis = bone direction (parent → child) from geometry
+        - X and Z axes = derived from SDK orientation's twist around the bone
+        
+        This gives you anatomically meaningful frames where Y points along bones,
+        while preserving the rotational information from the SDK.
         
         :param skeleton: List of joint data (dict or objects with pos and ori)
         :param axis_length: Length of each axis in mm
         """
         import math
-        import numpy as np
         
         # Define BODY_34 skeleton hierarchy (parent index for each joint)
         BODY34_PARENTS = [
@@ -255,7 +255,7 @@ class SkeletonVisualizer3D:
             """Normalize a 3D vector"""
             length = math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
             if length < 0.0001:
-                return [0, 1, 0]  # Default to up if zero vector
+                return [0, 1, 0]
             return [v[0]/length, v[1]/length, v[2]/length]
         
         def cross(a, b):
@@ -266,92 +266,170 @@ class SkeletonVisualizer3D:
                 a[0]*b[1] - a[1]*b[0]
             ]
         
-        # Draw bone-aligned orientations
+        def dot(a, b):
+            """Dot product of two 3D vectors"""
+            return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+        
+        def dot(a, b):
+            """Dot product of two 3D vectors"""
+            return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+        
+        def quat_multiply(q1, q2):
+            """Multiply two quaternions [x, y, z, w]"""
+            x1, y1, z1, w1 = q1
+            x2, y2, z2, w2 = q2
+            
+            return [
+                w1*x2 + x1*w2 + y1*z2 - z1*y2,
+                w1*y2 - x1*z2 + y1*w2 + z1*x2,
+                w1*z2 + x1*y2 - y1*x2 + z1*w2,
+                w1*w2 - x1*x2 - y1*y2 - z1*z2
+            ]
+        
+        def quat_to_rotation_matrix(q):
+            """Convert quaternion [x, y, z, w] to 3x3 rotation matrix"""
+            x, y, z, w = q[0], q[1], q[2], q[3]
+            
+            r00 = 1 - 2*(y*y + z*z)
+            r01 = 2*(x*y - w*z)
+            r02 = 2*(x*z + w*y)
+            
+            r10 = 2*(x*y + w*z)
+            r11 = 1 - 2*(x*x + z*z)
+            r12 = 2*(y*z - w*x)
+            
+            r20 = 2*(x*z - w*y)
+            r21 = 2*(y*z + w*x)
+            r22 = 1 - 2*(x*x + y*y)
+            
+            return [
+                [r00, r01, r02],
+                [r10, r11, r12],
+                [r20, r21, r22]
+            ]
+        
+        # First pass: accumulate world orientations and get positions
+        world_orientations = {}
+        positions = {}
+        
+        for i, joint in enumerate(skeleton):
+            # Get position
+            pos = joint['pos'] if isinstance(joint, dict) else getattr(joint, 'pos', None)
+            if pos is not None:
+                if hasattr(pos, 'x'):
+                    positions[i] = [pos.x, pos.y, pos.z]
+                else:
+                    positions[i] = [pos["x"], pos["y"], pos["z"]]
+            
+            # Get orientation
+            ori = joint['ori'] if isinstance(joint, dict) else getattr(joint, 'ori', None)
+            if ori is None:
+                continue
+            
+            # Extract local quaternion [x, y, z, w]
+            if hasattr(ori, 'x'):
+                local_quat = [ori.x, ori.y, ori.z, ori.w]
+            else:
+                local_quat = [ori["x"], ori["y"], ori["z"], ori["w"]]
+            
+            parent_idx = BODY34_PARENTS[i]
+            
+            if parent_idx < 0:
+                # Root joint - local orientation IS world orientation
+                world_orientations[i] = local_quat
+            elif parent_idx in world_orientations:
+                # Child joint - multiply parent's world orientation by local orientation
+                parent_world_quat = world_orientations[parent_idx]
+                world_orientations[i] = quat_multiply(parent_world_quat, local_quat)
+        
+        # Second pass: create bone-aligned frames using SDK orientation's twist
+        glDisable(GL_DEPTH_TEST)
+        # Second pass: draw orientations
+        glDisable(GL_DEPTH_TEST)
+        # Second pass: create bone-aligned frames using SDK orientation's twist
         glDisable(GL_DEPTH_TEST)
         glLineWidth(2.0)
         
-        world_up = [0, 1, 0]  # World up direction
-        
-        for i, joint in enumerate(skeleton):
-            # Get current joint position
-            pos = joint['pos'] if isinstance(joint, dict) else getattr(joint, 'pos', None)
-            if pos is None:
+        for i in range(len(skeleton)):
+            if i not in world_orientations or i not in positions:
                 continue
             
-            if hasattr(pos, 'x'):
-                px, py, pz = pos.x, pos.y, pos.z
-            else:
-                px, py, pz = pos["x"], pos["y"], pos["z"]
-            
-            # Get parent joint
+            px, py, pz = positions[i]
             parent_idx = BODY34_PARENTS[i]
-            if parent_idx < 0:
-                # Root joint - draw at joint position with world orientation
-                draw_x, draw_y, draw_z = px, py, pz
-                y_axis = normalize([0, 1, 0])  # World up
-                z_axis = normalize([0, 0, 1])  # World forward
-                x_axis = normalize([1, 0, 0])  # World right
-            elif parent_idx < len(skeleton):
-                parent_joint = skeleton[parent_idx]
-                parent_pos = parent_joint['pos'] if isinstance(parent_joint, dict) else getattr(parent_joint, 'pos', None)
+            
+            # Get SDK orientation axes
+            world_quat = world_orientations[i]
+            rot_matrix = quat_to_rotation_matrix(world_quat)
+            
+            # SDK axes
+            sdk_x = [rot_matrix[0][0], rot_matrix[1][0], rot_matrix[2][0]]
+            sdk_y = [rot_matrix[0][1], rot_matrix[1][1], rot_matrix[2][1]]
+            sdk_z = [rot_matrix[0][2], rot_matrix[1][2], rot_matrix[2][2]]
+            
+            # Determine drawing position and compute bone-aligned axes
+            if parent_idx >= 0 and parent_idx in positions:
+                ppx, ppy, ppz = positions[parent_idx]
                 
-                if parent_pos is not None:
-                    # Get parent position - THIS is where we draw the orientation
-                    if hasattr(parent_pos, 'x'):
-                        ppx, ppy, ppz = parent_pos.x, parent_pos.y, parent_pos.z
+                # Draw at parent position (beginning of bone)
+                draw_x, draw_y, draw_z = ppx, ppy, ppz
+                
+                bone_vec = [px - ppx, py - ppy, pz - ppz]
+                bone_len = math.sqrt(bone_vec[0]**2 + bone_vec[1]**2 + bone_vec[2]**2)
+                
+                if bone_len > 1.0:  # Valid bone
+                    # Y-axis = bone direction
+                    y_axis = normalize(bone_vec)
+                    
+                    # Project SDK's X-axis onto plane perpendicular to bone
+                    # This preserves the twist/rotation information from SDK
+                    x_proj_on_y = dot(sdk_x, y_axis)
+                    x_perp = [sdk_x[0] - x_proj_on_y * y_axis[0],
+                             sdk_x[1] - x_proj_on_y * y_axis[1],
+                             sdk_x[2] - x_proj_on_y * y_axis[2]]
+                    
+                    x_perp_len = math.sqrt(x_perp[0]**2 + x_perp[1]**2 + x_perp[2]**2)
+                    
+                    if x_perp_len > 0.01:
+                        # X-axis = perpendicular component of SDK's X
+                        x_axis = normalize(x_perp)
                     else:
-                        ppx, ppy, ppz = parent_pos["x"], parent_pos["y"], parent_pos["z"]
+                        # Fallback: SDK X was parallel to bone, use Z instead
+                        z_proj_on_y = dot(sdk_z, y_axis)
+                        z_perp = [sdk_z[0] - z_proj_on_y * y_axis[0],
+                                 sdk_z[1] - z_proj_on_y * y_axis[1],
+                                 sdk_z[2] - z_proj_on_y * y_axis[2]]
+                        x_axis = normalize(z_perp)
                     
-                    # Draw orientation at parent joint (start of bone)
-                    draw_x, draw_y, draw_z = ppx, ppy, ppz
-                    
-                    # Compute bone direction (parent → child)
-                    bone_vec = [px - ppx, py - ppy, pz - ppz]
-                    bone_len = math.sqrt(bone_vec[0]**2 + bone_vec[1]**2 + bone_vec[2]**2)
-                    
-                    if bone_len < 1.0:
-                        # Skip very short bones, use world frame
-                        y_axis = [0, 1, 0]
-                        z_axis = [0, 0, 1]
-                        x_axis = [1, 0, 0]
-                    else:
-                        # Y-axis = normalized bone direction
-                        y_axis = normalize(bone_vec)
-                        
-                        # Z-axis = perpendicular to bone (in plane with world-up)
-                        # If bone is parallel to world-up, use world-forward instead
-                        dot_up = abs(y_axis[0]*world_up[0] + y_axis[1]*world_up[1] + y_axis[2]*world_up[2])
-                        if dot_up > 0.99:  # Nearly parallel
-                            z_axis = normalize(cross(y_axis, [0, 0, 1]))  # Use world forward
-                        else:
-                            z_axis = normalize(cross(y_axis, world_up))
-                        
-                        # X-axis = cross(Y, Z) to complete right-handed system
-                        x_axis = normalize(cross(y_axis, z_axis))
+                    # Z-axis = cross product to complete right-handed system
+                    z_axis = normalize(cross(x_axis, y_axis))
                 else:
-                    continue
+                    # Too short, use SDK orientation as-is
+                    draw_x, draw_y, draw_z = px, py, pz
+                    x_axis, y_axis, z_axis = sdk_x, sdk_y, sdk_z
             else:
-                continue
+                # Root joint or no parent - draw at joint position with SDK orientation
+                draw_x, draw_y, draw_z = px, py, pz
+                x_axis, y_axis, z_axis = sdk_x, sdk_y, sdk_z
             
             # Scale axes
             x_vec = [x_axis[0]*axis_length, x_axis[1]*axis_length, x_axis[2]*axis_length]
             y_vec = [y_axis[0]*axis_length, y_axis[1]*axis_length, y_axis[2]*axis_length]
             z_vec = [z_axis[0]*axis_length, z_axis[1]*axis_length, z_axis[2]*axis_length]
             
-            # Draw axes at the joint position (draw_x, draw_y, draw_z = parent position)
+            # Draw axes at the drawing position (parent joint for bones, joint itself for root)
             glBegin(GL_LINES)
             
-            # X-axis (red - right)
+            # X-axis (red)
             glColor3f(1.0, 0.0, 0.0)
             glVertex3f(draw_x, draw_y, draw_z)
             glVertex3f(draw_x + x_vec[0], draw_y + x_vec[1], draw_z + x_vec[2])
             
-            # Y-axis (green - bone direction)
+            # Y-axis (green) - bone direction
             glColor3f(0.0, 1.0, 0.0)
             glVertex3f(draw_x, draw_y, draw_z)
             glVertex3f(draw_x + y_vec[0], draw_y + y_vec[1], draw_z + y_vec[2])
             
-            # Z-axis (blue - perpendicular)
+            # Z-axis (blue)
             glColor3f(0.0, 0.0, 1.0)
             glVertex3f(draw_x, draw_y, draw_z)
             glVertex3f(draw_x + z_vec[0], draw_y + z_vec[1], draw_z + z_vec[2])
@@ -361,7 +439,258 @@ class SkeletonVisualizer3D:
         # Re-enable depth test
         glEnable(GL_DEPTH_TEST)
         glLineWidth(1.0)
+
+
+def compute_bone_aligned_local_orientations(skeleton):
+    """
+    Compute bone-aligned local orientations for all joints in a skeleton.
+    
+    Returns local orientations (as quaternions) where:
+    - Y-axis points along the bone direction (parent → child)
+    - X and Z axes preserve the SDK's twist/rotation information
+    - Orientations are LOCAL (relative to parent), ready for rigging
+    
+    :param skeleton: List of joint data (dict or objects with pos and ori)
+    :return: Dictionary {joint_index: [x, y, z, w]} of local quaternions
+    """
+    import math
+    
+    # Define BODY_34 skeleton hierarchy
+    BODY34_PARENTS = [
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 3, 11, 12, 13, 14, 15, 15,
+        0, 18, 19, 20, 0, 22, 23, 24, 3, 26, 26, 26, 26, 26, 20, 24
+    ]
+    
+    def normalize(v):
+        length = math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
+        if length < 0.0001:
+            return [0, 1, 0]
+        return [v[0]/length, v[1]/length, v[2]/length]
+    
+    def cross(a, b):
+        return [
+            a[1]*b[2] - a[2]*b[1],
+            a[2]*b[0] - a[0]*b[2],
+            a[0]*b[1] - a[1]*b[0]
+        ]
+    
+    def dot(a, b):
+        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+    
+    def quat_multiply(q1, q2):
+        x1, y1, z1, w1 = q1
+        x2, y2, z2, w2 = q2
+        return [
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2,
+            w1*w2 - x1*x2 - y1*y2 - z1*z2
+        ]
+    
+    def quat_inverse(q):
+        """Compute quaternion inverse (conjugate for unit quaternions)"""
+        x, y, z, w = q
+        return [-x, -y, -z, w]
+    
+    def quat_to_rotation_matrix(q):
+        x, y, z, w = q[0], q[1], q[2], q[3]
+        r00 = 1 - 2*(y*y + z*z)
+        r01 = 2*(x*y - w*z)
+        r02 = 2*(x*z + w*y)
+        r10 = 2*(x*y + w*z)
+        r11 = 1 - 2*(x*x + z*z)
+        r12 = 2*(y*z - w*x)
+        r20 = 2*(x*z - w*y)
+        r21 = 2*(y*z + w*x)
+        r22 = 1 - 2*(x*x + y*y)
+        return [
+            [r00, r01, r02],
+            [r10, r11, r12],
+            [r20, r21, r22]
+        ]
+    
+    def rotation_matrix_to_quat(m):
+        """Convert 3x3 rotation matrix to quaternion [x, y, z, w]"""
+        trace = m[0][0] + m[1][1] + m[2][2]
+        
+        if trace > 0:
+            s = 0.5 / math.sqrt(trace + 1.0)
+            w = 0.25 / s
+            x = (m[2][1] - m[1][2]) * s
+            y = (m[0][2] - m[2][0]) * s
+            z = (m[1][0] - m[0][1]) * s
+        elif m[0][0] > m[1][1] and m[0][0] > m[2][2]:
+            s = 2.0 * math.sqrt(1.0 + m[0][0] - m[1][1] - m[2][2])
+            w = (m[2][1] - m[1][2]) / s
+            x = 0.25 * s
+            y = (m[0][1] + m[1][0]) / s
+            z = (m[0][2] + m[2][0]) / s
+        elif m[1][1] > m[2][2]:
+            s = 2.0 * math.sqrt(1.0 + m[1][1] - m[0][0] - m[2][2])
+            w = (m[0][2] - m[2][0]) / s
+            x = (m[0][1] + m[1][0]) / s
+            y = 0.25 * s
+            z = (m[1][2] + m[2][1]) / s
+        else:
+            s = 2.0 * math.sqrt(1.0 + m[2][2] - m[0][0] - m[1][1])
+            w = (m[1][0] - m[0][1]) / s
+            x = (m[0][2] + m[2][0]) / s
+            y = (m[1][2] + m[2][1]) / s
+            z = 0.25 * s
+        
+        return [x, y, z, w]
+    
+    # Pass 1: Get SDK world orientations and positions
+    sdk_world_orientations = {}
+    positions = {}
+    
+    for i, joint in enumerate(skeleton):
+        # Get position
+        pos = joint['pos'] if isinstance(joint, dict) else getattr(joint, 'pos', None)
+        if pos is not None:
+            if hasattr(pos, 'x'):
+                positions[i] = [pos.x, pos.y, pos.z]
+            else:
+                positions[i] = [pos["x"], pos["y"], pos["z"]]
+        
+        # Get SDK orientation and accumulate
+        ori = joint['ori'] if isinstance(joint, dict) else getattr(joint, 'ori', None)
+        if ori is None:
+            continue
+        
+        if hasattr(ori, 'x'):
+            local_quat = [ori.x, ori.y, ori.z, ori.w]
+        else:
+            local_quat = [ori["x"], ori["y"], ori["z"], ori["w"]]
+        
+        parent_idx = BODY34_PARENTS[i]
+        
+        if parent_idx < 0:
+            sdk_world_orientations[i] = local_quat
+        elif parent_idx in sdk_world_orientations:
+            parent_world = sdk_world_orientations[parent_idx]
+            sdk_world_orientations[i] = quat_multiply(parent_world, local_quat)
+    
+    # Pass 2: Compute bone-aligned world orientations
+    bone_aligned_world_orientations = {}
+    
+    for i in range(len(skeleton)):
+        if i not in sdk_world_orientations or i not in positions:
+            continue
+        
+        px, py, pz = positions[i]
+        parent_idx = BODY34_PARENTS[i]
+        
+        # Get SDK orientation
+        sdk_quat = sdk_world_orientations[i]
+        rot_matrix = quat_to_rotation_matrix(sdk_quat)
+        sdk_x = [rot_matrix[0][0], rot_matrix[1][0], rot_matrix[2][0]]
+        sdk_y = [rot_matrix[0][1], rot_matrix[1][1], rot_matrix[2][1]]
+        sdk_z = [rot_matrix[0][2], rot_matrix[1][2], rot_matrix[2][2]]
+        
+        # Compute bone-aligned frame
+        if parent_idx >= 0 and parent_idx in positions:
+            ppx, ppy, ppz = positions[parent_idx]
+            bone_vec = [px - ppx, py - ppy, pz - ppz]
+            bone_len = math.sqrt(bone_vec[0]**2 + bone_vec[1]**2 + bone_vec[2]**2)
             
+            if bone_len > 1.0:
+                # Y-axis = bone direction
+                y_axis = normalize(bone_vec)
+                
+                # Project SDK X onto perpendicular plane
+                x_proj_on_y = dot(sdk_x, y_axis)
+                x_perp = [sdk_x[0] - x_proj_on_y * y_axis[0],
+                         sdk_x[1] - x_proj_on_y * y_axis[1],
+                         sdk_x[2] - x_proj_on_y * y_axis[2]]
+                
+                x_perp_len = math.sqrt(x_perp[0]**2 + x_perp[1]**2 + x_perp[2]**2)
+                
+                if x_perp_len > 0.01:
+                    x_axis = normalize(x_perp)
+                else:
+                    # Fallback to SDK Z
+                    z_proj_on_y = dot(sdk_z, y_axis)
+                    z_perp = [sdk_z[0] - z_proj_on_y * y_axis[0],
+                             sdk_z[1] - z_proj_on_y * y_axis[1],
+                             sdk_z[2] - z_proj_on_y * y_axis[2]]
+                    x_axis = normalize(z_perp)
+                
+                z_axis = normalize(cross(x_axis, y_axis))
+                
+                # Build rotation matrix from axes (column vectors)
+                bone_aligned_matrix = [
+                    [x_axis[0], y_axis[0], z_axis[0]],
+                    [x_axis[1], y_axis[1], z_axis[1]],
+                    [x_axis[2], y_axis[2], z_axis[2]]
+                ]
+                
+                bone_aligned_world_orientations[i] = rotation_matrix_to_quat(bone_aligned_matrix)
+            else:
+                # Too short, use SDK
+                bone_aligned_world_orientations[i] = sdk_quat
+        else:
+            # Root joint
+            bone_aligned_world_orientations[i] = sdk_quat
+    
+    # Pass 3: Convert world orientations to local orientations
+    bone_aligned_local_orientations = {}
+    
+    for i in range(len(skeleton)):
+        if i not in bone_aligned_world_orientations:
+            continue
+        
+        parent_idx = BODY34_PARENTS[i]
+        
+        if parent_idx < 0:
+            # Root joint - world IS local
+            bone_aligned_local_orientations[i] = bone_aligned_world_orientations[i]
+        elif parent_idx in bone_aligned_world_orientations:
+            # local = inverse(parent_world) × child_world
+            parent_world = bone_aligned_world_orientations[parent_idx]
+            child_world = bone_aligned_world_orientations[i]
+            
+            parent_inv = quat_inverse(parent_world)
+            bone_aligned_local_orientations[i] = quat_multiply(parent_inv, child_world)
+    
+    return bone_aligned_local_orientations
+
+
+def quaternion_to_euler(q, order='XYZ'):
+    """
+    Convert quaternion [x, y, z, w] to Euler angles in degrees.
+    
+    :param q: Quaternion [x, y, z, w]
+    :param order: Rotation order ('XYZ', 'ZYX', etc.)
+    :return: [rx, ry, rz] in degrees
+    """
+    import math
+    
+    x, y, z, w = q
+    
+    if order == 'XYZ':
+        # Roll (x-axis rotation)
+        sinr_cosp = 2 * (w * x + y * z)
+        cosr_cosp = 1 - 2 * (x * x + y * y)
+        roll = math.atan2(sinr_cosp, cosr_cosp)
+        
+        # Pitch (y-axis rotation)
+        sinp = 2 * (w * y - z * x)
+        if abs(sinp) >= 1:
+            pitch = math.copysign(math.pi / 2, sinp)
+        else:
+            pitch = math.asin(sinp)
+        
+        # Yaw (z-axis rotation)
+        siny_cosp = 2 * (w * z + x * y)
+        cosy_cosp = 1 - 2 * (y * y + z * z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        
+        return [math.degrees(roll), math.degrees(pitch), math.degrees(yaw)]
+    
+    # Add other rotation orders as needed
+    else:
+        raise NotImplementedError(f"Rotation order {order} not implemented")
 
 
 def draw_skeleton(person, color=(0.2, 0.8, 1.0)):
