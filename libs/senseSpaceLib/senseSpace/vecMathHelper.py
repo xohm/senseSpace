@@ -402,3 +402,99 @@ def getPointInRectangle2D(
     
     return (float(local_x), float(local_z))
 
+
+def insidePoly(vec3, dir, polygon):
+    """Check if a 3D point is inside a polygon by projecting onto the polygon plane
+    
+    Uses the provided direction vector to project the 3D point onto the plane containing
+    the polygon, then performs a 2D point-in-polygon test using ray casting.
+    
+    Args:
+        vec3: 3D point to test (numpy array, list, or QVector3D) - e.g., pelvis position
+        dir: Normal direction of the polygon plane (numpy array, list, or QVector3D)
+             For ground polygons, this should point upward (0, 1, 0)
+        polygon: List of vertices defining the polygon (numpy arrays, lists, or QVector3D)
+                 Vertices should lie on the same plane
+        
+    Returns:
+        bool: True if the projected point is inside the polygon, False otherwise
+        
+    Example:
+        >>> pelvis = QVector3D(100, 800, -500)  # Person's pelvis at 800mm height
+        >>> up = QVector3D(0, 1, 0)  # Ground normal pointing up
+        >>> polygon = [QVector3D(0, 0, 0), QVector3D(1000, 0, 0), 
+        ...            QVector3D(1000, 0, -1000), QVector3D(0, 0, -1000)]
+        >>> is_inside = insidePoly(pelvis, up, polygon)
+        >>> # Returns True if pelvis projects inside the floor polygon
+    """
+    if len(polygon) < 3:
+        return False
+    
+    # Convert to numpy arrays
+    vec3 = _to_numpy(vec3)
+    dir = _to_numpy(dir)
+    polygon_np = [_to_numpy(p) for p in polygon]
+    
+    # Normalize direction
+    dir = dir / np.linalg.norm(dir)
+    
+    # Project the 3D point onto the polygon plane
+    # Use the first polygon vertex as a point on the plane
+    plane_point = polygon_np[0]
+    
+    # Calculate the projection of vec3 onto the plane
+    # Formula: projected = vec3 - ((vec3 - plane_point) · dir) * dir
+    vec_to_point = vec3 - plane_point
+    dot_product = np.dot(vec_to_point, dir)
+    projected = vec3 - dot_product * dir
+    
+    # Now do 2D point-in-polygon test with the projected point
+    # Choose 2D projection based on dominant axis of the normal
+    ax = abs(dir[0])
+    ay = abs(dir[1])
+    az = abs(dir[2])
+    
+    # Ignore the coordinate with largest normal component for best numerical stability
+    if ay >= ax and ay >= az:
+        # Normal is mostly Y (vertical), use XZ plane
+        get_u = lambda v: v[0]  # X
+        get_v = lambda v: v[2]  # Z
+    elif ax >= ay and ax >= az:
+        # Normal is mostly X, use YZ plane
+        get_u = lambda v: v[1]  # Y
+        get_v = lambda v: v[2]  # Z
+    else:
+        # Normal is mostly Z, use XY plane
+        get_u = lambda v: v[0]  # X
+        get_v = lambda v: v[1]  # Y
+    
+    # Get 2D coordinates of projected point
+    px = get_u(projected)
+    py = get_v(projected)
+    
+    # Ray casting algorithm: count edge crossings
+    inside = False
+    n = len(polygon_np)
+    
+    p1 = polygon_np[0]
+    x1 = get_u(p1)
+    y1 = get_v(p1)
+    
+    for i in range(1, n + 1):
+        p2 = polygon_np[i % n]
+        x2 = get_u(p2)
+        y2 = get_v(p2)
+        
+        # Check if horizontal ray from point crosses this edge
+        if py > min(y1, y2):
+            if py <= max(y1, y2):
+                if px <= max(x1, x2):
+                    if y1 != y2:
+                        x_intersect = (py - y1) * (x2 - x1) / (y2 - y1) + x1
+                    if x1 == x2 or px <= x_intersect:
+                        inside = not inside
+        
+        x1, y1 = x2, y2
+    
+    return inside
+

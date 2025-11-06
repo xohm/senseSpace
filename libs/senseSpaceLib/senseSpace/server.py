@@ -40,6 +40,18 @@ except ImportError:
         STREAMING_AVAILABLE = False
         MultiCameraVideoStreamer = None
 
+# Import v2 per-camera streaming (optional)
+try:
+    from .video_streaming_server_v2 import PerCameraStreamingManager
+    STREAMING_V2_AVAILABLE = True
+except ImportError:
+    try:
+        from senseSpaceLib.senseSpace.video_streaming_server_v2 import PerCameraStreamingManager
+        STREAMING_V2_AVAILABLE = True
+    except ImportError:
+        STREAMING_V2_AVAILABLE = False
+        PerCameraStreamingManager = None
+
 # Import body tracking filter
 try:
     from .body_tracking_filter import BodyTrackingFilter
@@ -87,6 +99,8 @@ class SenseSpaceServer:
         
         # Video streaming configuration
         self.enable_streaming = enable_streaming
+        # V2 per-camera streaming is always available (client-activated)
+        self.per_camera_streaming_manager = None
         
         # Auto-detect: Use unicast for localhost-only, multicast if on LAN
         if stream_host is None:
@@ -117,6 +131,10 @@ class SenseSpaceServer:
         
         # Server state
         self.running = True
+        
+        # V2 per-camera streaming control listener (starts immediately, lazy-init streamer)
+        self.v2_control_thread = None
+        self._start_v2_control_listener()
         
         # TCP server attributes
         self.server_socket = None
@@ -466,6 +484,35 @@ class SenseSpaceServer:
                 info["data"]["streaming"]["camera_width"] = self.video_streamer.camera_width
                 info["data"]["streaming"]["camera_height"] = self.video_streamer.camera_height
                 info["data"]["streaming"]["framerate"] = self.video_streamer.framerate
+            elif self.is_fusion_mode and hasattr(self, 'fusion') and self.fusion is not None:
+                # Get camera info from fusion mode
+                if hasattr(self, 'num_fusion_cameras'):
+                    info["data"]["streaming"]["num_cameras"] = self.num_fusion_cameras
+                # Get resolution from first sender
+                try:
+                    if hasattr(self, '_fusion_senders'):
+                        for sender in self._fusion_senders.values():
+                            camera_info = sender.get_camera_information()
+                            res = camera_info.camera_configuration.resolution
+                            fps = camera_info.camera_configuration.fps
+                            info["data"]["streaming"]["camera_width"] = res.width
+                            info["data"]["streaming"]["camera_height"] = res.height
+                            info["data"]["streaming"]["framerate"] = fps
+                            break
+                except:
+                    pass
+            elif hasattr(self, 'camera') and self.camera is not None:
+                # Get info from single camera
+                info["data"]["streaming"]["num_cameras"] = 1
+                try:
+                    camera_info = self.camera.get_camera_information()
+                    res = camera_info.camera_configuration.resolution
+                    fps = camera_info.camera_configuration.fps
+                    info["data"]["streaming"]["camera_width"] = res.width
+                    info["data"]["streaming"]["camera_height"] = res.height
+                    info["data"]["streaming"]["framerate"] = fps
+                except:
+                    pass
             
             # Get depth mode from camera if available
             if hasattr(self, 'camera') and self.camera is not None:
@@ -475,15 +522,14 @@ class SenseSpaceServer:
                     info["data"]["streaming"]["depth_mode"] = depth_mode
                 except:
                     pass
-            elif self.is_fusion_mode and hasattr(self, 'fusion') and self.fusion is not None:
-                # Try to get from fusion cameras
+            elif self.is_fusion_mode and hasattr(self, '_fusion_senders'):
+                # Try to get from fusion senders
                 try:
-                    for sender in self.fusion.senders:
-                        if hasattr(sender, 'camera') and sender.camera is not None:
-                            init_params = sender.camera.get_init_parameters()
-                            depth_mode = str(init_params.depth_mode).split('.')[-1]
-                            info["data"]["streaming"]["depth_mode"] = depth_mode
-                            break
+                    for sender in self._fusion_senders.values():
+                        init_params = sender.get_init_parameters()
+                        depth_mode = str(init_params.depth_mode).split('.')[-1]
+                        info["data"]["streaming"]["depth_mode"] = depth_mode
+                        break
                 except:
                     pass
             
@@ -1142,6 +1188,250 @@ class SenseSpaceServer:
             print(f"[ERROR] Failed to initialize video streamer: {e}")
             self.video_streamer = None
     
+    def _start_v2_control_listener(self):
+        """Start TCP control listener for v2 per-camera streaming requests"""
+        # Track active client handler sockets for cleanup
+        self.v2_client_sockets = []
+        self.v2_client_sockets_lock = threading.Lock()
+        
+        self.v2_control_thread = threading.Thread(
+            target=self._v2_control_loop,
+            daemon=True
+        )
+        self.v2_control_thread.start()
+    
+    def _v2_control_loop(self):
+        """Control listener for v2 streaming requests (port = main_port + 1)"""
+        control_port = self.port + 1
+        
+        try:
+            self.v2_control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.v2_control_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.v2_control_socket.bind((self.host, control_port))
+            self.v2_control_socket.listen(5)
+            
+            print(f"[INFO] V2 streaming control listener on port {control_port}")
+            
+            while self.running:
+                try:
+                    self.v2_control_socket.settimeout(1.0)
+                    client_sock, client_addr = self.v2_control_socket.accept()
+                    
+                    # Handle in separate thread
+                    threading.Thread(
+                        target=self._handle_v2_stream_request,
+                        args=(client_sock, client_addr),
+                        daemon=True
+                    ).start()
+                    
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if self.running:
+                        print(f"[WARNING] V2 control listener error: {e}")
+            
+            self.v2_control_socket.close()
+        except Exception as e:
+            print(f"[ERROR] Failed to start V2 control listener: {e}")
+    
+    def _handle_v2_stream_request(self, client_sock: socket.socket, client_addr: tuple):
+        """Handle v2 stream request from client - keeps connection open until client disconnects"""
+        client_ip, client_port = client_addr
+        client_id = f"{client_ip}:{client_port}"
+        
+        # Register this socket for cleanup
+        with self.v2_client_sockets_lock:
+            self.v2_client_sockets.append(client_sock)
+        
+        try:
+            # Receive request
+            data = client_sock.recv(4096)
+            if not data:
+                return
+            
+            request_data = json.loads(data.decode('utf-8'))
+            print(f"[INFO] V2 stream request from {client_id}: {request_data}")
+            
+            # Parse cameras (if not specified, use all cameras)
+            requested_cameras = request_data.get('cameras')
+            fps_factor = request_data.get('fps_factor', 2)
+            
+            # Determine total cameras available
+            if self.is_fusion_mode and hasattr(self, 'num_fusion_cameras'):
+                total_cameras = self.num_fusion_cameras
+            elif hasattr(self, 'camera') and self.camera is not None:
+                total_cameras = 1
+            else:
+                response = {"status": "error", "message": "No cameras initialized"}
+                client_sock.sendall(json.dumps(response).encode('utf-8'))
+                return
+            
+            # If no cameras specified, stream all
+            if requested_cameras is None or len(requested_cameras) == 0:
+                cameras = list(range(total_cameras))
+                print(f"[INFO] No cameras specified, streaming all {total_cameras} cameras")
+            else:
+                cameras = requested_cameras
+                # Validate camera indices
+                if max(cameras) >= total_cameras:
+                    response = {"status": "error", 
+                               "message": f"Invalid camera index (max: {total_cameras-1})"}
+                    client_sock.sendall(json.dumps(response).encode('utf-8'))
+                    return
+            
+            # Lazy-initialize v2 streaming if not already done
+            if self.per_camera_streaming_manager is None:
+                print("[INFO] Lazy-initializing V2 per-camera streaming...")
+                
+                # Get camera parameters
+                if self.is_fusion_mode and hasattr(self, '_fusion_senders'):
+                    # Get from fusion sender
+                    for sender in self._fusion_senders.values():
+                        camera_info = sender.get_camera_information()
+                        res = camera_info.camera_configuration.resolution
+                        fps = camera_info.camera_configuration.fps
+                        camera_width = res.width
+                        camera_height = res.height
+                        camera_fps = fps
+                        break
+                elif hasattr(self, 'camera') and self.camera is not None:
+                    camera_info = self.camera.get_camera_information()
+                    res = camera_info.camera_configuration.resolution
+                    fps = camera_info.camera_configuration.fps
+                    camera_width = res.width
+                    camera_height = res.height
+                    camera_fps = fps
+                else:
+                    response = {"status": "error", "message": "Camera info not available"}
+                    client_sock.sendall(json.dumps(response).encode('utf-8'))
+                    return
+                
+                # Initialize streaming manager
+                self._initialize_per_camera_streaming(
+                    num_cameras=total_cameras,
+                    camera_width=camera_width,
+                    camera_height=camera_height,
+                    camera_fps=camera_fps
+                )
+                
+                if self.per_camera_streaming_manager is None:
+                    response = {"status": "error", "message": "Failed to initialize streaming"}
+                    client_sock.sendall(json.dumps(response).encode('utf-8'))
+                    return
+            
+            # Create stream request
+            from .video_streaming_v2 import StreamRequest
+            stream_request = StreamRequest(cameras=cameras, fps_factor=fps_factor)
+            
+            # Add client to streaming manager
+            success = self.per_camera_streaming_manager.streamer.add_client(
+                client_id=client_id,
+                client_ip=client_ip,
+                stream_request=stream_request
+            )
+            
+            if success:
+                response = {
+                    "status": "ok",
+                    "base_port": 5000,
+                    "cameras": cameras,
+                    "fps_factor": fps_factor,
+                    "num_cameras": total_cameras
+                }
+                print(f"[INFO] V2 streaming started for {client_id}: cameras {cameras} @ fps/{fps_factor}")
+            else:
+                response = {"status": "error", "message": "Failed to add client"}
+            
+            client_sock.sendall(json.dumps(response).encode('utf-8'))
+            
+            if success:
+                # Keep connection open - when it closes, cleanup the stream
+                print(f"[INFO] Keeping connection open for {client_id}, will cleanup on disconnect")
+                try:
+                    # Set a keepalive timeout
+                    client_sock.settimeout(1.0)  # Short timeout for responsive shutdown
+                    # Wait for disconnect or keepalive
+                    while self.running:
+                        try:
+                            data = client_sock.recv(1024)
+                            if not data:
+                                # Client disconnected
+                                print(f"[INFO] Client {client_id} disconnected, cleaning up stream")
+                                break
+                        except socket.timeout:
+                            # Timeout - check if server is still running
+                            continue
+                except Exception as e:
+                    print(f"[INFO] Client {client_id} connection lost: {e}")
+                
+                # Cleanup: remove client from streaming
+                if self.per_camera_streaming_manager:
+                    self.per_camera_streaming_manager.streamer.remove_client(client_id)
+                    print(f"[INFO] Removed streaming client {client_id}")
+        
+        except json.JSONDecodeError as e:
+            print(f"[ERROR] Invalid JSON from {client_id}: {e}")
+            try:
+                response = {"status": "error", "message": "Invalid JSON"}
+                client_sock.sendall(json.dumps(response).encode('utf-8'))
+            except:
+                pass
+        except Exception as e:
+            print(f"[ERROR] Error handling V2 stream request from {client_id}: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Unregister socket
+            with self.v2_client_sockets_lock:
+                if client_sock in self.v2_client_sockets:
+                    self.v2_client_sockets.remove(client_sock)
+            
+            try:
+                client_sock.close()
+            except:
+                pass
+    
+    def _initialize_per_camera_streaming(self, num_cameras: int, camera_width: int,
+                                         camera_height: int, camera_fps: int):
+        """Initialize v2 per-camera streaming manager (lazy - called on first client request)"""
+        if not STREAMING_V2_AVAILABLE:
+            print("[ERROR] Per-camera streaming (v2) not available - missing dependencies")
+            return
+        
+        try:
+            from .video_streaming_v2 import PerCameraVideoStreamer
+            
+            # Create a simple wrapper to hold the streamer
+            class StreamingWrapper:
+                def __init__(self, streamer):
+                    self.streamer = streamer
+                
+                def push_frames(self, rgb_frames, depth_frames):
+                    self.streamer.push_frames(rgb_frames, depth_frames)
+                
+                def stop(self):
+                    self.streamer.shutdown()
+            
+            streamer = PerCameraVideoStreamer(
+                num_cameras=num_cameras,
+                camera_width=camera_width,
+                camera_height=camera_height,
+                camera_fps=camera_fps,
+                base_port=5000
+            )
+            
+            self.per_camera_streaming_manager = StreamingWrapper(streamer)
+            
+            print(f"[INFO] Per-camera streaming (v2) initialized:")
+            print(f"[INFO]   Cameras: {num_cameras}, Resolution: {camera_width}x{camera_height}@{camera_fps}fps")
+            print(f"[INFO]   Base RTP port: 5000")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize per-camera streaming: {e}")
+            import traceback
+            traceback.print_exc()
+            self.per_camera_streaming_manager = None
+    
     def _initialize_fusion_cameras(self, device_list, enable_body_tracking: bool = True, enable_floor_detection: bool = True) -> bool:
         """Initialize multiple cameras for fusion mode using a fusion configuration (calib) file."""
         try:
@@ -1303,8 +1593,9 @@ class SenseSpaceServer:
             self._fusion_senders = senders
             # IMPORTANT: Store serial order for video streaming (must match camera index order)
             self._fusion_serials_ordered = [conf.serial_number for conf in fusion_configurations]
+            self.num_fusion_cameras = len(camera_identifiers)
             self.is_fusion_mode = True
-            print(f"[INFO] Fusion mode initialized with {len(camera_identifiers)} cameras")
+            print(f"[INFO] Fusion mode initialized with {self.num_fusion_cameras} cameras")
             print(f"[INFO] Camera order: {self._fusion_serials_ordered}")
             
             # Initialize video streaming if enabled
@@ -1405,15 +1696,25 @@ class SenseSpaceServer:
 
             if self.camera.grab(runtime_params) == sl.ERROR_CODE.SUCCESS:
                 # Capture and stream video frames if enabled
-                if self.video_streamer is not None:
+                rgb_frame = None
+                depth_frame = None
+                
+                if self.video_streamer is not None or self.per_camera_streaming_manager is not None:
                     try:
                         # Create image containers
                         rgb_mat = sl.Mat()
                         depth_mat = sl.Mat()
                         
                         # Retrieve RGB and depth images
-                        self.camera.retrieve_image(rgb_mat, sl.VIEW.LEFT, sl.MEM.CPU)
-                        self.camera.retrieve_measure(depth_mat, sl.MEASURE.DEPTH, sl.MEM.CPU)
+                        err = self.camera.retrieve_image(rgb_mat, sl.VIEW.LEFT, sl.MEM.CPU)
+                        if err != sl.ERROR_CODE.SUCCESS:
+                            print(f"[WARNING] retrieve_image failed: {err}")
+                            raise RuntimeError(f"retrieve_image failed: {err}")
+                        
+                        err = self.camera.retrieve_measure(depth_mat, sl.MEASURE.DEPTH, sl.MEM.CPU)
+                        if err != sl.ERROR_CODE.SUCCESS:
+                            print(f"[WARNING] retrieve_measure failed: {err}")
+                            raise RuntimeError(f"retrieve_measure failed: {err}")
                         
                         # Convert to numpy arrays
                         rgb_frame = rgb_mat.get_data()
@@ -1423,10 +1724,18 @@ class SenseSpaceServer:
                         if rgb_frame.shape[2] == 4:
                             rgb_frame = rgb_frame[:, :, :3]
                         
-                        # Push frames to streamer (single camera = list with one element)
-                        self.video_streamer.push_camera_frames([rgb_frame], [depth_frame])
+                        # Push to v1 if enabled
+                        if self.video_streamer is not None:
+                            self.video_streamer.push_camera_frames([rgb_frame], [depth_frame])
+                        
+                        # Push to v2 if enabled
+                        if self.per_camera_streaming_manager is not None:
+                            self.per_camera_streaming_manager.push_frames([rgb_frame], [depth_frame])
+                            
                     except Exception as e:
                         print(f"[WARNING] Failed to stream video frame: {e}")
+                        import traceback
+                        traceback.print_exc()
                 
                 # Retrieve bodies (simplified - match fusion approach)
                 try:
@@ -1580,7 +1889,56 @@ class SenseSpaceServer:
             except Exception:
                 pass
             
-            # Push all frames together if we have any
+            # Push v2 per-camera streaming frames if enabled (independent of v1)
+            if self.per_camera_streaming_manager and len(rgb_frames) > 0:
+                try:
+                    # Check if we have at least some valid frames
+                    valid_rgb_count = sum(1 for f in rgb_frames if f is not None)
+                    valid_depth_count = sum(1 for f in depth_frames if f is not None)
+                    
+                    if valid_rgb_count > 0 or valid_depth_count > 0:
+                        # Replace None frames with black/zero frames to maintain camera index alignment
+                        final_rgb_frames = []
+                        final_depth_frames = []
+                        
+                        num_cameras = len(rgb_frames)
+                        for i in range(num_cameras):
+                            # RGB: Use existing frame or create black frame
+                            if rgb_frames[i] is not None:
+                                final_rgb_frames.append(rgb_frames[i])
+                            else:
+                                # Create black placeholder (need dimensions from somewhere)
+                                if hasattr(self, '_fusion_senders') and self._fusion_senders:
+                                    sender = next(iter(self._fusion_senders.values()))
+                                    cam_info = sender.get_camera_information()
+                                    w, h = cam_info.camera_configuration.resolution.width, cam_info.camera_configuration.resolution.height
+                                    black_frame = np.zeros((h, w, 3), dtype=np.uint8)
+                                    final_rgb_frames.append(black_frame)
+                                else:
+                                    final_rgb_frames.append(None)
+                            
+                            # Depth: Use existing frame or create zero frame
+                            if depth_frames[i] is not None:
+                                final_depth_frames.append(depth_frames[i])
+                            else:
+                                # Create zero placeholder
+                                if hasattr(self, '_fusion_senders') and self._fusion_senders:
+                                    sender = next(iter(self._fusion_senders.values()))
+                                    cam_info = sender.get_camera_information()
+                                    w, h = cam_info.camera_configuration.resolution.width, cam_info.camera_configuration.resolution.height
+                                    zero_depth = np.zeros((h, w), dtype=np.float32)
+                                    final_depth_frames.append(zero_depth)
+                                else:
+                                    final_depth_frames.append(None)
+                        
+                        # Push to v2 streaming
+                        self.per_camera_streaming_manager.push_frames(final_rgb_frames, final_depth_frames)
+                except Exception as e:
+                    print(f"[WARNING] Failed to push v2 video frames: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # Push v1 multicast frames if enabled
             if self.video_streamer is not None and len(rgb_frames) > 0:
                 try:
                     # Check if we have at least some valid frames
@@ -1612,10 +1970,10 @@ class SenseSpaceServer:
                                                       self.video_streamer.camera_width), dtype=np.float32)
                                 final_depth_frames.append(zero_depth)
                         
-                        # Push frames (with placeholders for failed cameras)
+                        # Push frames (with placeholders for failed cameras) to v1
                         self.video_streamer.push_camera_frames(final_rgb_frames, final_depth_frames)
                 except Exception as e:
-                    print(f"[WARNING] Failed to stream video frames: {e}")
+                    print(f"[WARNING] Failed to stream v1 video frames: {e}")
 
             fusion_status = self.fusion.process()
             if fusion_status == sl.FUSION_ERROR_CODE.SUCCESS:
@@ -1916,7 +2274,49 @@ class SenseSpaceServer:
 
     def cleanup(self):
         """Clean up resources"""
+        print("[INFO] Starting cleanup...")
         self.running = False
+        
+        # Close all active v2 client handler sockets to unblock recv() calls
+        if hasattr(self, 'v2_client_sockets') and hasattr(self, 'v2_client_sockets_lock'):
+            with self.v2_client_sockets_lock:
+                for sock in self.v2_client_sockets[:]:  # Copy list to avoid modification during iteration
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                        sock.close()
+                    except:
+                        pass
+                self.v2_client_sockets.clear()
+                print(f"[INFO] Closed all v2 client handler sockets")
+        
+        # Close v2 control socket to unblock accept()
+        if hasattr(self, 'v2_control_socket'):
+            try:
+                self.v2_control_socket.close()
+                print("[INFO] Closed v2 control socket")
+            except:
+                pass
+        
+        # Shutdown v2 per-camera streaming first (stops GStreamer pipelines)
+        if hasattr(self, 'per_camera_streaming_manager') and self.per_camera_streaming_manager:
+            try:
+                print("[INFO] Stopping per-camera streaming...")
+                self.per_camera_streaming_manager.stop()
+            except Exception as e:
+                print(f"[WARNING] Error stopping per-camera streaming: {e}")
+        
+        # Give daemon threads a moment to see running=False and exit
+        import time
+        print("[INFO] Waiting for threads to exit...")
+        time.sleep(1.0)
+        
+        # Force exit if still hanging (threads are daemons, so this is safe)
+        import threading
+        active_threads = threading.active_count()
+        if active_threads > 1:  # More than just main thread
+            print(f"[WARNING] {active_threads} threads still active, forcing exit...")
+            import os
+            os._exit(0)
 
         if self.camera:
             try:

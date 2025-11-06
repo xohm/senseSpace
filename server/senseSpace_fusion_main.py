@@ -113,6 +113,7 @@ def main():
     
     # Create server instance (TCP by default, UDP if --udp flag is set)
     # Pass streaming configuration if --stream flag is used
+    # Note: V2 per-camera streaming is always available (client-activated)
     server = SenseSpaceServer(
         host=args.host, 
         port=args.port, 

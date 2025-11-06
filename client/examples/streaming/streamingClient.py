@@ -26,6 +26,14 @@ from senseSpaceLib.senseSpace.video_streaming import VideoReceiver, MultiCameraV
 from senseSpaceLib.senseSpace.client import SenseSpaceClient
 from senseSpaceLib.senseSpace.vizWidget import SkeletonGLWidget
 
+# Import v2 per-camera streaming (optional)
+try:
+    from senseSpaceLib.senseSpace.video_streaming_v2 import PerCameraVideoReceiver
+    V2_AVAILABLE = True
+except ImportError:
+    V2_AVAILABLE = False
+    PerCameraVideoReceiver = None
+
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QTimer
 from OpenGL.GL import *
@@ -588,67 +596,166 @@ def main():
     parser.add_argument('--skeleton-port', type=int, default=12345,
                        help='Skeleton data port (default: 12345)')
     
+    # Per-camera streaming options
+    parser.add_argument('--camStream', action='store_true',
+                       help='Enable per-camera video streaming (unicast, works over WiFi)')
+    parser.add_argument('--cameras', nargs='+', type=int, default=None,
+                       help='Select specific camera indices (e.g., --cameras 0 2). Default: stream all cameras')
+    parser.add_argument('--fps-factor', type=int, default=2,
+                       help='FPS decimation factor: 1=full 60fps, 2=30fps, 3=20fps (default: 2)')
+    
     args = parser.parse_args()
     
     logger.info(f"Starting streaming client...")
     logger.info(f"Server: {args.server}")
     
-    # Auto-detect server configuration via TCP
-    server_info = get_server_info(args.server, args.skeleton_port)
-    
-    # Determine streaming parameters (command-line args override auto-detection)
-    if args.stream_port is not None:
-        stream_port = args.stream_port
-    elif server_info and server_info.get('streaming', {}).get('enabled'):
-        stream_port = server_info['streaming']['port']
+    # Check if using per-camera streaming
+    if args.camStream:
+        if not V2_AVAILABLE:
+            logger.error("Per-camera streaming requested but not available (missing video_streaming_v2 module)")
+            sys.exit(1)
+        
+        logger.info("Using per-camera video streaming (unicast)")
+        
+        # Query server for number of cameras if not selecting specific cameras
+        if args.cameras is None:
+            # Auto-detect all cameras from server
+            server_info = get_server_info(args.server, args.skeleton_port)
+            if server_info and server_info.get('streaming', {}).get('num_cameras'):
+                total_cameras = server_info['streaming']['num_cameras']
+                cameras = list(range(total_cameras))
+                logger.info(f"Auto-detected {total_cameras} cameras, streaming all")
+            else:
+                # Fallback: assume 1 camera
+                cameras = [0]
+                logger.warning("Could not detect camera count, defaulting to camera 0")
+        else:
+            # User specified specific cameras
+            cameras = args.cameras
+            logger.info(f"Streaming selected cameras: {cameras}")
+        
+        num_cameras = len(cameras)
+        logger.info(f"Requesting cameras: {cameras}")
+        logger.info(f"FPS factor: {args.fps_factor}")
+        
+        # Create Qt application
+        app = QApplication(sys.argv)
+        
+        # Create visualization widget
+        viz_widget = StreamingVisualizationWidget(num_cameras=num_cameras)
+        viz_widget.setWindowTitle(f'senseSpace Camera Stream - {args.server} (cameras: {cameras})')
+        viz_widget.resize(1280, 720)
+        viz_widget.show()
+        
+        # Request stream from server
+        control_port = args.skeleton_port + 1
+        control_socket = None
+        try:
+            control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            control_socket.connect((args.server, control_port))
+            
+            request = {
+                'cameras': cameras,
+                'fps_factor': args.fps_factor
+            }
+            control_socket.sendall(json.dumps(request).encode('utf-8'))
+            
+            data = control_socket.recv(4096)
+            response = json.loads(data.decode('utf-8'))
+            
+            # Don't close socket - keep it open for session
+            
+            if response.get('status') != 'ok':
+                logger.error(f"Server rejected stream request: {response.get('message', 'Unknown')}")
+                control_socket.close()
+                sys.exit(1)
+            
+            base_port = response['base_port']
+            logger.info(f"Stream request accepted, base port: {base_port}")
+            logger.info("Control connection kept open - server will cleanup when this closes")
+            
+        except Exception as e:
+            logger.error(f"Failed to request stream: {e}")
+            if control_socket:
+                control_socket.close()
+            sys.exit(1)
+        
+        # Create v2 receiver
+        video_receiver = PerCameraVideoReceiver(
+            server_ip=args.server,
+            base_port=base_port,
+            cameras=cameras,
+            rgb_callback=lambda frame, cam_idx: viz_widget.on_rgb_frame(frame, camera_idx=cam_idx),
+            depth_callback=lambda frame, cam_idx: viz_widget.on_depth_frame(frame, camera_idx=cam_idx)
+        )
+        
     else:
-        stream_port = 5000  # Default fallback
+        # Original v1 streaming (existing code)
+        logger.info("Using v1 multiplexed streaming (multicast - localhost only)")
+        logger.warning("For WiFi streaming, use --camStream flag instead")
+        
+        # Auto-detect server configuration via TCP
+        server_info = get_server_info(args.server, args.skeleton_port)
     
-    # Get multicast host from server_info (or use default)
-    if server_info and server_info.get('streaming', {}).get('host'):
-        stream_host = server_info['streaming']['host']
-    else:
-        stream_host = "239.255.0.1"  # Default multicast
+        # Original v1 streaming (existing code)
+        logger.info("Using v1 multiplexed streaming")
+        
+        # Auto-detect server configuration via TCP
+        server_info = get_server_info(args.server, args.skeleton_port)
     
-    if args.num_cameras is not None:
-        num_cameras = args.num_cameras
-    elif server_info and server_info.get('streaming', {}).get('num_cameras'):
-        num_cameras = server_info['streaming']['num_cameras']
-    else:
-        num_cameras = 1  # Default fallback
+        # Determine streaming parameters (command-line args override auto-detection)
+        if args.stream_port is not None:
+            stream_port = args.stream_port
+        elif server_info and server_info.get('streaming', {}).get('enabled'):
+            stream_port = server_info['streaming']['port']
+        else:
+            stream_port = 5000  # Default fallback
+        
+        # Get multicast host from server_info (or use default)
+        if server_info and server_info.get('streaming', {}).get('host'):
+            stream_host = server_info['streaming']['host']
+        else:
+            stream_host = "239.255.0.1"  # Default multicast
+        
+        if args.num_cameras is not None:
+            num_cameras = args.num_cameras
+        elif server_info and server_info.get('streaming', {}).get('num_cameras'):
+            num_cameras = server_info['streaming']['num_cameras']
+        else:
+            num_cameras = 1  # Default fallback
+        
+        logger.info(f"Stream Host: {stream_host}")
+        logger.info(f"Stream Port: {stream_port}")
+        logger.info(f"Number of cameras: {num_cameras}")
+        
+        if server_info:
+            logger.info(f"Depth mode: {server_info['streaming'].get('depth_mode', 'UNKNOWN')}")
+            logger.info(f"Resolution: {server_info['streaming'].get('camera_width')}x{server_info['streaming'].get('camera_height')}@{server_info['streaming'].get('framerate')}fps")
+        
+        # Create Qt application
+        app = QApplication(sys.argv)
+        
+        # Create visualization widget with multi-camera support
+        viz_widget = StreamingVisualizationWidget(num_cameras=num_cameras)
+        viz_widget.setWindowTitle(f'senseSpace Streaming Client - {args.server} ({num_cameras} cam)')
+        viz_widget.resize(1280, 720)
+        viz_widget.show()
+        
+        # Create video receiver with single stream port (no heartbeat needed with udpsink)
+        # IMPORTANT: Callbacks receive (frame, camera_idx) - must handle multi-camera!
+        # NOTE: Lambda captures cam_idx at call time, not definition time
+        # Use stream_host (multicast address) instead of server IP for udpsrc binding
+        video_receiver = VideoReceiver(
+            server_ip=stream_host,  # Use multicast address from server_info
+            stream_port=stream_port,
+            num_cameras=num_cameras,
+            rgb_callback=lambda frame, cam_idx: viz_widget.on_rgb_frame(frame, camera_idx=cam_idx),
+            depth_callback=lambda frame, cam_idx: viz_widget.on_depth_frame(frame, camera_idx=cam_idx),
+            send_heartbeat=False  # Disable heartbeat - using direct udpsink now
+        )
+        logger.info(f"Using single multiplexed stream on port {stream_port}")
     
-    logger.info(f"Stream Host: {stream_host}")
-    logger.info(f"Stream Port: {stream_port}")
-    logger.info(f"Number of cameras: {num_cameras}")
-    
-    if server_info:
-        logger.info(f"Depth mode: {server_info['streaming'].get('depth_mode', 'UNKNOWN')}")
-        logger.info(f"Resolution: {server_info['streaming'].get('camera_width')}x{server_info['streaming'].get('camera_height')}@{server_info['streaming'].get('framerate')}fps")
-    
-    # Create Qt application
-    app = QApplication(sys.argv)
-    
-    # Create visualization widget with multi-camera support
-    viz_widget = StreamingVisualizationWidget(num_cameras=num_cameras)
-    viz_widget.setWindowTitle(f'senseSpace Streaming Client - {args.server} ({num_cameras} cam)')
-    viz_widget.resize(1280, 720)
-    viz_widget.show()
-    
-    # Create video receiver with single stream port (no heartbeat needed with udpsink)
-    # IMPORTANT: Callbacks receive (frame, camera_idx) - must handle multi-camera!
-    # NOTE: Lambda captures cam_idx at call time, not definition time
-    # Use stream_host (multicast address) instead of server IP for udpsrc binding
-    video_receiver = VideoReceiver(
-        server_ip=stream_host,  # Use multicast address from server_info
-        stream_port=stream_port,
-        num_cameras=num_cameras,
-        rgb_callback=lambda frame, cam_idx: viz_widget.on_rgb_frame(frame, camera_idx=cam_idx),
-        depth_callback=lambda frame, cam_idx: viz_widget.on_depth_frame(frame, camera_idx=cam_idx),
-        send_heartbeat=False  # Disable heartbeat - using direct udpsink now
-    )
-    logger.info(f"Using single multiplexed stream on port {stream_port}")
-    
-    viz_widget.set_video_receiver(video_receiver)
+    # Common code for both v1 and v2    viz_widget.set_video_receiver(video_receiver)
     
     # Start receiving video
     video_receiver.start()
@@ -700,6 +807,15 @@ def main():
     finally:
         # Cleanup
         logger.info("Shutting down...")
+        
+        # Close control connection (triggers server cleanup)
+        if args.camStream and control_socket:
+            try:
+                control_socket.close()
+                logger.info("Closed control connection")
+            except:
+                pass
+        
         video_receiver.stop()
         if skeleton_client:
             skeleton_client.disconnect()
