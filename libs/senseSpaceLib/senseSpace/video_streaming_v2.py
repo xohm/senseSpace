@@ -166,10 +166,11 @@ class PerCameraStreamerClient:
         # rtpptdemux on receiver will demultiplex by PT
         
         # Configure encoder with frequent keyframes for RGB (faster startup)
-        # RGB: idr-interval=15 (~0.5s at 30fps) - critical for fast visual recovery
-        # Depth: idr-interval=60 (~2s at 30fps) - less critical since lossless, saves bandwidth
-        rgb_encoder_config = f"{encoder_name} bitrate=3000 idr-interval=15"
-        depth_encoder_config = f"{encoder_name} bitrate=3000 idr-interval=60"
+        # RGB: gop-size=15 (~0.5s at 30fps) - critical for fast visual recovery
+        # Depth: gop-size=60 (~2s at 30fps) - less critical since lossless, saves bandwidth
+        # Note: nvh265enc uses 'gop-size', x265enc uses 'key-int-max'
+        rgb_encoder_config = f"{encoder_name} bitrate=3000 gop-size=15"
+        depth_encoder_config = f"{encoder_name} bitrate=3000 gop-size=60"
         
         pipeline_str = (
             # RGB branch - PT 96, to same port
