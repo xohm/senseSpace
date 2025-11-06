@@ -1815,19 +1815,15 @@ class SenseSpaceServer:
                                         zed.retrieve_measure(depth_mat, sl.MEASURE.DEPTH, sl.MEM.CPU)
                                         
                                         # Convert to numpy arrays
-                                        rgb_frame = rgb_mat.get_data()
-                                        depth_frame = depth_mat.get_data()
+                                        # CRITICAL: get_data() returns a VIEW, must copy IMMEDIATELY
+                                        rgb_frame = rgb_mat.get_data().copy()
+                                        depth_frame = depth_mat.get_data().copy()
                                         
                                         # ZED returns BGRA, convert to BGR (remove alpha channel)
-                                        # IMPORTANT: Use .copy() to create independent frame data
-                                        # Without .copy(), all cameras would share the same memory buffer!
                                         if rgb_frame.shape[2] == 4:
                                             rgb_frame = rgb_frame[:, :, :3].copy()
-                                        else:
-                                            rgb_frame = rgb_frame.copy()
                                         
-                                        # Depth also needs copy to avoid buffer sharing
-                                        depth_frame = depth_frame.copy()
+                                        # Frames already copied above, these are independent buffers
                                         
                                         # DEBUG: Log frame hashes for first few frames to verify different data
                                         if not hasattr(self, '_server_frame_counts'):
