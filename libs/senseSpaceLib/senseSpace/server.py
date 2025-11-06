@@ -1835,30 +1835,6 @@ class SenseSpaceServer:
                                         
                                         self._server_frame_counts[serial] += 1
                                         
-                                        # Hash first 100 pixels to detect identical frames (debug first few frames only)
-                                        rgb_hash = hash(rgb_frame[:10, :10, :].tobytes())
-                                        depth_hash = hash(depth_frame[:10, :10].tobytes())
-                                        
-                                        if self._server_frame_counts[serial] <= 5:
-                                            # Check if this frame is identical to another camera
-                                            identical_rgb = []
-                                            identical_depth = []
-                                            for other_serial in self._fusion_serials_ordered:
-                                                if other_serial != serial and other_serial in self._server_frame_hashes:
-                                                    if rgb_hash in self._server_frame_hashes[other_serial]:
-                                                        identical_rgb.append(other_serial)
-                                                    if depth_hash in self._server_frame_hashes[other_serial]:
-                                                        identical_depth.append(other_serial)
-                                            
-                                            if identical_rgb or identical_depth:
-                                                print(f"[WARNING] Camera {serial} (idx={cam_idx}) frame #{self._server_frame_counts[serial]} IDENTICAL to other camera(s)!")
-                                                if identical_rgb:
-                                                    print(f"  RGB hash {rgb_hash} matches: {identical_rgb}")
-                                                if identical_depth:
-                                                    print(f"  Depth hash {depth_hash} matches: {identical_depth}")
-                                        
-                                        self._server_frame_hashes[serial] = [rgb_hash, depth_hash]
-                                        
                                         # Collect frames
                                         rgb_frames.append(rgb_frame)
                                         depth_frames.append(depth_frame)

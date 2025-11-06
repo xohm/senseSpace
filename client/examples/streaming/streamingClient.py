@@ -8,6 +8,43 @@ Displays received frames in a visualization window.
 Usage:
     python streamingClient.py --server 192.168.1.100
     python streamingClient.py --server 192.168.1.100 --stream-port 5000
+
+HELPER FUNCTIONS FOR STUDENTS:
+===============================
+This example includes built-in helper functions to convert frames to standard formats:
+
+1. bgr_to_rgb_array(bgr_frame) -> rgb_array
+   - Converts BGR video frame to RGB numpy array
+   - Use for saving with Qt, matplotlib, or libraries expecting RGB
+
+2. depth_to_float_array(depth_frame) -> depth_meters
+   - Converts depth from millimeters to meters
+   - Returns float32 array for direct distance calculations
+
+3. depth_to_colored_visualization(depth_frame) -> rgb_colored
+   - Creates colorized depth visualization (like thermal camera view)
+   - Returns RGB image ready to save with Qt or display
+
+Example - Save RGB frame with Qt:
+    def on_rgb_frame(self, frame, camera_idx=0):
+        from PyQt5.QtGui import QImage
+        rgb = self.bgr_to_rgb_array(frame)
+        h, w = rgb.shape[:2]
+        qimage = QImage(rgb.data, w, h, 3*w, QImage.Format_RGB888)
+        qimage.save(f'camera_{camera_idx}.png')
+
+Example - Save depth data:
+    def on_depth_frame(self, frame, camera_idx=0):
+        # As float array in meters
+        depth_m = self.depth_to_float_array(frame)
+        np.save(f'depth_{camera_idx}.npy', depth_m)
+        
+        # As colored visualization with Qt
+        from PyQt5.QtGui import QImage
+        colored = self.depth_to_colored_visualization(frame)
+        h, w = colored.shape[:2]
+        qimage = QImage(colored.data, w, h, 3*w, QImage.Format_RGB888)
+        qimage.save(f'depth_{camera_idx}_colored.png')
 """
 
 import sys
@@ -70,6 +107,133 @@ class StreamingVisualizationWidget(SkeletonGLWidget):
         self.texture_sizes = {}  # Track texture dimensions for resize detection
         
         logger.info(f"StreamingVisualizationWidget initialized for {num_cameras} camera(s)")
+    
+    @staticmethod
+    def bgr_to_rgb_array(bgr_frame: np.ndarray) -> np.ndarray:
+        """
+        Convert BGR frame (from video stream) to RGB numpy array.
+        
+        Args:
+            bgr_frame: BGR frame from on_rgb_frame() callback, shape (H, W, 3), dtype=uint8
+        
+        Returns:
+            RGB numpy array, shape (H, W, 3), dtype=uint8
+            - [:, :, 0] = Red channel
+            - [:, :, 1] = Green channel
+            - [:, :, 2] = Blue channel
+        
+        Example usage:
+            def on_rgb_frame(self, frame, camera_idx=0):
+                # Convert to RGB for saving with Qt
+                rgb_array = StreamingVisualizationWidget.bgr_to_rgb_array(frame)
+                
+                # Save with Qt
+                from PyQt5.QtGui import QImage
+                h, w = rgb_array.shape[:2]
+                qimage = QImage(rgb_array.data, w, h, 3*w, QImage.Format_RGB888)
+                qimage.save(f'camera_{camera_idx}_rgb.png')
+        """
+        return cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+    
+    @staticmethod
+    def depth_to_float_array(depth_frame: np.ndarray) -> np.ndarray:
+        """
+        Extract depth data as float array in METERS.
+        
+        Args:
+            depth_frame: Depth frame from on_depth_frame() callback, shape (H, W), dtype=float32
+                        Values are in MILLIMETERS (ZED camera native format)
+        
+        Returns:
+            Depth array in METERS, shape (H, W), dtype=float32
+            - Valid depth: > 0 (typically 0.3m to 20m)
+            - Invalid/unknown depth: 0.0 or NaN
+        
+        Example usage:
+            def on_depth_frame(self, frame, camera_idx=0):
+                # Get depth in meters
+                depth_meters = StreamingVisualizationWidget.depth_to_float_array(frame)
+                
+                # Save as 32-bit float TIFF (preserves precision)
+                cv2.imwrite(f'camera_{camera_idx}_depth_meters.tiff', depth_meters)
+                
+                # Or convert to numpy binary file
+                np.save(f'camera_{camera_idx}_depth.npy', depth_meters)
+                
+                # Access depth at pixel (x, y)
+                distance = depth_meters[y, x]  # In meters
+        """
+        # Convert millimeters to meters
+        return depth_frame / 1000.0
+    
+    @staticmethod
+    def depth_to_colored_visualization(depth_frame: np.ndarray, 
+                                       colormap: int = cv2.COLORMAP_TURBO,
+                                       min_depth_mm: float = None,
+                                       max_depth_mm: float = None) -> np.ndarray:
+        """
+        Convert depth frame to colored visualization (RGB image).
+        
+        Args:
+            depth_frame: Depth frame in MILLIMETERS, shape (H, W), dtype=float32
+            colormap: OpenCV colormap (default: COLORMAP_TURBO)
+                     Options: COLORMAP_JET, COLORMAP_VIRIDIS, COLORMAP_PLASMA, etc.
+            min_depth_mm: Minimum depth for color mapping (auto-detect if None)
+            max_depth_mm: Maximum depth for color mapping (auto-detect if None)
+        
+        Returns:
+            RGB colored image, shape (H, W, 3), dtype=uint8
+            Ready to save with Qt or display
+        
+        Example usage:
+            def on_depth_frame(self, frame, camera_idx=0):
+                # Create colored visualization
+                depth_colored = StreamingVisualizationWidget.depth_to_colored_visualization(
+                    frame, 
+                    colormap=cv2.COLORMAP_TURBO,
+                    min_depth_mm=500,   # 0.5 meters
+                    max_depth_mm=5000   # 5 meters
+                )
+                
+                # Save with Qt
+                from PyQt5.QtGui import QImage
+                h, w = depth_colored.shape[:2]
+                qimage = QImage(depth_colored.data, w, h, 3*w, QImage.Format_RGB888)
+                qimage.save(f'camera_{camera_idx}_depth_colored.png')
+        """
+        # Get valid depth values (non-zero, non-NaN)
+        valid_mask = (depth_frame > 0) & np.isfinite(depth_frame)
+        
+        if not valid_mask.any():
+            # No valid depth, return black image
+            return np.zeros((*depth_frame.shape, 3), dtype=np.uint8)
+        
+        valid_depth = depth_frame[valid_mask]
+        
+        # Auto-detect range if not provided
+        if min_depth_mm is None:
+            min_depth_mm = np.percentile(valid_depth, 2)  # 2nd percentile
+        if max_depth_mm is None:
+            max_depth_mm = np.percentile(valid_depth, 98)  # 98th percentile
+        
+        # Ensure valid range
+        if max_depth_mm - min_depth_mm < 100:
+            min_depth_mm = valid_depth.min()
+            max_depth_mm = valid_depth.max()
+        
+        # Normalize to 0-1
+        depth_norm = np.zeros_like(depth_frame, dtype=np.float32)
+        depth_norm[valid_mask] = (depth_frame[valid_mask] - min_depth_mm) / (max_depth_mm - min_depth_mm)
+        depth_norm = np.clip(depth_norm, 0, 1)
+        
+        # Convert to uint8 and apply colormap
+        depth_uint8 = (depth_norm * 255).astype(np.uint8)
+        depth_colored_bgr = cv2.applyColorMap(depth_uint8, colormap)
+        
+        # Convert BGR to RGB
+        depth_colored_rgb = cv2.cvtColor(depth_colored_bgr, cv2.COLOR_BGR2RGB)
+        
+        return depth_colored_rgb
     
     def set_video_receiver(self, receiver):
         """Set the video receiver instance (VideoReceiver or MultiCameraVideoReceiver)"""
@@ -522,6 +686,66 @@ class StreamingVisualizationWidget(SkeletonGLWidget):
                     glDeleteTextures([texture_id])
                 except:
                     pass
+    
+    def keyPressEvent(self, event):
+        """Handle key press events for saving frames"""
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtGui import QImage
+        import datetime
+        
+        key = event.key()
+        modifiers = event.modifiers()
+        
+        # 'S' key - Save RGB frames
+        if key == Qt.Key_S and not (modifiers & Qt.ShiftModifier):
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            saved_count = 0
+            
+            for cam_idx in range(self.num_cameras):
+                if self.rgb_frames[cam_idx] is not None:
+                    # Convert BGR to RGB
+                    rgb = self.bgr_to_rgb_array(self.rgb_frames[cam_idx])
+                    
+                    # Save with Qt
+                    h, w = rgb.shape[:2]
+                    qimage = QImage(rgb.data, w, h, 3*w, QImage.Format_RGB888)
+                    filename = f'camera_{cam_idx}_rgb_{timestamp}.png'
+                    qimage.save(filename)
+                    logger.info(f"✓ Saved RGB frame: {filename}")
+                    saved_count += 1
+            
+            if saved_count == 0:
+                logger.warning("No RGB frames available to save")
+        
+        # 'Shift+S' - Save depth maps (both colored visualization and raw data)
+        elif key == Qt.Key_S and (modifiers & Qt.ShiftModifier):
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            saved_count = 0
+            
+            for cam_idx in range(self.num_cameras):
+                if self.depth_frames[cam_idx] is not None:
+                    # Save colored visualization
+                    colored = self.depth_to_colored_visualization(self.depth_frames[cam_idx])
+                    h, w = colored.shape[:2]
+                    qimage = QImage(colored.data, w, h, 3*w, QImage.Format_RGB888)
+                    filename_colored = f'camera_{cam_idx}_depth_colored_{timestamp}.png'
+                    qimage.save(filename_colored)
+                    logger.info(f"✓ Saved depth visualization: {filename_colored}")
+                    
+                    # Save raw depth data as numpy array (in meters)
+                    depth_meters = self.depth_to_float_array(self.depth_frames[cam_idx])
+                    filename_raw = f'camera_{cam_idx}_depth_meters_{timestamp}.npy'
+                    np.save(filename_raw, depth_meters)
+                    logger.info(f"✓ Saved depth data: {filename_raw} (load with: np.load('{filename_raw}'))")
+                    
+                    saved_count += 1
+            
+            if saved_count == 0:
+                logger.warning("No depth frames available to save")
+        
+        else:
+            # Pass other keys to parent class (for 'O', 'P', 'Q', etc.)
+            super().keyPressEvent(event)
 
 
 def get_server_info(server_ip, tcp_port=12345, timeout=5.0):
@@ -791,6 +1015,8 @@ def main():
         logger.info("Running in video-only mode")
     
     logger.info("=== Streaming Client Running ===")
+    logger.info("Press 'S' to save RGB frames")
+    logger.info("Press 'Shift+S' to save depth maps (colored + raw data)")
     logger.info("Press 'O' to toggle joint orientations")
     logger.info("Press 'P' to toggle point cloud")
     logger.info("Press 'Q' or close window to quit")
