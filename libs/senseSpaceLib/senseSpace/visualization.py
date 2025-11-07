@@ -912,6 +912,63 @@ def compute_bone_aligned_local_orientations(skeleton):
     return bone_aligned_local_orientations
 
 
+def compute_stable_bone_orientations(skeleton, reconstructor=None):
+    """
+    Compute bone-aligned orientations with geometric reconstruction to fix shoulder flipping.
+    
+    This function combines:
+    1. Bone-aligned local orientations (from compute_bone_aligned_local_orientations)
+    2. Geometric reconstruction for problematic joints (shoulders, elbows)
+    3. Temporal filtering to prevent jitter
+    
+    The result is stable orientations that don't flip during arm movement.
+    
+    :param skeleton: List of joint data (dict or objects with pos and ori)
+    :param reconstructor: Optional GeometricOrientationReconstructor instance.
+                         If None, a new one is created with default settings.
+    :return: Dictionary {joint_index: [x, y, z, w]} of local quaternions
+    """
+    # Import here to avoid circular dependency
+    try:
+        from .geometric_orientation import GeometricOrientationReconstructor
+    except ImportError:
+        # Fallback to regular bone-aligned if scipy not available
+        import warnings
+        warnings.warn("GeometricOrientationReconstructor not available (scipy missing?). "
+                     "Using regular bone-aligned orientations without geometric fix.")
+        return compute_bone_aligned_local_orientations(skeleton)
+    
+    # Get base bone-aligned orientations
+    bone_aligned = compute_bone_aligned_local_orientations(skeleton)
+    
+    # Create reconstructor if not provided
+    if reconstructor is None:
+        reconstructor = GeometricOrientationReconstructor(
+            blend_factor=0.3,  # 30% SDK, 70% geometric
+            use_filtering=True,
+            filter_smoothing=0.2
+        )
+    
+    # Reconstruct problematic joints (shoulders, elbows)
+    try:
+        reconstructed = reconstructor.reconstruct_skeleton_orientations(skeleton)
+        
+        # Merge: use reconstructed for problematic joints, bone-aligned for others
+        result = bone_aligned.copy()
+        for joint_idx, quat in reconstructed.items():
+            # Convert numpy array to list if needed
+            if hasattr(quat, 'tolist'):
+                result[joint_idx] = quat.tolist()
+            else:
+                result[joint_idx] = quat
+        
+        return result
+    except Exception as e:
+        import warnings
+        warnings.warn(f"Geometric reconstruction failed: {e}. Using bone-aligned orientations.")
+        return bone_aligned
+
+
 def quaternion_to_euler(q, order='XYZ'):
     """
     Convert quaternion [x, y, z, w] to Euler angles in degrees.

@@ -85,8 +85,8 @@ class SenseSpaceServer:
     """Main server class for ZED SDK body tracking and TCP broadcasting"""
     
     # Camera configuration - used for both single and fusion modes
-    CAMERA_RESOLUTION = sl.RESOLUTION.VGA  # 672x376 @ 60fps
-    CAMERA_FPS = 60
+    CAMERA_RESOLUTION = sl.RESOLUTION.HD720  # 672x376 @ 60fps
+    CAMERA_FPS = 30
 
     def __init__(self, host: str = "0.0.0.0", port: int = 12345, use_udp: bool = False,
                  enable_streaming: bool = False, stream_host: str = None,
