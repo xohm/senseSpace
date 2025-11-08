@@ -1441,32 +1441,64 @@ def stabilize_sdk_orientations(skeleton, previous_orientations=None):
 
 def calcHyrJointOrientations(person, skeleton):
     """
-    Calculate hierarchical accumulated joint orientations.
+    Calculate bone-aligned orientations where Y-axis points along each bone.
     
-    Step 1: Calculate world orientations by accumulating SDK local orientations
-            through the hierarchy. This gives us the coordinate system at each joint.
-    
-    Step 2: The Y-axis of each world orientation aligns with the bone direction
-            because the local orientations represent the rotation change from 
-            parent to child coordinate system.
+    Uses joint positions to compute bone directions, then creates orientations
+    where the Y-axis aligns with the bone from parent to child.
     
     Args:
         person: Person object with global_root_orientation attribute
         skeleton: List of joints with 'pos' and 'ori' attributes
     
     Returns:
-        dict: {joint_idx: quaternion [x,y,z,w]} - world orientations
+        dict: {joint_idx: quaternion [x,y,z,w]} - bone-aligned world orientations
     """
     
-    # Helper function to get SDK local quaternion for a joint
-    def get_local(joint):
-        # Convert enum to int if needed
-        joint_idx = joint.value if hasattr(joint, 'value') else joint
-        
+    # Define parent-child relationships
+    BODY34_CHILDREN = {
+        0: 1,    # PELVIS -> NAVAL_SPINE
+        1: 2,    # NAVAL_SPINE -> CHEST_SPINE
+        2: 3,    # CHEST_SPINE -> NECK
+        3: 20,   # NECK -> HEAD
+        2: 4,    # CHEST_SPINE -> LEFT_CLAVICLE (override)
+        4: 5,    # LEFT_CLAVICLE -> LEFT_SHOULDER
+        5: 6,    # LEFT_SHOULDER -> LEFT_ELBOW
+        6: 7,    # LEFT_ELBOW -> LEFT_WRIST
+        7: 8,    # LEFT_WRIST -> LEFT_HAND
+        2: 11,   # CHEST_SPINE -> RIGHT_CLAVICLE (override)
+        11: 12,  # RIGHT_CLAVICLE -> RIGHT_SHOULDER
+        12: 13,  # RIGHT_SHOULDER -> RIGHT_ELBOW
+        13: 14,  # RIGHT_ELBOW -> RIGHT_WRIST
+        14: 15,  # RIGHT_WRIST -> RIGHT_HAND
+        0: 18,   # PELVIS -> LEFT_HIP (override)
+        18: 19,  # LEFT_HIP -> LEFT_KNEE
+        19: 20,  # LEFT_KNEE -> LEFT_ANKLE
+        20: 21,  # LEFT_ANKLE -> LEFT_FOOT
+        0: 22,   # PELVIS -> RIGHT_HIP (override)
+        22: 23,  # RIGHT_HIP -> RIGHT_KNEE
+        23: 24,  # RIGHT_KNEE -> RIGHT_ANKLE
+        24: 25,  # RIGHT_ANKLE -> RIGHT_FOOT
+    }
+    
+    def get_position(joint_idx):
+        """Get position as QVector3D"""
+        if joint_idx >= len(skeleton):
+            return None
+        joint = skeleton[joint_idx]
+        pos = joint.pos if hasattr(joint, 'pos') else joint.get('pos')
+        if pos is None:
+            return None
+        if hasattr(pos, 'x'):
+            return QVector3D(pos.x, pos.y, pos.z)
+        else:
+            return QVector3D(pos['x'], pos['y'], pos['z'])
+    
+    def get_local_orientation(joint_idx):
+        """Get SDK local orientation as QQuaternion"""
         if joint_idx >= len(skeleton):
             return QQuaternion()  # Identity
-        joint_data = skeleton[joint_idx]
-        ori = joint_data.ori if hasattr(joint_data, 'ori') else joint_data.get('ori')
+        joint = skeleton[joint_idx]
+        ori = joint.ori if hasattr(joint, 'ori') else joint.get('ori')
         if not ori:
             return QQuaternion()  # Identity
         if hasattr(ori, 'x'):
@@ -1474,179 +1506,350 @@ def calcHyrJointOrientations(person, skeleton):
         else:
             return QQuaternion(ori['w'], ori['x'], ori['y'], ori['z']).normalized()
     
-    # Get global root orientation from person (world orientation of pelvis)
-    pelvis_world = QQuaternion()  # Identity fallback
-    if hasattr(person, 'global_root_orientation') and person.global_root_orientation is not None:
-        #print("Using person.global_root_orientation for pelvis world orientation: ", person.global_root_orientation)
-        gro = person.global_root_orientation
-        if hasattr(gro, 'x'):
-            pelvis_world = QQuaternion(gro.w, gro.x, gro.y, gro.z).normalized()
-        elif isinstance(gro, dict):
-            pelvis_world = QQuaternion(gro['w'], gro['x'], gro['y'], gro['z']).normalized()
+    def create_bone_aligned_orientation(bone_direction, local_ori):
+        """
+        Create quaternion where Y-axis points along bone_direction,
+        but use local_ori to determine the proper perpendicular plane (twist).
+        
+        This gives stable orientations that respect the SDK's twist/rotation
+        while ensuring Y aligns with the bone.
+        """
+        # Normalize bone direction - this will be our Y-axis
+        y_axis = bone_direction.normalized()
+        
+        # Get the Z-axis from the local orientation (forward direction)
+        # This preserves the twist/rotation from the SDK
+        local_z = local_ori.rotatedVector(QVector3D(0, 0, 1))
+        
+        # Project local_z onto the plane perpendicular to y_axis
+        # This removes any component parallel to the bone
+        dot = QVector3D.dotProduct(local_z, y_axis)
+        z_axis_projected = local_z - y_axis * dot
+        
+        # If projection is too small, use a fallback
+        if z_axis_projected.length() < 0.01:
+            # Local Z is parallel to bone - use local X instead
+            local_x = local_ori.rotatedVector(QVector3D(1, 0, 0))
+            dot = QVector3D.dotProduct(local_x, y_axis)
+            z_axis_projected = local_x - y_axis * dot
+        
+        z_axis = z_axis_projected.normalized()
+        
+        # X-axis = Y × Z (right-hand rule)
+        x_axis = QVector3D.crossProduct(y_axis, z_axis).normalized()
+        
+        # Re-orthogonalize Z = X × Y to ensure perfect orthogonality
+        z_axis = QVector3D.crossProduct(x_axis, y_axis).normalized()
+        
+        # Build quaternion from rotation matrix
+        from PyQt5.QtGui import QMatrix3x3
+        m = QMatrix3x3([
+            x_axis.x(), y_axis.x(), z_axis.x(),
+            x_axis.y(), y_axis.y(), z_axis.y(),
+            x_axis.z(), y_axis.z(), z_axis.z()
+        ])
+        
+        return QQuaternion.fromRotationMatrix(m)
     
-    # Step 2: Explicitly calculate world orientation for each joint
+    # Compute bone-aligned orientations
     world = {}
     
-    # === PELVIS (root) ===
-    world[Body34Joint.PELVIS] = pelvis_world
+    # Get pelvis world orientation
+    if hasattr(person, 'global_root_orientation') and person.global_root_orientation:
+        gro = person.global_root_orientation
+        if hasattr(gro, 'x'):
+            world[Body34Joint.PELVIS] = QQuaternion(gro.w, gro.x, gro.y, gro.z).normalized()
+        else:
+            world[Body34Joint.PELVIS] = QQuaternion(gro['w'], gro['x'], gro['y'], gro['z']).normalized()
+    else:
+        world[Body34Joint.PELVIS] = QQuaternion()
     
-    # === SPINE CHAIN ===
-    # Naval = Pelvis × Naval_local
-    world[Body34Joint.NAVAL_SPINE] = world[Body34Joint.PELVIS] * get_local(Body34Joint.NAVAL_SPINE)
+    # Define full hierarchy - each joint accumulates from its hierarchical parent
+    HIERARCHICAL_PARENT = {
+        # Spine chain
+        Body34Joint.NAVAL_SPINE: Body34Joint.PELVIS,
+        Body34Joint.CHEST_SPINE: Body34Joint.NAVAL_SPINE,
+        Body34Joint.NECK: Body34Joint.CHEST_SPINE,
+        Body34Joint.HEAD: Body34Joint.NECK,
+        # Left arm chain
+        Body34Joint.LEFT_CLAVICLE: Body34Joint.CHEST_SPINE,
+        Body34Joint.LEFT_SHOULDER: Body34Joint.LEFT_CLAVICLE,
+        Body34Joint.LEFT_ELBOW: Body34Joint.LEFT_SHOULDER,
+        Body34Joint.LEFT_WRIST: Body34Joint.LEFT_ELBOW,
+        Body34Joint.LEFT_HAND: Body34Joint.LEFT_WRIST,
+        # Right arm chain
+        Body34Joint.RIGHT_CLAVICLE: Body34Joint.CHEST_SPINE,
+        Body34Joint.RIGHT_SHOULDER: Body34Joint.RIGHT_CLAVICLE,
+        Body34Joint.RIGHT_ELBOW: Body34Joint.RIGHT_SHOULDER,
+        Body34Joint.RIGHT_WRIST: Body34Joint.RIGHT_ELBOW,
+        Body34Joint.RIGHT_HAND: Body34Joint.RIGHT_WRIST,
+        # Left leg chain
+        Body34Joint.LEFT_HIP: Body34Joint.PELVIS,
+        Body34Joint.LEFT_KNEE: Body34Joint.LEFT_HIP,
+        Body34Joint.LEFT_ANKLE: Body34Joint.LEFT_KNEE,
+        Body34Joint.LEFT_FOOT: Body34Joint.LEFT_ANKLE,
+        # Right leg chain
+        Body34Joint.RIGHT_HIP: Body34Joint.PELVIS,
+        Body34Joint.RIGHT_KNEE: Body34Joint.RIGHT_HIP,
+        Body34Joint.RIGHT_ANKLE: Body34Joint.RIGHT_KNEE,
+        Body34Joint.RIGHT_FOOT: Body34Joint.RIGHT_ANKLE,
+    }
     
-    # Chest = Naval × Chest_local
-    world[Body34Joint.CHEST_SPINE] = world[Body34Joint.NAVAL_SPINE] * get_local(Body34Joint.CHEST_SPINE)
+    # For each joint, align Y-axis to point toward child
+    for parent_idx, child_idx in BODY34_CHILDREN.items():
+        parent_pos = get_position(parent_idx)
+        child_pos = get_position(child_idx)
+        local_ori = get_local_orientation(parent_idx)
+        
+        if parent_pos and child_pos:
+            bone_direction = child_pos - parent_pos
+            if bone_direction.length() > 0.001:  # Avoid zero-length bones
+                # Check if this joint has a hierarchical parent
+                if parent_idx in HIERARCHICAL_PARENT:
+                    hierarchical_parent = HIERARCHICAL_PARENT[parent_idx]
+                    parent_world = world.get(hierarchical_parent, QQuaternion())
+                    
+                    # Transform bone direction from world to parent's local space
+                    parent_world_inv = parent_world.conjugated()
+                    bone_direction_local = parent_world_inv.rotatedVector(bone_direction)
+                    
+                    # Create bone-aligned orientation in parent's local space
+                    bone_aligned_local = create_bone_aligned_orientation(bone_direction_local, local_ori)
+                    
+                    # Transform to world space: world = parent_world * local
+                    world[parent_idx] = parent_world * bone_aligned_local
+                else:
+                    # Root joints: use world-space bone direction directly
+                    world[parent_idx] = create_bone_aligned_orientation(bone_direction, local_ori)
     
-    # Neck = Chest × Neck_local
-    world[Body34Joint.NECK] = world[Body34Joint.CHEST_SPINE] * get_local(Body34Joint.NECK)
-    
-    # === LEFT ARM CHAIN (branches from Neck) ===
-    # Clavicle = Neck × Clavicle_local × offset(+90°Z)
-    world[Body34Joint.LEFT_CLAVICLE] = world[Body34Joint.NECK] * QQuaternion.fromAxisAndAngle(QVector3D(0, 0, 1), 90)
-    
-    # Shoulder = Clavicle × Shoulder_local
-    world[Body34Joint.LEFT_SHOULDER] = world[Body34Joint.LEFT_CLAVICLE] * get_local(Body34Joint.LEFT_SHOULDER)
-    
-    # Elbow = Shoulder × Elbow_local
-    world[Body34Joint.LEFT_ELBOW] = world[Body34Joint.LEFT_SHOULDER] * get_local(Body34Joint.LEFT_ELBOW)
-    
-    # Wrist = Elbow × Wrist_local
-    world[Body34Joint.LEFT_WRIST] = world[Body34Joint.LEFT_ELBOW] * get_local(Body34Joint.LEFT_WRIST)
-    
-    # Hand = Wrist × Hand_local
-    world[Body34Joint.LEFT_HAND] = world[Body34Joint.LEFT_WRIST] * get_local(Body34Joint.LEFT_HAND)
-    
-    # HandTip = Hand × HandTip_local
-    world[Body34Joint.LEFT_HANDTIP] = world[Body34Joint.LEFT_HAND] * get_local(Body34Joint.LEFT_HANDTIP)
-    
-    # Thumb = Hand × Thumb_local
-    world[Body34Joint.LEFT_THUMB] = world[Body34Joint.LEFT_HAND] * get_local(Body34Joint.LEFT_THUMB)
-    
-    # === RIGHT ARM CHAIN (branches from Neck) ===
-    # Clavicle = Neck × Clavicle_local × offset(-90°Z)
-    world[Body34Joint.RIGHT_CLAVICLE] = world[Body34Joint.NECK] * QQuaternion.fromAxisAndAngle(QVector3D(0, 0, 1), -90) 
-    # * get_local(Body34Joint.RIGHT_CLAVICLE)
-    
-    # Shoulder = Clavicle × Shoulder_local
-    world[Body34Joint.RIGHT_SHOULDER] = world[Body34Joint.RIGHT_CLAVICLE] * get_local(Body34Joint.RIGHT_SHOULDER)
-    
-    # Elbow = Shoulder × Elbow_local
-    world[Body34Joint.RIGHT_ELBOW] = world[Body34Joint.RIGHT_SHOULDER] * get_local(Body34Joint.RIGHT_ELBOW)
-    
-    # Wrist = Elbow × Wrist_local
-    world[Body34Joint.RIGHT_WRIST] = world[Body34Joint.RIGHT_ELBOW] * get_local(Body34Joint.RIGHT_WRIST)
-    
-    # Hand = Wrist × Hand_local
-    world[Body34Joint.RIGHT_HAND] = world[Body34Joint.RIGHT_WRIST] * get_local(Body34Joint.RIGHT_HAND)
-    
-    # HandTip = Hand × HandTip_local
-    world[Body34Joint.RIGHT_HANDTIP] = world[Body34Joint.RIGHT_HAND] * get_local(Body34Joint.RIGHT_HANDTIP)
-    
-    # Thumb = Hand × Thumb_local
-    world[Body34Joint.RIGHT_THUMB] = world[Body34Joint.RIGHT_HAND] * get_local(Body34Joint.RIGHT_THUMB)
-    
-    # === LEFT LEG CHAIN (branches from Pelvis) ===
-    # Hip = Pelvis × Hip_local × offset(180°Z)
-    world[Body34Joint.LEFT_HIP] = world[Body34Joint.PELVIS] * get_local(Body34Joint.LEFT_HIP) * QQuaternion.fromAxisAndAngle(QVector3D(0, 0, 1), 180)
-    
-    # Knee = Hip × Knee_local
-    world[Body34Joint.LEFT_KNEE] = world[Body34Joint.LEFT_HIP] * get_local(Body34Joint.LEFT_KNEE)
-    
-    # Ankle = Knee × Ankle_local
-    world[Body34Joint.LEFT_ANKLE] = world[Body34Joint.LEFT_KNEE] * get_local(Body34Joint.LEFT_ANKLE)
-    
-    # Foot = Ankle × Foot_local
-    world[Body34Joint.LEFT_FOOT] = world[Body34Joint.LEFT_ANKLE] * get_local(Body34Joint.LEFT_FOOT)
-    
-    # === RIGHT LEG CHAIN (branches from Pelvis) ===
-    # Hip = Pelvis × Hip_local × offset(-180°Z)
-    world[Body34Joint.RIGHT_HIP] = world[Body34Joint.PELVIS] * get_local(Body34Joint.RIGHT_HIP) * QQuaternion.fromAxisAndAngle(QVector3D(0, 0, 1), -180)
-    
-    # Knee = Hip × Knee_local
-    world[Body34Joint.RIGHT_KNEE] = world[Body34Joint.RIGHT_HIP] * get_local(Body34Joint.RIGHT_KNEE)
-    
-    # Ankle = Knee × Ankle_local
-    world[Body34Joint.RIGHT_ANKLE] = world[Body34Joint.RIGHT_KNEE] * get_local(Body34Joint.RIGHT_ANKLE)
-    
-    # Foot = Ankle × Foot_local
-    world[Body34Joint.RIGHT_FOOT] = world[Body34Joint.RIGHT_ANKLE] * get_local(Body34Joint.RIGHT_FOOT)
-    
-    # === HEAD CHAIN (branches from Neck) ===
-    # Head = Neck × Head_local
-    world[Body34Joint.HEAD] = world[Body34Joint.NECK] * get_local(Body34Joint.HEAD)
-    
-    # Nose = Head × Nose_local
-    world[Body34Joint.NOSE] = world[Body34Joint.HEAD] * get_local(Body34Joint.NOSE)
-    
-    # Left Eye = Head × LeftEye_local
-    world[Body34Joint.LEFT_EYE] = world[Body34Joint.HEAD] * get_local(Body34Joint.LEFT_EYE)
-    
-    # Left Ear = Head × LeftEar_local
-    world[Body34Joint.LEFT_EAR] = world[Body34Joint.HEAD] * get_local(Body34Joint.LEFT_EAR)
-    
-    # Right Eye = Head × RightEye_local
-    world[Body34Joint.RIGHT_EYE] = world[Body34Joint.HEAD] * get_local(Body34Joint.RIGHT_EYE)
-    
-    # Right Ear = Head × RightEar_local
-    world[Body34Joint.RIGHT_EAR] = world[Body34Joint.HEAD] * get_local(Body34Joint.RIGHT_EAR)
-    
-    # === HEEL EXTENSIONS ===
-    # Left Heel = Ankle × Heel_local
-    world[Body34Joint.LEFT_HEEL] = world[Body34Joint.LEFT_ANKLE] * get_local(Body34Joint.LEFT_HEEL)
-    
-    # Right Heel = Ankle × Heel_local
-    world[Body34Joint.RIGHT_HEEL] = world[Body34Joint.RIGHT_ANKLE] * get_local(Body34Joint.RIGHT_HEEL)
-    
-    # Right Heel = Ankle × Heel_local
-    world[Body34Joint.RIGHT_HEEL] = world[Body34Joint.RIGHT_ANKLE] * get_local(Body34Joint.RIGHT_HEEL)
-    
-    # Convert QQuaternion to [x,y,z,w] format
+    # Convert to [x,y,z,w] format
     result = {}
     for joint_idx, quat in world.items():
         result[joint_idx] = [quat.x(), quat.y(), quat.z(), quat.scalar()]
     
     return result
 
-    # # set the world root orientation (pelvis)
-    # world_orientations[Body34Joint.PELVIS] = skeleton.get
 
-
-    # # Extract local orientations from skeleton and convert to QQuaternion
-    # local_orientations = {}
-    # for joint_idx, joint in enumerate(skeleton):
-    #     local_orientations = getJointQuat(joint).normalized()
-
+def reconstructSkeletonFromOrientations(person, skeleton, bone_lengths=None, bone_directions=None):
+    """
+    Reconstruct skeleton using forward kinematics from local orientations only.
+    
+    This shows what the skeleton looks like if we only use the SDK's local rotations
+    and fixed bone lengths (measured from the first frame). Useful for:
+    - Understanding how orientations drive the skeleton
+    - Exporting to animation systems that use FK
+    - Validating rotation data quality
+    
+    Args:
+        person: Person object with global_root_orientation and local_position_per_joint
+        skeleton: List of joints with 'pos' and 'ori' attributes
+        bone_lengths: Dict {child_idx: length} - if None, computed from current frame
+        bone_directions: Dict {child_idx: QVector3D} - bind pose directions
+    
+    Returns:
+        tuple: (world_positions, world_rotations, bone_lengths, bone_directions)
+               world_positions: {joint_idx: QVector3D}
+               world_rotations: {joint_idx: QQuaternion}
+               bone_lengths: {child_idx: float} - for caching
+               bone_directions: {child_idx: QVector3D} - for caching
+    """
+    
+    # Skeleton hierarchy (parent index for each joint)
+    BODY34_PARENTS = [
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 3, 11, 12, 13, 14, 15, 15,
+        0, 18, 19, 20, 0, 22, 23, 24, 3, 26, 26, 26, 26, 26, 20, 24
+    ]
+    
+    def get_position(joint_idx):
+        """Get position as QVector3D"""
+        if joint_idx >= len(skeleton):
+            return None
+        joint = skeleton[joint_idx]
+        pos = joint.pos if hasattr(joint, 'pos') else joint.get('pos')
+        if pos is None:
+            return None
+        if hasattr(pos, 'x'):
+            return QVector3D(pos.x, pos.y, pos.z)
+        else:
+            return QVector3D(pos['x'], pos['y'], pos['z'])
+    
+    def get_local_orientation(joint_idx):
+        """Get SDK local orientation as QQuaternion"""
+        if joint_idx >= len(skeleton):
+            return QQuaternion()
+        joint = skeleton[joint_idx]
+        ori = joint.ori if hasattr(joint, 'ori') else joint.get('ori')
+        if not ori:
+            return QQuaternion()
+        if hasattr(ori, 'x'):
+            return QQuaternion(ori.w, ori.x, ori.y, ori.z).normalized()
+        else:
+            return QQuaternion(ori['w'], ori['x'], ori['y'], ori['z']).normalized()
+    
+    # Initialize bone lengths and directions from first frame if not provided
+    if bone_lengths is None or bone_directions is None:
+        bone_lengths = {}
+        bone_directions = {}
         
-    #     world_orientations[joint_idx] = 
-    #     #local_orientations[joint_idx] = 
-
-
-    
-    # world_orientations[joint_idx] 
-
-
-    # for joint_idx in sorted(local_orientations.keys()):
-    #     parent_idx = BODY34_PARENTS[joint_idx]
+        # First pass: compute world orientations for the bind pose
+        bind_world_orientations = {}
         
-    #     if parent_idx < 0:
-    #         # Root joint (pelvis) - use local orientation as world
-    #         world_orientations[joint_idx] = local_orientations[joint_idx]
-    #     elif parent_idx in world_orientations:
-    #         # Accumulate: world = parent_world × local (using Qt quaternion multiplication)
-    #         parent_world = world_orientations[parent_idx]
-    #         local_quat = local_orientations[joint_idx]
-    #         world_quat = parent_world * local_quat
+        # Get pelvis orientation for bind pose
+        if hasattr(person, 'global_root_orientation') and person.global_root_orientation:
+            gro = person.global_root_orientation
+            if hasattr(gro, 'x'):
+                bind_world_orientations[0] = QQuaternion(gro.w, gro.x, gro.y, gro.z).normalized()
+            else:
+                bind_world_orientations[0] = QQuaternion(gro['w'], gro['x'], gro['y'], gro['z']).normalized()
+        else:
+            bind_world_orientations[0] = get_local_orientation(0)
+        
+        # Accumulate bind orientations through hierarchy
+        for child_idx, parent_idx in enumerate(BODY34_PARENTS):
+            if parent_idx >= 0 and parent_idx in bind_world_orientations:
+                local_ori = get_local_orientation(child_idx)
+                bind_world_orientations[child_idx] = bind_world_orientations[parent_idx] * local_ori
+        
+        # Second pass: compute bone directions in parent's LOCAL space
+        for child_idx, parent_idx in enumerate(BODY34_PARENTS):
+            if parent_idx < 0:
+                continue
             
-    #         # Apply branch offset if this joint branches out from spine
-    #         if joint_idx in BRANCH_OFFSETS:
-    #             offset_quat = BRANCH_OFFSETS[joint_idx]
-    #             world_quat = world_quat * offset_quat
+            parent_pos = get_position(parent_idx)
+            child_pos = get_position(child_idx)
             
-    #         world_orientations[joint_idx] = world_quat
+            if parent_pos and child_pos:
+                # Bone vector in world space
+                bone_vec_world = child_pos - parent_pos
+                length = bone_vec_world.length()
+                
+                if length > 0.001:
+                    bone_lengths[child_idx] = length
+                    
+                    # Transform bone direction to parent's LOCAL space
+                    # This is the bind pose direction
+                    if parent_idx in bind_world_orientations:
+                        parent_world_rot = bind_world_orientations[parent_idx]
+                        parent_world_inv = parent_world_rot.conjugated()
+                        bone_vec_local = parent_world_inv.rotatedVector(bone_vec_world)
+                        bone_directions[child_idx] = bone_vec_local.normalized()
+                    else:
+                        # Fallback: use world space direction
+                        bone_directions[child_idx] = bone_vec_world.normalized()
+                else:
+                    # Fallback for zero-length bones
+                    bone_lengths[child_idx] = 0.0
+                    bone_directions[child_idx] = QVector3D(0, 1, 0)
     
-    # # Convert QQuaternion back to [x,y,z,w] format for compatibility
-    # result = {}
-    # for joint_idx, quat in world_orientations.items():
-    #     result[joint_idx] = [quat.x(), quat.y(), quat.z(), quat.scalar()]
+    # Get pelvis world transform
+    world_positions = {}
+    world_rotations = {}
+    bone_aligned_rotations = {}  # Separate dict for bone-aligned orientations
     
-    # return result
+    # Pelvis world orientation - use global_root_orientation which represents the pelvis world rotation
+    if hasattr(person, 'global_root_orientation') and person.global_root_orientation:
+        gro = person.global_root_orientation
+        if hasattr(gro, 'x'):
+            world_rotations[0] = QQuaternion(gro.w, gro.x, gro.y, gro.z).normalized()
+        else:
+            world_rotations[0] = QQuaternion(gro['w'], gro['x'], gro['y'], gro['z']).normalized()
+    else:
+        # Fallback: use pelvis local orientation
+        pelvis_local = get_local_orientation(0)
+        if pelvis_local:
+            world_rotations[0] = pelvis_local
+        else:
+            world_rotations[0] = QQuaternion()
+    
+    bone_aligned_rotations[0] = world_rotations[0]  # Pelvis same for both
+    
+    # Pelvis position - use SDK tracked position
+    pelvis_pos = get_position(0)
+    if pelvis_pos:
+        world_positions[0] = pelvis_pos
+    else:
+        world_positions[0] = QVector3D(0, 0, 0)
+    
+    # Forward kinematics recursion
+    def fk_recurse(parent_idx):
+        """Recursively compute child transforms using proper FK"""
+        for child_idx, parent in enumerate(BODY34_PARENTS):
+            if parent != parent_idx:
+                continue
+            
+            # Get local orientation from SDK
+            local_ori = get_local_orientation(child_idx)
+            
+            # FK Step 1: Compute child's world rotation
+            # world_rotation = parent_world_rotation × local_rotation
+            parent_world_rot = world_rotations[parent_idx]
+            world_rotations[child_idx] = parent_world_rot * local_ori
+            
+            # FK Step 2: Compute child's world position
+            # The bone direction is determined by the bone's bind-pose direction
+            # rotated by the PARENT's world rotation (not the child's!)
+            if child_idx in bone_directions and child_idx in bone_lengths:
+                bone_len = bone_lengths[child_idx]
+                # Get bind-pose bone direction in parent's local space
+                bone_dir_local = bone_directions[child_idx]
+                # Rotate by parent's world rotation to get world-space bone direction
+                bone_dir_world = parent_world_rot.rotatedVector(bone_dir_local)
+                # Position = parent_pos + bone_direction * length
+                world_positions[child_idx] = world_positions[parent_idx] + bone_dir_world * bone_len
+                
+                # Create bone-aligned orientation at PARENT joint
+                # Y-axis points along the bone from parent to child
+                bone_direction_world = bone_dir_world.normalized()
+                
+                # Use parent's rotation to get perpendicular axes
+                sdk_z = parent_world_rot.rotatedVector(QVector3D(0, 0, 1))
+                
+                # Project SDK Z onto plane perpendicular to bone
+                dot = QVector3D.dotProduct(sdk_z, bone_direction_world)
+                z_projected = sdk_z - bone_direction_world * dot
+                
+                # If projection too small, use SDK X instead
+                if z_projected.length() < 0.01:
+                    sdk_x = parent_world_rot.rotatedVector(QVector3D(1, 0, 0))
+                    dot = QVector3D.dotProduct(sdk_x, bone_direction_world)
+                    z_projected = sdk_x - bone_direction_world * dot
+                
+                if z_projected.length() < 0.01:
+                    # Still too small, use a perpendicular vector
+                    if abs(bone_direction_world.y()) < 0.9:
+                        z_projected = QVector3D(0, 1, 0) - bone_direction_world * bone_direction_world.y()
+                    else:
+                        z_projected = QVector3D(1, 0, 0) - bone_direction_world * bone_direction_world.x()
+                
+                z_axis = z_projected.normalized()
+                y_axis = bone_direction_world
+                x_axis = QVector3D.crossProduct(y_axis, z_axis).normalized()
+                z_axis = QVector3D.crossProduct(x_axis, y_axis).normalized()
+                
+                # Build bone-aligned quaternion for PARENT joint
+                from PyQt5.QtGui import QMatrix3x3
+                m = QMatrix3x3([
+                    x_axis.x(), y_axis.x(), z_axis.x(),
+                    x_axis.y(), y_axis.y(), z_axis.y(),
+                    x_axis.z(), y_axis.z(), z_axis.z()
+                ])
+                bone_aligned_rotations[parent_idx] = QQuaternion.fromRotationMatrix(m)
+            else:
+                # No bone length data - use SDK position
+                child_pos = get_position(child_idx)
+                if child_pos:
+                    world_positions[child_idx] = child_pos
+                else:
+                    world_positions[child_idx] = world_positions[parent_idx]
+                
+                # For joints without children, use their SDK orientation
+                if child_idx not in bone_aligned_rotations:
+                    bone_aligned_rotations[child_idx] = world_rotations[child_idx]
+            
+            # Recurse to children
+            fk_recurse(child_idx)
+    
+    # Start recursion from pelvis
+    fk_recurse(0)
+    
+    return world_positions, bone_aligned_rotations, bone_lengths, bone_directions
