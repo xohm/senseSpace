@@ -2028,8 +2028,9 @@ class SenseSpaceServer:
                 conf_attr = getattr(person, 'keypoint_confidences', None)
             confidences = conf_attr if conf_attr is not None else []
 
-            # Get global orientations from ZED SDK
-            global_orientations = getattr(person, 'global_orientation_per_joint', None)
+            # Get orientations from ZED SDK
+            # Note: ZED SDK only provides local_orientation_per_joint and global_root_orientation
+            # There is NO global_orientation_per_joint in the SDK!
             local_orientations = getattr(person, 'local_orientation_per_joint', None)
             global_root_ori = getattr(person, 'global_root_orientation', None)
             
@@ -2037,48 +2038,45 @@ class SenseSpaceServer:
             if not hasattr(self, '_orientation_data_logged'):
                 self._orientation_data_logged = True
                 print("[ORIENTATION DATA DEBUG]")
-                print(f"  global_orientation_per_joint: {type(global_orientations)}, shape={getattr(global_orientations, 'shape', 'N/A')}")
                 print(f"  local_orientation_per_joint: {type(local_orientations)}, shape={getattr(local_orientations, 'shape', 'N/A')}")
                 print(f"  global_root_orientation: {type(global_root_ori)}, shape={getattr(global_root_ori, 'shape', 'N/A')}")
                 
-                # Check which one we'll actually use
-                if global_orientations is not None:
-                    print("  --> Using global_orientation_per_joint")
-                    if hasattr(global_orientations, 'shape') and len(global_orientations.shape) == 2:
-                        print(f"      {global_orientations.shape[0]} joints")
-                        for idx in [0, 5, 12, 18]:
-                            if idx < len(global_orientations):
-                                ori = global_orientations[idx]
-                                print(f"      Joint {idx}: [{ori[0]:.3f}, {ori[1]:.3f}, {ori[2]:.3f}, {ori[3]:.3f}]")
-                elif local_orientations is not None:
-                    print("  --> Using local_orientation_per_joint (FALLBACK)")
+                # Show global_root_orientation value
+                if global_root_ori is not None:
+                    print(f"  global_root_orientation = [{global_root_ori[0]:.3f}, {global_root_ori[1]:.3f}, {global_root_ori[2]:.3f}, {global_root_ori[3]:.3f}]")
+                
+                # Check which one we'll actually use for joint.ori
+                if local_orientations is not None:
+                    print("  --> Storing in joint.ori: local_orientation_per_joint (LOCAL/relative to parent)")
                     if hasattr(local_orientations, 'shape') and len(local_orientations.shape) == 2:
                         print(f"      {local_orientations.shape[0]} joints")
+                        print(f"      Pelvis (joint 0) local: [{local_orientations[0][0]:.3f}, {local_orientations[0][1]:.3f}, {local_orientations[0][2]:.3f}, {local_orientations[0][3]:.3f}] (should be ~identity)")
+                        for idx in [5, 12, 18]:
+                            if idx < len(local_orientations):
+                                ori = local_orientations[idx]
+                                print(f"      Joint {idx} local: [{ori[0]:.3f}, {ori[1]:.3f}, {ori[2]:.3f}, {ori[3]:.3f}]")
                 else:
                     print("  --> Using global_root_orientation (FALLBACK)")
             
-            # Prefer global orientations, fallback to local, then global_root
-            if global_orientations is None:
-                global_orientations = local_orientations
-            if global_orientations is None:
-                global_ori = getattr(person, 'global_orientation', None)
-                if global_ori is None:
-                    global_ori = global_root_ori
-                global_orientations = global_ori
+            # Use local orientations (these are what the SDK actually provides)
+            orientations = local_orientations
+            if orientations is None:
+                # Fallback to global_root if local orientations not available
+                orientations = global_root_ori
 
             joints = []
             for i, kp in enumerate(keypoints):
                 pos_obj = Position(x=float(kp[0]), y=float(kp[1]), z=float(kp[2]))
 
-                # Use global orientations directly from ZED SDK
-                if global_orientations is not None:
+                # Use orientations from ZED SDK (local_orientation_per_joint)
+                if orientations is not None:
                     try:
-                        if len(global_orientations.shape) == 2:
-                            # Array of quaternions, one per joint - these are GLOBAL (world-space)
-                            ori = global_orientations[i] if i < len(global_orientations) else global_orientations[0]
+                        if len(orientations.shape) == 2:
+                            # Array of quaternions, one per joint - these are LOCAL (relative to parent)
+                            ori = orientations[i] if i < len(orientations) else orientations[0]
                         else:
                             # Single quaternion - use for all joints
-                            ori = global_orientations
+                            ori = orientations
                         ori_obj = Quaternion(x=float(ori[0]), y=float(ori[1]), z=float(ori[2]), w=float(ori[3]))
                     except (IndexError, AttributeError):
                         ori_obj = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
@@ -2088,11 +2086,25 @@ class SenseSpaceServer:
                 conf = float(confidences[i]) if i < len(confidences) else 0.0
                 joints.append(Joint(i=i, pos=pos_obj, ori=ori_obj, conf=conf))
 
+            # Extract global_root_orientation if available
+            global_root_quat = None
+            if global_root_ori is not None:
+                try:
+                    global_root_quat = Quaternion(
+                        x=float(global_root_ori[0]),
+                        y=float(global_root_ori[1]),
+                        z=float(global_root_ori[2]),
+                        w=float(global_root_ori[3])
+                    )
+                except (IndexError, AttributeError, TypeError):
+                    pass
+
             people.append(Person(
                 id=person.id,
                 tracking_state=str(person.tracking_state),
                 confidence=float(person.confidence),
-                skeleton=joints
+                skeleton=joints,
+                global_root_orientation=global_root_quat
             ))
 
         if people or True:  # Always send frames for debugging
@@ -2146,33 +2158,30 @@ class SenseSpaceServer:
                 conf_attr = getattr(person, 'keypoint_confidences', None)
             confidences = conf_attr if conf_attr is not None else []
 
-            # Get global orientations from ZED SDK
-            global_orientations = getattr(person, 'global_orientation_per_joint', None)
+            # Get orientations from ZED SDK
+            # Note: ZED SDK only provides local_orientation_per_joint and global_root_orientation
             local_orientations = getattr(person, 'local_orientation_per_joint', None)
             global_root_ori = getattr(person, 'global_root_orientation', None)
             
-            # Prefer global orientations, fallback to local, then global_root
-            if global_orientations is None:
-                global_orientations = local_orientations
-            if global_orientations is None:
-                global_ori = getattr(person, 'global_orientation', None)
-                if global_ori is None:
-                    global_ori = global_root_ori
-                global_orientations = global_ori
+            # Use local orientations (these are what the SDK actually provides)
+            orientations = local_orientations
+            if orientations is None:
+                # Fallback to global_root if local orientations not available
+                orientations = global_root_ori
 
             joints = []
             for i, kp in enumerate(keypoints):
                 pos_obj = Position(x=float(kp[0]), y=float(kp[1]), z=float(kp[2]))
 
-                # Use global orientations directly from ZED SDK
-                if global_orientations is not None:
+                # Use orientations from ZED SDK (local_orientation_per_joint)
+                if orientations is not None:
                     try:
-                        if len(global_orientations.shape) == 2:
-                            # Array of quaternions, one per joint - these are GLOBAL (world-space)
-                            ori = global_orientations[i] if i < len(global_orientations) else global_orientations[0]
+                        if len(orientations.shape) == 2:
+                            # Array of quaternions, one per joint - these are LOCAL (relative to parent)
+                            ori = orientations[i] if i < len(orientations) else orientations[0]
                         else:
                             # Single quaternion - use for all joints
-                            ori = global_orientations
+                            ori = orientations
                         ori_obj = Quaternion(x=float(ori[0]), y=float(ori[1]), z=float(ori[2]), w=float(ori[3]))
                     except (IndexError, AttributeError):
                         ori_obj = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
@@ -2182,11 +2191,25 @@ class SenseSpaceServer:
                 conf = float(confidences[i]) if i < len(confidences) else 0.0
                 joints.append(Joint(i=i, pos=pos_obj, ori=ori_obj, conf=conf))
 
+            # Extract global_root_orientation if available
+            global_root_quat = None
+            if global_root_ori is not None:
+                try:
+                    global_root_quat = Quaternion(
+                        x=float(global_root_ori[0]),
+                        y=float(global_root_ori[1]),
+                        z=float(global_root_ori[2]),
+                        w=float(global_root_ori[3])
+                    )
+                except (IndexError, AttributeError, TypeError):
+                    pass
+
             people.append(Person(
                 id=person.id,
                 tracking_state=str(person.tracking_state),
                 confidence=float(person.confidence),
-                skeleton=joints
+                skeleton=joints,
+                global_root_orientation=global_root_quat
             ))
 
         if people or True:  # Always send frames for debugging

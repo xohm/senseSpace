@@ -100,6 +100,7 @@ class Person:
     tracking_state: str
     confidence: float
     skeleton: List[Joint]
+    global_root_orientation: Optional[Quaternion] = None  # Root orientation from ZED SDK
 
     def get_joint(self, joint_id: UniversalJoint, body_model: str = "BODY_34") -> Optional[tuple[Position, Quaternion]]:
         """Get joint position and orientation by universal joint ID
@@ -135,20 +136,28 @@ class Person:
         return None  # Joint not found in skeleton data
     
     def to_dict(self):
-        return {
+        result = {
             "id": self.id,
             "tracking_state": self.tracking_state,
             "confidence": self.confidence,
             "skeleton": [j.to_dict() for j in self.skeleton]
         }
+        if self.global_root_orientation is not None:
+            result["global_root_orientation"] = self.global_root_orientation.to_dict()
+        return result
 
     @staticmethod
     def from_dict(d):
+        global_root_ori = None
+        if "global_root_orientation" in d and d["global_root_orientation"] is not None:
+            global_root_ori = Quaternion.from_dict(d["global_root_orientation"])
+        
         return Person(
             id=d["id"],
             tracking_state=d["tracking_state"],
             confidence=d["confidence"],
-            skeleton=[Joint.from_dict(j) for j in d["skeleton"]]
+            skeleton=[Joint.from_dict(j) for j in d["skeleton"]],
+            global_root_orientation=global_root_ori
         )
 
     def get_skeletal_angles(self) -> dict:

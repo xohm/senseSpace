@@ -217,6 +217,12 @@ class GeometricOrientationReconstructor:
             JOINT_RIGHT_SHOULDER,
             JOINT_LEFT_ELBOW,
             JOINT_RIGHT_ELBOW,
+            JOINT_LEFT_HIP,
+            JOINT_RIGHT_HIP,
+            JOINT_LEFT_KNEE,
+            JOINT_RIGHT_KNEE,
+            JOINT_LEFT_ANKLE,
+            JOINT_RIGHT_ANKLE,
         ]
         
         if use_filtering:
@@ -323,6 +329,188 @@ class GeometricOrientationReconstructor:
             quat_final = np.array(self.filters[clavicle_idx].filter(quat_final.tolist()))
         
         return quat_final
+    
+    def reconstruct_hip(
+        self,
+        skeleton: List,
+        side: str = 'left'
+    ) -> np.ndarray:
+        """
+        Reconstruct hip orientation.
+        Hip's Y-axis should point along the upper leg bone (hip -> knee).
+        
+        Args:
+            skeleton: List of joints
+            side: 'left' or 'right'
+        
+        Returns:
+            Quaternion [x, y, z, w]
+        """
+        # Get joint indices
+        pelvis_idx = JOINT_PELVIS
+        hip_idx = JOINT_LEFT_HIP if side == 'left' else JOINT_RIGHT_HIP
+        knee_idx = JOINT_LEFT_KNEE if side == 'left' else JOINT_RIGHT_KNEE
+        ankle_idx = JOINT_LEFT_ANKLE if side == 'left' else JOINT_RIGHT_ANKLE
+        
+        # Get positions
+        pelvis_joint = skeleton[pelvis_idx]
+        hip_joint = skeleton[hip_idx]
+        knee_joint = skeleton[knee_idx]
+        ankle_joint = skeleton[ankle_idx]
+        
+        if hasattr(pelvis_joint, 'pos'):
+            pelvis_pos = np.array([pelvis_joint.pos.x, pelvis_joint.pos.y, pelvis_joint.pos.z])
+            hip_pos = np.array([hip_joint.pos.x, hip_joint.pos.y, hip_joint.pos.z])
+            knee_pos = np.array([knee_joint.pos.x, knee_joint.pos.y, knee_joint.pos.z])
+            ankle_pos = np.array([ankle_joint.pos.x, ankle_joint.pos.y, ankle_joint.pos.z])
+        else:
+            pelvis_pos = np.array([pelvis_joint['pos']['x'], pelvis_joint['pos']['y'], pelvis_joint['pos']['z']])
+            hip_pos = np.array([hip_joint['pos']['x'], hip_joint['pos']['y'], hip_joint['pos']['z']])
+            knee_pos = np.array([knee_joint['pos']['x'], knee_joint['pos']['y'], knee_joint['pos']['z']])
+            ankle_pos = np.array([ankle_joint['pos']['x'], ankle_joint['pos']['y'], ankle_joint['pos']['z']])
+        
+        # Primary direction: hip -> knee (upper leg bone direction)
+        bone_dir = knee_pos - hip_pos
+        bone_dir = normalize_vector(bone_dir)
+        
+        # Use stable torso up vector as reference (same as arms to prevent flipping)
+        up_vec = get_torso_up_vector(skeleton)
+        
+        # Build rotation with Y-axis along bone direction
+        quat_geom = make_rotation_from_direction(bone_dir, up_vec, axis='y')
+        
+        # Apply side-specific corrections (similar to clavicles)
+        if side == 'right':
+            rot_correction = R.from_euler('y', 180, degrees=True)
+            quat_final = (R.from_quat(quat_geom) * rot_correction).as_quat()
+        elif side == 'left':
+            rot_correction = R.from_euler('y', 180, degrees=True)
+            quat_final = (R.from_quat(quat_geom) * rot_correction).as_quat()
+        else:
+            quat_final = quat_geom
+        
+        # Apply temporal filtering
+        if self.use_filtering and hip_idx in self.filters:
+            quat_final = np.array(self.filters[hip_idx].filter(quat_final.tolist()))
+        
+        return quat_final
+    
+    def reconstruct_upper_leg(
+        self,
+        skeleton: List,
+        side: str = 'left'
+    ) -> np.ndarray:
+        """
+        Reconstruct knee orientation (knee -> ankle).
+        The knee joint's Y-axis points along the lower leg bone.
+        
+        Args:
+            skeleton: List of joints
+            side: 'left' or 'right'
+        
+        Returns:
+            Quaternion [x, y, z, w]
+        """
+        # Get joint indices
+        hip_idx = JOINT_LEFT_HIP if side == 'left' else JOINT_RIGHT_HIP
+        knee_idx = JOINT_LEFT_KNEE if side == 'left' else JOINT_RIGHT_KNEE
+        ankle_idx = JOINT_LEFT_ANKLE if side == 'left' else JOINT_RIGHT_ANKLE
+        
+        # Get positions
+        hip_joint = skeleton[hip_idx]
+        knee_joint = skeleton[knee_idx]
+        ankle_joint = skeleton[ankle_idx]
+        
+        if hasattr(hip_joint, 'pos'):
+            hip_pos = np.array([hip_joint.pos.x, hip_joint.pos.y, hip_joint.pos.z])
+            knee_pos = np.array([knee_joint.pos.x, knee_joint.pos.y, knee_joint.pos.z])
+            ankle_pos = np.array([ankle_joint.pos.x, ankle_joint.pos.y, ankle_joint.pos.z])
+        else:
+            hip_pos = np.array([hip_joint['pos']['x'], hip_joint['pos']['y'], hip_joint['pos']['z']])
+            knee_pos = np.array([knee_joint['pos']['x'], knee_joint['pos']['y'], knee_joint['pos']['z']])
+            ankle_pos = np.array([ankle_joint['pos']['x'], ankle_joint['pos']['y'], ankle_joint['pos']['z']])
+        
+        # Primary direction: knee -> ankle (lower leg bone)
+        bone_dir = ankle_pos - knee_pos
+        bone_dir = normalize_vector(bone_dir)
+        
+        # Use stable torso up vector as reference (same as arms to prevent flipping)
+        up_vec = get_torso_up_vector(skeleton)
+        
+        # Build rotation with Y-axis along bone direction
+        quat_geom = make_rotation_from_direction(bone_dir, up_vec, axis='y')
+        
+        # Apply side-specific corrections
+        if side == 'right':
+            rot_correction = R.from_euler('y', 180, degrees=True)
+            quat_geom = (R.from_quat(quat_geom) * rot_correction).as_quat()
+        elif side == 'left':
+            rot_correction = R.from_euler('y', 180, degrees=True)
+            quat_geom = (R.from_quat(quat_geom) * rot_correction).as_quat()
+        
+        # Apply temporal filtering
+        if self.use_filtering and knee_idx in self.filters:
+            quat_geom = np.array(self.filters[knee_idx].filter(quat_geom.tolist()))
+        
+        return quat_geom
+    
+    def reconstruct_lower_leg(
+        self,
+        skeleton: List,
+        side: str = 'left'
+    ) -> np.ndarray:
+        """
+        Reconstruct lower leg orientation (knee -> ankle).
+        
+        Args:
+            skeleton: List of joints
+            side: 'left' or 'right'
+        
+        Returns:
+            Quaternion [x, y, z, w]
+        """
+        # Get joint indices
+        knee_idx = JOINT_LEFT_KNEE if side == 'left' else JOINT_RIGHT_KNEE
+        ankle_idx = JOINT_LEFT_ANKLE if side == 'left' else JOINT_RIGHT_ANKLE
+        foot_idx = JOINT_LEFT_FOOT if side == 'left' else JOINT_RIGHT_FOOT
+        
+        # Get positions
+        knee_joint = skeleton[knee_idx]
+        ankle_joint = skeleton[ankle_idx]
+        foot_joint = skeleton[foot_idx]
+        
+        if hasattr(knee_joint, 'pos'):
+            knee_pos = np.array([knee_joint.pos.x, knee_joint.pos.y, knee_joint.pos.z])
+            ankle_pos = np.array([ankle_joint.pos.x, ankle_joint.pos.y, ankle_joint.pos.z])
+            foot_pos = np.array([foot_joint.pos.x, foot_joint.pos.y, foot_joint.pos.z])
+        else:
+            knee_pos = np.array([knee_joint['pos']['x'], knee_joint['pos']['y'], knee_joint['pos']['z']])
+            ankle_pos = np.array([ankle_joint['pos']['x'], ankle_joint['pos']['y'], ankle_joint['pos']['z']])
+            foot_pos = np.array([foot_joint['pos']['x'], foot_joint['pos']['y'], foot_joint['pos']['z']])
+        
+        # Primary direction: ankle -> foot (foot bone)
+        bone_dir = foot_pos - ankle_pos
+        bone_dir = normalize_vector(bone_dir)
+        
+        # Use stable torso up vector as reference (same as arms to prevent flipping)
+        up_vec = get_torso_up_vector(skeleton)
+        
+        # Build rotation with Y-axis along bone direction
+        quat_geom = make_rotation_from_direction(bone_dir, up_vec, axis='y')
+        
+        # Apply side-specific corrections
+        if side == 'right':
+            rot_correction = R.from_euler('y', 180, degrees=True)
+            quat_geom = (R.from_quat(quat_geom) * rot_correction).as_quat()
+        elif side == 'left':
+            rot_correction = R.from_euler('y', 180, degrees=True)
+            quat_geom = (R.from_quat(quat_geom) * rot_correction).as_quat()
+        
+        # Apply temporal filtering
+        if self.use_filtering and ankle_idx in self.filters:
+            quat_geom = np.array(self.filters[ankle_idx].filter(quat_geom.tolist()))
+        
+        return quat_geom
     
     def _multiply_quaternions(self, q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
         """
@@ -446,10 +634,125 @@ class GeometricOrientationReconstructor:
         
         return quat_final
     
+    def reconstruct_all_joints(self, skeleton: List) -> Dict[int, np.ndarray]:
+        """
+        Reconstruct ALL joints using geometric method (bone direction + stable reference).
+        Uses specialized methods for problematic joints (clavicles, shoulders, elbows).
+        
+        Args:
+            skeleton: List of joints
+        
+        Returns:
+            Dict of {joint_index: quaternion [x,y,z,w]} for ALL 34 joints
+        """
+        reconstructed = {}
+        up_vec = get_torso_up_vector(skeleton)
+        
+        # Define parent relationships for BODY_34
+        BODY34_PARENTS = [
+            -1,  # 0: PELVIS (root)
+            0,   # 1: NAVAL_SPINE
+            1,   # 2: CHEST_SPINE
+            2,   # 3: NECK
+            2,   # 4: LEFT_CLAVICLE
+            4,   # 5: LEFT_SHOULDER
+            5,   # 6: LEFT_ELBOW
+            6,   # 7: LEFT_WRIST
+            7,   # 8: LEFT_HAND
+            8,   # 9: LEFT_HANDTIP
+            8,   # 10: LEFT_THUMB
+            2,   # 11: RIGHT_CLAVICLE
+            11,  # 12: RIGHT_SHOULDER
+            12,  # 13: RIGHT_ELBOW
+            13,  # 14: RIGHT_WRIST
+            14,  # 15: RIGHT_HAND
+            15,  # 16: RIGHT_HANDTIP
+            15,  # 17: RIGHT_THUMB
+            0,   # 18: LEFT_HIP
+            18,  # 19: LEFT_KNEE
+            19,  # 20: LEFT_ANKLE
+            20,  # 21: LEFT_FOOT
+            0,   # 22: RIGHT_HIP
+            22,  # 23: RIGHT_KNEE
+            23,  # 24: RIGHT_ANKLE
+            24,  # 25: RIGHT_FOOT
+            3,   # 26: HEAD
+            26,  # 27: NOSE
+            26,  # 28: LEFT_EYE
+            26,  # 29: LEFT_EAR
+            26,  # 30: RIGHT_EYE
+            26,  # 31: RIGHT_EAR
+            20,  # 32: LEFT_HEEL
+            24,  # 33: RIGHT_HEEL
+        ]
+        
+        # Reconstruct each joint from bone direction
+        for joint_idx in range(len(skeleton)):
+            # Use specialized methods for problematic joints
+            if joint_idx == JOINT_LEFT_CLAVICLE:
+                reconstructed[joint_idx] = self.reconstruct_clavicle(skeleton, side='left')
+            elif joint_idx == JOINT_RIGHT_CLAVICLE:
+                reconstructed[joint_idx] = self.reconstruct_clavicle(skeleton, side='right')
+            elif joint_idx == JOINT_LEFT_SHOULDER:
+                reconstructed[joint_idx] = self.reconstruct_upper_arm(skeleton, side='left')
+            elif joint_idx == JOINT_RIGHT_SHOULDER:
+                reconstructed[joint_idx] = self.reconstruct_upper_arm(skeleton, side='right')
+            elif joint_idx == JOINT_LEFT_ELBOW:
+                reconstructed[joint_idx] = self.reconstruct_forearm(skeleton, side='left')
+            elif joint_idx == JOINT_RIGHT_ELBOW:
+                reconstructed[joint_idx] = self.reconstruct_forearm(skeleton, side='right')
+            # Leg joints - use specialized methods
+            elif joint_idx == JOINT_LEFT_HIP:
+                reconstructed[joint_idx] = self.reconstruct_hip(skeleton, side='left')
+            elif joint_idx == JOINT_RIGHT_HIP:
+                reconstructed[joint_idx] = self.reconstruct_hip(skeleton, side='right')
+            elif joint_idx == JOINT_LEFT_KNEE:
+                reconstructed[joint_idx] = self.reconstruct_upper_leg(skeleton, side='left')
+            elif joint_idx == JOINT_RIGHT_KNEE:
+                reconstructed[joint_idx] = self.reconstruct_upper_leg(skeleton, side='right')
+            elif joint_idx == JOINT_LEFT_ANKLE:
+                reconstructed[joint_idx] = self.reconstruct_lower_leg(skeleton, side='left')
+            elif joint_idx == JOINT_RIGHT_ANKLE:
+                reconstructed[joint_idx] = self.reconstruct_lower_leg(skeleton, side='right')
+            else:
+                # Generic reconstruction for other joints
+                parent_idx = BODY34_PARENTS[joint_idx]
+                
+                # Root joint - use world up
+                if parent_idx < 0:
+                    reconstructed[joint_idx] = np.array([0, 0, 0, 1])  # Identity quaternion
+                    continue
+                
+                # Get parent and child positions
+                parent_joint = skeleton[parent_idx]
+                child_joint = skeleton[joint_idx]
+                
+                if hasattr(parent_joint, 'pos'):
+                    parent_pos = np.array([parent_joint.pos.x, parent_joint.pos.y, parent_joint.pos.z])
+                    child_pos = np.array([child_joint.pos.x, child_joint.pos.y, child_joint.pos.z])
+                else:
+                    parent_pos = np.array([parent_joint['pos']['x'], parent_joint['pos']['y'], parent_joint['pos']['z']])
+                    child_pos = np.array([child_joint['pos']['x'], child_joint['pos']['y'], child_joint['pos']['z']])
+                
+                # Bone direction (parent -> child)
+                bone_dir = child_pos - parent_pos
+                bone_dir = normalize_vector(bone_dir)
+                
+                if np.linalg.norm(bone_dir) < 0.01:
+                    reconstructed[joint_idx] = np.array([0, 0, 0, 1])
+                    continue
+                
+                # Build rotation with Y-axis along bone direction
+                quat_geom = make_rotation_from_direction(bone_dir, up_vec, axis='y')
+                reconstructed[joint_idx] = quat_geom
+        
+        return reconstructed
+    
     def reconstruct_skeleton_orientations(
         self,
         skeleton: List,
-        joints_to_fix: Optional[List[int]] = None
+        joints_to_fix: Optional[List[int]] = None,
+        reconstruct_all: bool = False
     ) -> Dict[int, np.ndarray]:
         """
         Reconstruct orientations for specified joints.
@@ -457,10 +760,15 @@ class GeometricOrientationReconstructor:
         Args:
             skeleton: List of joints
             joints_to_fix: List of joint indices to reconstruct, or None for defaults
+            reconstruct_all: If True, reconstruct ALL 34 joints geometrically
         
         Returns:
             Dict of {joint_index: quaternion [x,y,z,w]}
         """
+        # If reconstruct_all is True, use the comprehensive method
+        if reconstruct_all:
+            return self.reconstruct_all_joints(skeleton)
+        
         if joints_to_fix is None:
             joints_to_fix = self.problematic_joints
         

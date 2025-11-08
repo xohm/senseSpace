@@ -7,12 +7,19 @@ this example uses geometric reconstruction to prevent shoulder/elbow flipping.
 
 VISUALIZATION:
 Press 'O': Toggle orientation axes on/off
-Press 'R': Toggle between visualization modes
-           - DEFAULT: BONE-ALIGNED with geometric reconstruction
-             🎯 BRIGHT NEON axes = Geometrically reconstructed (stable, won't flip!)
-                Clavicles (4,11), Shoulders (5,12), Elbows (6,13)
-             🔵 DARK axes = Regular bone-aligned (computed from positions)
-           - ALTERNATE: Pure SDK local orientations (for comparison)
+Press 'R': Cycle through visualization modes:
+           1) BONE-ALIGNED with geometric reconstruction (NEON - default)
+              🎯 ALL joints = Bright neon colors (easy to see!)
+              💫 EXTRA BRIGHT = Geometric reconstruction (stable, won't flip!)
+                 Clavicles (4,11), Shoulders (5,12), Elbows (6,13)
+           2) PURE SDK local orientations (accumulated through hierarchy)
+              Shows what SDK provides without geometric fixes
+           3) BONE-ALIGNED from positions (bright colors) - 100% Y-axis along bone
+              Computed from bone directions + temporal smoothing
+              ✨ Perfect Y-axis alignment + smooth motion
+           4) HIERARCHICAL with branch offsets (for experimentation)
+              SDK accumulated + clavicle/hip rotation offsets
+              Y-axis points along bones in T-pose
 
 PRINT TO CONSOLE:
 Press SPACE: Show bone-aligned orientations as Euler angles (TouchDesigner-ready)
@@ -51,12 +58,19 @@ from senseSpaceLib.senseSpace.vizWidget import SkeletonGLWidget
 from senseSpaceLib.senseSpace.visualization import (
     compute_bone_aligned_local_orientations,
     compute_stable_bone_orientations,
-    quaternion_to_euler
+    quaternion_to_euler,
+    calcHyrJointOrientations
 )
 from senseSpaceLib.senseSpace.orientation_filter import SkeletonOrientationFilter
 from senseSpaceLib.senseSpace.geometric_orientation import GeometricOrientationReconstructor
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QColor
+from OpenGL.GL import (
+    glBegin, glEnd, glVertex3f, glColor3f, GL_LINES, glLineWidth, 
+    glEnable, glDisable, GL_POLYGON_OFFSET_LINE, glPolygonOffset,
+    glPushMatrix, glPopMatrix, glTranslatef, glMultMatrixf
+)
 
 
 class OrientationWidget(SkeletonGLWidget):
@@ -78,11 +92,14 @@ class OrientationWidget(SkeletonGLWidget):
         # Geometric reconstructor for stable bone-aligned orientations
         self.geometric_reconstructor = GeometricOrientationReconstructor(blend_factor=0.0)
         
-        # Show filtered or raw orientations
-        self.show_filtered = False  # Show bone-aligned with geometric reconstruction by default
+        # Visualization mode: 0=bone-aligned (neon), 1=SDK local accumulated, 2=raw SDK, 3=hierarchical with offsets
+        self.vis_mode = 2  # Default to bone-aligned with neon
         
         # Cache for filtered orientations (computed each frame)
         self.filtered_orientations = {}
+        
+        # Store previous frame orientations for flip prevention (Mode 2)
+        self.previous_raw_orientations = {}
     
     def _quat_multiply(self, q1, q2):
         """Multiply two quaternions: q1 * q2"""
@@ -280,18 +297,35 @@ class OrientationWidget(SkeletonGLWidget):
                 self.orientation_filter.reset()
         
         elif event.key() == Qt.Key_R:
-            # Toggle between pure SDK local (accumulated) and bone-aligned with geometric reconstruction
-            self.show_filtered = not self.show_filtered
-            status = "PURE SDK LOCAL (ACCUMULATED)" if self.show_filtered else "BONE-ALIGNED WITH GEOMETRIC FIX"
-            print(f"\n[INFO] Visualization mode: {status}")
-            if self.show_filtered:
-                print(f"       Pure SDK local orientations (relative to parent)")
-                print(f"       NO geometric reconstruction applied")
-            else:
+            # Cycle through visualization modes
+            self.vis_mode = (self.vis_mode + 1) % 4  # Now 4 modes
+            
+            mode_names = [
+                "BONE-ALIGNED WITH GEOMETRIC FIX (NEON)",
+                "PURE SDK LOCAL (ACCUMULATED)",
+                "RAW SDK ORIENTATIONS",
+                "HIERARCHICAL WITH BRANCH OFFSETS"
+            ]
+            
+            print(f"\n[INFO] Visualization mode: {mode_names[self.vis_mode]}")
+            
+            if self.vis_mode == 0:
                 print(f"       BONE-ALIGNED orientations (Y-axis along bone)")
-                print(f"       🎯 BRIGHT NEON = Geometric reconstruction (stable, won't flip!)")
+                print(f"       🎯 ALL JOINTS = NEON colors (bright and visible!)")
+                print(f"       💫 EXTRA BRIGHT = Geometric reconstruction (stable, won't flip!)")
                 print(f"          Joints 4,5,6,11,12,13 = Clavicles/Shoulders/Elbows")
-                print(f"       🔵 DARK COLORS = Regular bone-aligned (from positions)")
+            elif self.vis_mode == 1:
+                print(f"       Pure SDK local orientations (relative to parent)")
+                print(f"       Accumulated through skeleton hierarchy")
+                print(f"       NO geometric reconstruction applied")
+            elif self.vis_mode == 2:
+                print(f"       BONE-ALIGNED from positions + temporal smoothing")
+                print(f"       Computed from bone vectors → 100% Y-axis alignment")
+                print(f"       Smoothed for stable motion")
+            else:
+                print(f"       Hierarchical SDK orientations WITH branch offsets")
+                print(f"       Accumulated through hierarchy + clavicle/hip rotations")
+                print(f"       Shows Y-axis pointing along bones in T-pose")
         
         elif event.key() == Qt.Key_Plus or event.key() == Qt.Key_Equal:
             # Increase smoothing
@@ -332,6 +366,9 @@ class OrientationWidget(SkeletonGLWidget):
     def draw_custom(self, frame: Frame):
         """Store latest frame and compute local orientations for visualization"""
         self.latest_frame = frame
+        
+        # Draw mode text overlay
+        self._draw_mode_text()
         
         # Compute local orientations cache for visualization
         if hasattr(frame, 'people') and frame.people:
@@ -393,24 +430,43 @@ class OrientationWidget(SkeletonGLWidget):
                 if not skeleton:
                     continue
                 
-                if self.show_filtered:
-                    # Show PURE SDK local orientations accumulated through hierarchy
-                    # (NO geometric reconstruction - this shows what SDK provides)
+                if self.vis_mode == 0:
+                    # Mode 0: BONE-ALIGNED orientations with geometric reconstruction (NEON)
+                    self._draw_bone_aligned_orientations(skeleton, axis_length=150.0)
+                elif self.vis_mode == 1:
+                    # Mode 1: PURE SDK local orientations accumulated through hierarchy
                     if person_idx in self.filtered_orientations:
                         self._draw_filtered_joint_orientations(
+                            person,
                             skeleton, 
                             self.filtered_orientations[person_idx], 
                             axis_length=150.0
                         )
+                elif self.vis_mode == 2:
+                    # Mode 2: BONE-ALIGNED orientations (from positions) WITH TEMPORAL SMOOTHING
+                    # Compute orientations directly from bone directions for 100% Y-axis alignment
+                    from senseSpaceLib.senseSpace.visualization import compute_bone_aligned_local_orientations
+                    
+                    # Compute bone-aligned orientations from positions
+                    bone_aligned_locals = compute_bone_aligned_local_orientations(skeleton)
+                    
+                    # Apply temporal smoothing to prevent jitter
+                    self._draw_smoothed_bone_aligned_orientations(
+                        person, skeleton, bone_aligned_locals, axis_length=150.0
+                    )
                 else:
-                    # Show BONE-ALIGNED orientations with geometric reconstruction
-                    # This is what gets sent to TouchDesigner (no flipping!)
-                    self._draw_bone_aligned_orientations(skeleton, axis_length=150.0)
+                    # Mode 3: HIERARCHICAL with branch offsets
+                    self._draw_hierarchical_orientations(person, skeleton, axis_length=100.0)
     
-    def _draw_filtered_joint_orientations(self, skeleton, local_orientations, axis_length=150.0):
-        """Draw RGB axes showing the filtered/reconstructed orientations"""
-        import math
-        from OpenGL.GL import glPushMatrix, glPopMatrix, glTranslatef, glBegin, glEnd, glVertex3f, glColor3f, GL_LINES, glLineWidth
+    def _draw_filtered_joint_orientations(self, person, skeleton, local_orientations, axis_length=150.0):
+        """Draw RGB axes showing the filtered/reconstructed orientations
+        
+        Args:
+            person: Person object with global_root_orientation
+            skeleton: List of joints with local orientations
+            local_orientations: Dict of local orientation quaternions
+            axis_length: Length of visualization axes
+        """
         
         # Define BODY_34 skeleton hierarchy (CORRECTED)
         BODY34_PARENTS = [
@@ -470,19 +526,71 @@ class OrientationWidget(SkeletonGLWidget):
                 w1*w2 - x1*x2 - y1*y2 - z1*z2
             ]
         
+        def euler_to_quat(roll, pitch, yaw):
+            """Convert Euler angles (degrees) to quaternion [x,y,z,w]"""
+            from math import sin, cos, radians
+            roll = radians(roll)
+            pitch = radians(pitch)
+            yaw = radians(yaw)
+            
+            cy = cos(yaw * 0.5)
+            sy = sin(yaw * 0.5)
+            cp = cos(pitch * 0.5)
+            sp = sin(pitch * 0.5)
+            cr = cos(roll * 0.5)
+            sr = sin(roll * 0.5)
+            
+            return [
+                sr * cp * cy - cr * sp * sy,  # x
+                cr * sp * cy + sr * cp * sy,  # y
+                cr * cp * sy - sr * sp * cy,  # z
+                cr * cp * cy + sr * sp * sy   # w
+            ]
+        
+        # Bind pose rotations for branching bones (chest->clavicle->shoulder)
+        # These make Y-axis point along the bone in T-pose
+        bind_pose_rotations = {
+            4: euler_to_quat(0, 0, -90),   # LEFT_CLAVICLE: rotate -90° Z
+            11: euler_to_quat(0, 0, 90),   # RIGHT_CLAVICLE: rotate +90° Z
+            18: euler_to_quat(0, 0, 180),  # LEFT_HIP: rotate 180° Z (point down)
+            22: euler_to_quat(0, 0, 180),  # RIGHT_HIP: rotate 180° Z (point down)
+        }
+        
         # Compute world orientations from local orientations
         world_orientations = {}
+        
+        # Get global root orientation from person if available
+        global_root_quat = None
+        if hasattr(person, 'global_root_orientation') and person.global_root_orientation is not None:
+            gro = person.global_root_orientation
+            if hasattr(gro, 'x'):
+                global_root_quat = [gro.x, gro.y, gro.z, gro.w]
+            else:
+                global_root_quat = [gro['x'], gro['y'], gro['z'], gro['w']]
+        
         for joint_idx in sorted(local_orientations.keys()):
             parent_idx = BODY34_PARENTS[joint_idx]
             
             if parent_idx < 0:
-                # Root joint
-                world_orientations[joint_idx] = local_orientations[joint_idx]
+                # Root joint (pelvis) - use global_root_orientation if available
+                if global_root_quat is not None:
+                    world_orientations[joint_idx] = global_root_quat
+                else:
+                    # Fallback: assume local orientation is world (will be wrong if person is rotated!)
+                    world_orientations[joint_idx] = local_orientations[joint_idx]
+                    print("[WARNING] No global_root_orientation available - pelvis orientation will be incorrect!")
             elif parent_idx in world_orientations:
                 # local_world = parent_world × local
                 parent_world = world_orientations[parent_idx]
                 local_quat = local_orientations[joint_idx]
-                world_orientations[joint_idx] = quat_multiply(parent_world, local_quat)
+                world_quat = quat_multiply(parent_world, local_quat)
+                
+                # Apply bind pose rotation if this joint branches out
+                if joint_idx in bind_pose_rotations:
+                    bind_rot = bind_pose_rotations[joint_idx]
+                    world_quat = quat_multiply(world_quat, bind_rot)
+                
+                world_orientations[joint_idx] = world_quat
         
         # Draw axes for each joint
         glLineWidth(2.0)
@@ -552,16 +660,12 @@ class OrientationWidget(SkeletonGLWidget):
     
     def _draw_bone_aligned_orientations(self, skeleton, axis_length=150.0):
         """Draw bone-aligned orientations with geometric reconstruction (what goes to TouchDesigner)"""
-        import math
-        from OpenGL.GL import glPushMatrix, glPopMatrix, glTranslatef, glBegin, glEnd, glVertex3f, glColor3f, GL_LINES, glLineWidth
         
-        # Get ALL bone-aligned orientations
-        all_bone_aligned = compute_bone_aligned_local_orientations(skeleton)
-        
-        # Override problematic joints with geometric reconstruction
-        reconstructed = self.geometric_reconstructor.reconstruct_skeleton_orientations(skeleton)
-        for joint_idx, quat in reconstructed.items():
-            all_bone_aligned[joint_idx] = quat.tolist() if hasattr(quat, 'tolist') else quat
+        # Reconstruct ALL joints geometrically (not just problematic ones)
+        all_bone_aligned = self.geometric_reconstructor.reconstruct_skeleton_orientations(
+            skeleton, 
+            reconstruct_all=True
+        )
         
         def quat_to_rotation_matrix(q):
             """Convert quaternion [x,y,z,w] to rotation matrix"""
@@ -572,10 +676,17 @@ class OrientationWidget(SkeletonGLWidget):
                 [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y)]
             ]
         
-        glLineWidth(3.0)  # Thicker lines for better visibility
+        # Reduce axis length by 50%
+        axis_length = axis_length * 0.5
+        
+        # Enable polygon offset to make lines visible on top of skeleton
+        glEnable(GL_POLYGON_OFFSET_LINE)
+        glPolygonOffset(-1.0, -1.0)
+        
+        glLineWidth(4.0)  # Thicker neon lines
         
         # Joints that use geometric reconstruction (highlighted)
-        reconstructed_joints = set(reconstructed.keys())  # {6, 7, 8, 10, 11, 12}
+        # ALL joints are now geometrically reconstructed!
         
         for joint_idx, quat in all_bone_aligned.items():
             if joint_idx >= len(skeleton):
@@ -600,24 +711,13 @@ class OrientationWidget(SkeletonGLWidget):
             y_axis = [rot_matrix[0][1], rot_matrix[1][1], rot_matrix[2][1]]
             z_axis = [rot_matrix[0][2], rot_matrix[1][2], rot_matrix[2][2]]
             
-            # Highlight geometrically reconstructed joints (clavicles/shoulders/elbows)
-            # These are STABLE and won't flip!
-            is_reconstructed = joint_idx in reconstructed_joints
-            
-            if is_reconstructed:
-                # BRIGHT NEON colors = geometrically reconstructed (stable, no flip!)
-                x_color = (1.0, 0.0, 0.5)  # Bright pink (X-axis)
-                y_color = (0.0, 1.0, 0.0)  # Bright green (Y-axis - bone direction!)
-                z_color = (0.0, 0.5, 1.0)  # Bright cyan (Z-axis)
-                length = axis_length * 1.5  # Longer axes to stand out
-                line_width = 4.0
-            else:
-                # Normal colors for regular bone-aligned joints
-                x_color = (0.7, 0.0, 0.0)  # Dark red
-                y_color = (0.0, 0.7, 0.0)  # Dark green
-                z_color = (0.0, 0.0, 0.7)  # Dark blue
-                length = axis_length
-                line_width = 2.0
+            # ALL joints get NEON colors (all geometrically reconstructed!)
+            # Bright magenta/green/cyan for visibility
+            x_color = (1.0, 0.0, 0.6)  # Bright magenta (X-axis)
+            y_color = (0.0, 1.0, 0.0)  # Bright green (Y-axis - bone direction!)
+            z_color = (0.0, 0.6, 1.0)  # Bright cyan (Z-axis)
+            length = axis_length
+            line_width = 4.0  # Thick lines for visibility
             
             glLineWidth(line_width)
             
@@ -643,6 +743,437 @@ class OrientationWidget(SkeletonGLWidget):
             glEnd()
         
         glLineWidth(1.0)
+        glDisable(GL_POLYGON_OFFSET_LINE)
+    
+    def _draw_smoothed_bone_aligned_orientations(self, person, skeleton, bone_aligned_locals, axis_length=150.0):
+        """Draw bone-aligned orientations with temporal smoothing (Mode 2)
+        
+        Takes bone-aligned LOCAL orientations (computed from positions) and applies
+        temporal smoothing, then accumulates through hierarchy for visualization.
+        
+        Args:
+            person: Person object with global_root_orientation
+            skeleton: List of joints
+            bone_aligned_locals: Dict {joint_idx: local quaternion} from compute_bone_aligned_local_orientations
+            axis_length: Length of visualization axes
+        """
+        from PyQt5.QtGui import QQuaternion, QVector3D, QMatrix4x4
+        from senseSpaceLib.senseSpace.protocol import Body34Joint
+        
+        # Define BODY_34 skeleton hierarchy
+        BODY34_PARENTS = [
+            -1,  # 0: PELVIS (root)
+            0,   # 1: NAVAL_SPINE
+            1,   # 2: CHEST_SPINE
+            2,   # 3: NECK
+            2,   # 4: LEFT_CLAVICLE
+            4,   # 5: LEFT_SHOULDER
+            5,   # 6: LEFT_ELBOW
+            6,   # 7: LEFT_WRIST
+            2,   # 8: RIGHT_CLAVICLE
+            8,   # 9: RIGHT_SHOULDER
+            9,   # 10: RIGHT_ELBOW
+            10,  # 11: RIGHT_WRIST
+            0,   # 12: LEFT_HIP
+            12,  # 13: LEFT_KNEE
+            13,  # 14: LEFT_ANKLE
+            14,  # 15: LEFT_FOOT
+            0,   # 16: RIGHT_HIP
+            16,  # 17: RIGHT_KNEE
+            17,  # 18: RIGHT_ANKLE
+            18,  # 19: RIGHT_FOOT
+            3,   # 20: HEAD
+            7,   # 21: LEFT_HAND_THUMB_1
+            21,  # 22: LEFT_HAND_THUMB_2
+            22,  # 23: LEFT_HAND_THUMB_3
+            23,  # 24: LEFT_HAND_THUMB_4
+            7,   # 25: LEFT_HAND_INDEX_1
+            7,   # 26: LEFT_HAND_MIDDLE_1
+            7,   # 27: LEFT_HAND_PINKY_1
+            7,   # 28: LEFT_HAND_RING_1
+            11,  # 29: RIGHT_HAND_THUMB_1
+            29,  # 30: RIGHT_HAND_THUMB_2
+            30,  # 31: RIGHT_HAND_THUMB_3
+            31,  # 32: RIGHT_HAND_THUMB_4
+            11,  # 33: RIGHT_HAND_INDEX_1
+        ]
+        
+        # Apply temporal smoothing (SLERP)
+        smoothing = 0.5  # 50% blend
+        
+        def quat_slerp(q1, q2, t):
+            """Spherical linear interpolation"""
+            import math
+            # Ensure q1 and q2 are QQuaternions
+            if not isinstance(q1, QQuaternion):
+                q1 = QQuaternion(q1[3], q1[0], q1[1], q1[2]) if isinstance(q1, list) else q1
+            if not isinstance(q2, QQuaternion):
+                q2 = QQuaternion(q2[3], q2[0], q2[1], q2[2]) if isinstance(q2, list) else q2
+            
+            dot = QQuaternion.dotProduct(q1, q2)
+            
+            # If dot < 0, negate q2 to take shorter path
+            if dot < 0:
+                q2 = QQuaternion(-q2.scalar(), -q2.x(), -q2.y(), -q2.z())
+                dot = -dot
+            
+            # Use QQuaternion's built-in slerp
+            return QQuaternion.slerp(q1, q2, t)
+        
+        # Smooth orientations
+        smoothed_locals = {}
+        for joint_idx, quat in bone_aligned_locals.items():
+            # Convert to QQuaternion if needed
+            if isinstance(quat, list):
+                current_quat = QQuaternion(quat[3], quat[0], quat[1], quat[2])
+            elif hasattr(quat, 'scalar'):
+                current_quat = quat
+            else:
+                current_quat = QQuaternion(quat['w'], quat['x'], quat['y'], quat['z'])
+            
+            # Apply smoothing if we have previous data
+            if hasattr(self, 'previous_bone_orientations') and joint_idx in self.previous_bone_orientations:
+                prev_quat = self.previous_bone_orientations[joint_idx]
+                smoothed_locals[joint_idx] = quat_slerp(prev_quat, current_quat, 1.0 - smoothing)
+            else:
+                smoothed_locals[joint_idx] = current_quat
+        
+        # Store for next frame
+        if not hasattr(self, 'previous_bone_orientations'):
+            self.previous_bone_orientations = {}
+        self.previous_bone_orientations = smoothed_locals.copy()
+        
+        # Get pelvis world orientation
+        if hasattr(person, 'global_root_orientation') and person.global_root_orientation:
+            gro = person.global_root_orientation
+            if hasattr(gro, 'x'):
+                pelvis_world = QQuaternion(gro.w, gro.x, gro.y, gro.z).normalized()
+            else:
+                pelvis_world = QQuaternion(gro['w'], gro['x'], gro['y'], gro['z']).normalized()
+        else:
+            pelvis_world = QQuaternion()  # Identity fallback
+        
+        # Accumulate through hierarchy
+        world_orientations = {}
+        world_orientations[0] = pelvis_world  # PELVIS
+        
+        for joint_idx in range(1, len(skeleton)):
+            parent_idx = BODY34_PARENTS[joint_idx]
+            if parent_idx == -1:
+                continue
+            
+            if parent_idx in world_orientations and joint_idx in smoothed_locals:
+                parent_world = world_orientations[parent_idx]
+                local_quat = smoothed_locals[joint_idx]
+                world_orientations[joint_idx] = parent_world * local_quat
+        
+        # Draw world orientations
+        glEnable(GL_POLYGON_OFFSET_LINE)
+        glPolygonOffset(-1.0, -1.0)
+        glLineWidth(3.0)
+        
+        for joint_idx, world_quat in world_orientations.items():
+            if joint_idx >= len(skeleton):
+                continue
+            
+            joint = skeleton[joint_idx]
+            pos = joint.pos if hasattr(joint, 'pos') else joint.get('pos')
+            if pos is None:
+                continue
+            
+            # Get position
+            if hasattr(pos, 'x'):
+                px, py, pz = pos.x, pos.y, pos.z
+            else:
+                px, py, pz = pos['x'], pos['y'], pos['z']
+            
+            # Create 4x4 rotation matrix
+            m4 = QMatrix4x4()
+            m4.rotate(world_quat)
+            
+            # Bright colors for bone-aligned smoothed mode
+            x_color = (1.0, 0.3, 0.3)  # Bright red
+            y_color = (0.3, 1.0, 0.3)  # Bright green (Y along bone!)
+            z_color = (0.3, 0.3, 1.0)  # Bright blue
+            
+            glPushMatrix()
+            glTranslatef(px, py, pz)
+            glMultMatrixf(m4.data())
+            
+            # Draw X axis
+            glBegin(GL_LINES)
+            glColor3f(*x_color)
+            glVertex3f(0, 0, 0)
+            glVertex3f(axis_length, 0, 0)
+            glEnd()
+            
+            # Draw Y axis (bone direction!)
+            glBegin(GL_LINES)
+            glColor3f(*y_color)
+            glVertex3f(0, 0, 0)
+            glVertex3f(0, axis_length, 0)
+            glEnd()
+            
+            # Draw Z axis
+            glBegin(GL_LINES)
+            glColor3f(*z_color)
+            glVertex3f(0, 0, 0)
+            glVertex3f(0, 0, axis_length)
+            glEnd()
+            
+            glPopMatrix()
+        
+        glLineWidth(1.0)
+        glDisable(GL_POLYGON_OFFSET_LINE)
+    
+    def _draw_accumulated_stabilized_orientations(self, person, skeleton, stabilized_locals, axis_length=150.0):
+        """Draw RGB axes showing stabilized SDK orientations accumulated through hierarchy (Mode 2)
+        
+        Takes stabilized LOCAL orientations (with flip prevention) and accumulates them
+        through the skeleton hierarchy to produce WORLD orientations where Y-axis is bone-aligned.
+        
+        Args:
+            person: Person object with global_root_orientation
+            skeleton: List of joints
+            stabilized_locals: Dict {joint_idx: local quaternion [x,y,z,w]} - stabilized
+            axis_length: Length of visualization axes
+        """
+        from PyQt5.QtGui import QQuaternion, QVector3D, QMatrix4x4
+        from senseSpaceLib.senseSpace.protocol import Body34Joint
+        
+        # Define BODY_34 skeleton hierarchy
+        BODY34_PARENTS = [
+            -1,  # 0: PELVIS (root)
+            0,   # 1: NAVAL_SPINE
+            1,   # 2: CHEST_SPINE
+            2,   # 3: NECK
+            2,   # 4: LEFT_CLAVICLE
+            4,   # 5: LEFT_SHOULDER
+            5,   # 6: LEFT_ELBOW
+            6,   # 7: LEFT_WRIST
+            2,   # 8: RIGHT_CLAVICLE (parent is CHEST_SPINE)
+            8,   # 9: RIGHT_SHOULDER
+            9,   # 10: RIGHT_ELBOW
+            10,  # 11: RIGHT_WRIST
+            0,   # 12: LEFT_HIP
+            12,  # 13: LEFT_KNEE
+            13,  # 14: LEFT_ANKLE
+            14,  # 15: LEFT_FOOT
+            0,   # 16: RIGHT_HIP
+            16,  # 17: RIGHT_KNEE
+            17,  # 18: RIGHT_ANKLE
+            18,  # 19: RIGHT_FOOT
+            3,   # 20: HEAD
+            7,   # 21: LEFT_HAND_THUMB_1
+            21,  # 22: LEFT_HAND_THUMB_2
+            22,  # 23: LEFT_HAND_THUMB_3
+            23,  # 24: LEFT_HAND_THUMB_4
+            7,   # 25: LEFT_HAND_INDEX_1
+            7,   # 26: LEFT_HAND_MIDDLE_1
+            7,   # 27: LEFT_HAND_PINKY_1
+            7,   # 28: LEFT_HAND_RING_1
+            11,  # 29: RIGHT_HAND_THUMB_1
+            29,  # 30: RIGHT_HAND_THUMB_2
+            30,  # 31: RIGHT_HAND_THUMB_3
+            31,  # 32: RIGHT_HAND_THUMB_4
+            11,  # 33: RIGHT_HAND_INDEX_1
+        ]
+        
+        # Helper to get stabilized local quaternion as QQuaternion
+        def get_stabilized_local(joint_idx):
+            if joint_idx in stabilized_locals:
+                q = stabilized_locals[joint_idx]
+                return QQuaternion(q[3], q[0], q[1], q[2]).normalized()
+            else:
+                # Fallback to skeleton data if not in stabilized dict
+                joint = skeleton[joint_idx]
+                ori = joint.ori if hasattr(joint, 'ori') else joint.get('ori')
+                if ori:
+                    if hasattr(ori, 'x'):
+                        return QQuaternion(ori.w, ori.x, ori.y, ori.z).normalized()
+                    else:
+                        return QQuaternion(ori['w'], ori['x'], ori['y'], ori['z']).normalized()
+            return QQuaternion()  # Identity
+        
+        # Get pelvis world orientation
+        if hasattr(person, 'global_root_orientation') and person.global_root_orientation:
+            gro = person.global_root_orientation
+            if hasattr(gro, 'x'):
+                pelvis_world = QQuaternion(gro.w, gro.x, gro.y, gro.z).normalized()
+            else:
+                pelvis_world = QQuaternion(gro['w'], gro['x'], gro['y'], gro['z']).normalized()
+        else:
+            pelvis_world = QQuaternion()  # Identity fallback
+        
+        # Accumulate through hierarchy: world[child] = world[parent] * local[child]
+        world_orientations = {}
+        world_orientations[0] = pelvis_world  # PELVIS
+        
+        for joint_idx in range(1, len(skeleton)):
+            parent_idx = BODY34_PARENTS[joint_idx]
+            if parent_idx == -1:
+                continue
+            
+            if parent_idx in world_orientations:
+                parent_world = world_orientations[parent_idx]
+                local_quat = get_stabilized_local(joint_idx)
+                world_orientations[joint_idx] = parent_world * local_quat
+        
+        # Draw world orientations
+        glEnable(GL_POLYGON_OFFSET_LINE)
+        glPolygonOffset(-1.0, -1.0)
+        glLineWidth(3.0)
+        
+        for joint_idx, world_quat in world_orientations.items():
+            if joint_idx >= len(skeleton):
+                continue
+            
+            joint = skeleton[joint_idx]
+            pos = joint.pos if hasattr(joint, 'pos') else joint.get('pos')
+            if pos is None:
+                continue
+            
+            # Get position
+            if hasattr(pos, 'x'):
+                px, py, pz = pos.x, pos.y, pos.z
+            else:
+                px, py, pz = pos['x'], pos['y'], pos['z']
+            
+            # Create 4x4 rotation matrix
+            m4 = QMatrix4x4()
+            m4.rotate(world_quat)
+            
+            # Bright colors for stabilized accumulated mode
+            x_color = (1.0, 0.3, 0.3)  # Bright red
+            y_color = (0.3, 1.0, 0.3)  # Bright green
+            z_color = (0.3, 0.3, 1.0)  # Bright blue
+            
+            glPushMatrix()
+            glTranslatef(px, py, pz)
+            glMultMatrixf(m4.data())
+            
+            # Draw X axis
+            glBegin(GL_LINES)
+            glColor3f(*x_color)
+            glVertex3f(0, 0, 0)
+            glVertex3f(axis_length, 0, 0)
+            glEnd()
+            
+            # Draw Y axis
+            glBegin(GL_LINES)
+            glColor3f(*y_color)
+            glVertex3f(0, 0, 0)
+            glVertex3f(0, axis_length, 0)
+            glEnd()
+            
+            # Draw Z axis
+            glBegin(GL_LINES)
+            glColor3f(*z_color)
+            glVertex3f(0, 0, 0)
+            glVertex3f(0, 0, axis_length)
+            glEnd()
+            
+            glPopMatrix()
+        
+        glLineWidth(1.0)
+        glDisable(GL_POLYGON_OFFSET_LINE)
+    
+    def _draw_hierarchical_orientations(self, person, skeleton, axis_length=100.0):
+        """Draw hierarchical accumulated orientations with branch offsets (Mode 3)
+        
+        Args:
+            person: Person object with global_root_orientation
+            skeleton: List of joints
+            axis_length: Length of visualization axes
+        """
+        from senseSpaceLib.senseSpace.visualization import calcHyrJointOrientations
+        from PyQt5.QtGui import QQuaternion, QVector3D, QMatrix4x4
+        
+        # Calculate hierarchical orientations with branch offsets
+        # Pass person object so it can access global_root_orientation
+        world_orientations = calcHyrJointOrientations(person, skeleton)
+        
+        # Enable polygon offset to make lines render on top
+        glEnable(GL_POLYGON_OFFSET_LINE)
+        glPolygonOffset(1.0, 5.0)
+        
+        glLineWidth(5.0)
+        
+        for joint_key, quat in world_orientations.items():
+            # Convert enum to int if needed
+            joint_idx = joint_key.value if hasattr(joint_key, 'value') else joint_key
+            
+            if joint_idx >= len(skeleton):
+                continue
+            
+            joint = skeleton[joint_idx]
+            pos = joint.pos if hasattr(joint, 'pos') else joint.get('pos')
+            if pos is None:
+                continue
+            
+            # Get position
+            if hasattr(pos, 'x'):
+                px, py, pz = pos.x, pos.y, pos.z
+            else:
+                px, py, pz = pos['x'], pos['y'], pos['z']
+            
+            # Convert quaternion [x,y,z,w] to QQuaternion (scalar, x, y, z)
+            q = QQuaternion(quat[3], quat[0], quat[1], quat[2])
+            
+            # Create 4x4 rotation matrix from quaternion
+            m4 = QMatrix4x4()
+            m4.rotate(q)
+            
+            # Standard RGB colors for hierarchy mode
+            x_color = (1.0, 0.0, 0.0)  # Red (X-axis)
+            y_color = (0.0, 1.0, 0.0)  # Green (Y-axis)
+            z_color = (0.0, 0.0, 1.0)  # Blue (Z-axis)
+
+            glPushMatrix()
+            glTranslatef(px, py, pz)
+            glMultMatrixf(m4.data())
+
+            # Draw X axis
+            glBegin(GL_LINES)
+            glColor3f(*x_color)
+            glVertex3f(0, 0, 0)
+            glVertex3f(axis_length, 0, 0)
+            glEnd()
+            
+            # Draw Y axis
+            glBegin(GL_LINES)
+            glColor3f(*y_color)
+            glVertex3f(0, 0, 0)
+            glVertex3f(0, axis_length, 0)
+            glEnd()
+            
+            # Draw Z axis
+            glBegin(GL_LINES)
+            glColor3f(*z_color)
+            glVertex3f(0, 0, 0)
+            glVertex3f(0, 0, axis_length)
+            glEnd()
+
+            glPopMatrix()
+        
+        glLineWidth(1.0)
+        glDisable(GL_POLYGON_OFFSET_LINE)
+
+            
+        glLineWidth(1.0)
+    
+    def _draw_mode_text(self):
+        """Draw current visualization mode as text overlay in the 3D view"""
+        mode_names = [
+            "Mode 0: BONE-ALIGNED (NEON)",
+            "Mode 1: SDK ACCUMULATED",
+            "Mode 2: BONE-ALIGNED + SMOOTHED",
+            "Mode 3: HIERARCHICAL + OFFSETS"
+        ]
+        
+        # Use Qt's renderText for OpenGL rendering
+        self.qglColor(QColor(255, 255, 0))  # Bright yellow
+        self.renderText(10, 80, mode_names[self.vis_mode])
 
 
 def main():
