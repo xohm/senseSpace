@@ -65,7 +65,7 @@ from senseSpaceLib.senseSpace.orientation_filter import SkeletonOrientationFilte
 from senseSpaceLib.senseSpace.geometric_orientation import GeometricOrientationReconstructor
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor, QQuaternion, QVector3D
 from OpenGL.GL import (
     glBegin, glEnd, glVertex3f, glColor3f, GL_LINES, glLineWidth, 
     glEnable, glDisable, GL_POLYGON_OFFSET_LINE, glPolygonOffset,
@@ -1369,7 +1369,17 @@ class OrientationWidget(SkeletonGLWidget):
             
             pos = fk_positions[joint_idx]
             
-            # Extract rotation axes from quaternion
+            # Apply 180° rotation around Y for visualization (Blender compatibility)
+            # Exclude legs/hips (18-25: left/right hip, knee, ankle, foot, heel)
+            is_leg_or_hip = 18 <= joint_idx <= 25 or joint_idx == 32 or joint_idx == 33  # Include heels
+            
+            if not is_leg_or_hip:
+                # Rotate 180° around Y-axis: negate X and Z
+                # This is equivalent to: quat_rotated = quat × Quat(0, 1, 0, 0)
+                rot_180_y = QQuaternion(0, 0, 1, 0)  # 180° around Y
+                quat = quat * rot_180_y
+            
+            # Extract rotation axes from quaternion (potentially rotated)
             x_axis = quat.rotatedVector(QVector3D(1, 0, 0))
             y_axis = quat.rotatedVector(QVector3D(0, 1, 0))
             z_axis = quat.rotatedVector(QVector3D(0, 0, 1))
