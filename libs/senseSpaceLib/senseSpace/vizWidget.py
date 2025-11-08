@@ -42,6 +42,7 @@ class SkeletonGLWidget(QGLWidget):
         # Frame data
         self.current_frame: Optional[Frame] = None
         self.frame_lock = QtCore.QMutex()
+        self._active_person_ids = set()  # Track active person IDs for cache cleanup
 
         # UI update timer
         self.update_timer = QTimer()
@@ -64,6 +65,9 @@ class SkeletonGLWidget(QGLWidget):
         
         # Client reference for recording control
         self.client = None
+        
+        # Track active person IDs for automatic cache cleanup
+        self._active_person_ids = set()
 
         # Make sure widget receives mouse events and focus
         self.setMouseTracking(True)
@@ -99,15 +103,62 @@ class SkeletonGLWidget(QGLWidget):
 
     
     def update_frame(self, frame: Frame):
-        """Update the displayed frame (called from network thread)"""
+        """Thread-safe setter for frame data
+        
+        Automatically tracks person IDs and cleans up global caches when persons disappear.
+        """
         with QtCore.QMutexLocker(self.frame_lock):
             self.current_frame = frame
             self.last_frame_time = time.time()
+        
+        # Track person changes and cleanup caches
+        self._update_person_tracking(frame)
     
     def get_current_frame(self) -> Optional[Frame]:
         """Thread-safe getter for current frame"""
         with QtCore.QMutexLocker(self.frame_lock):
             return self.current_frame
+    
+    def _update_person_tracking(self, frame: Frame):
+        """
+        Track active person IDs and cleanup global caches when persons disappear.
+        Called automatically from update_frame().
+        """
+        if not hasattr(frame, 'people') or not frame.people:
+            current_ids = set()
+        else:
+            current_ids = set()
+            for person in frame.people:
+                person_id = person.id if hasattr(person, 'id') else person.get('id', 0)
+                current_ids.add(person_id)
+        
+        # Detect disappeared persons
+        disappeared_ids = self._active_person_ids - current_ids
+        
+        if disappeared_ids:
+            # Clean up global caches in visualization module
+            from . import visualization
+            from . import orientation_filter
+            
+            # Clean FK cache if persons disappeared
+            if hasattr(visualization, '_fk_bone_geometry_cache'):
+                cache = visualization._fk_bone_geometry_cache
+                if cache.get('initialized', False):
+                    # Reset cache if ANY person disappeared (simple approach)
+                    cache['initialized'] = False
+                    cache['bone_lengths'] = None
+                    cache['bone_directions'] = None
+            
+            # Clean T-pose delta cache if persons disappeared
+            if hasattr(orientation_filter, '_bone_geometry_cache'):
+                cache = orientation_filter._bone_geometry_cache
+                if cache.get('initialized', False):
+                    cache['initialized'] = False
+                    cache['bone_lengths'] = None
+                    cache['bone_directions'] = None
+        
+        # Update tracked IDs
+        self._active_person_ids = current_ids
     
     def update_point_cloud(self, points: np.ndarray, colors: np.ndarray):
         """

@@ -1337,6 +1337,148 @@ def draw_camera(position, orientation, up=(0.0, 1.0, 0.0), fov_deg=45.0, aspect=
     glEnd()
 
 
+# Global cache for FK bone geometry (initialized on first call)
+_fk_bone_geometry_cache = {
+    'bone_lengths': None,
+    'bone_directions': None,
+    'initialized': False
+}
+
+
+def draw_fk_skeleton_with_orientations(person, axis_length=75.0, bone_color=(0.8, 0.3, 1.0),
+                                       bone_width=3.0, axis_width=2.0, reset_cache=False):
+    """
+    Draw Forward Kinematic (FK) reconstructed skeleton with orientation axes.
+    
+    Simple API - just pass the person object! Bone geometry is cached automatically
+    on first call and reused for subsequent frames (same as get_tpose_delta_orientations_ext).
+    
+    Displays:
+    - Purple skeleton bones (FK reconstruction from orientations only)
+    - Purple joint spheres
+    - RGB orientation axes at each joint (Red=X, Green=Y along bone, Blue=Z)
+    
+    Args:
+        person: Person object with skeleton and global_root_orientation
+        axis_length: Length of orientation axes in mm (default 75.0)
+        bone_color: RGB tuple for skeleton bones/joints (default purple)
+        bone_width: Line width for bones (default 3.0)
+        axis_width: Line width for orientation axes (default 2.0)
+        reset_cache: If True, reinitializes bone geometry cache
+    
+    Returns:
+        tuple: (fk_positions, fk_rotations) - Reconstructed positions and orientations
+    
+    Example:
+        # That's it! Just call with person object
+        draw_fk_skeleton_with_orientations(person, axis_length=75.0)
+        
+        # Reset cache for new person/session
+        draw_fk_skeleton_with_orientations(person, reset_cache=True)
+    """
+    global _fk_bone_geometry_cache
+    
+    # Extract skeleton from person
+    skeleton = person.skeleton if hasattr(person, 'skeleton') else person.get('skeleton')
+    if not skeleton:
+        return {}, {}
+    
+    # Reset cache if requested
+    if reset_cache:
+        _fk_bone_geometry_cache['initialized'] = False
+        _fk_bone_geometry_cache['bone_lengths'] = None
+        _fk_bone_geometry_cache['bone_directions'] = None
+    
+    # Initialize cache on first call
+    if not _fk_bone_geometry_cache['initialized']:
+        _, _, bone_lengths, bone_directions = reconstructSkeletonFromOrientations(
+            person, skeleton, 
+            bone_lengths=None, 
+            bone_directions=None
+        )
+        _fk_bone_geometry_cache['bone_lengths'] = bone_lengths
+        _fk_bone_geometry_cache['bone_directions'] = bone_directions
+        _fk_bone_geometry_cache['initialized'] = True
+    
+    # Reconstruct skeleton from orientations using cached geometry
+    fk_positions, fk_rotations, _, _ = reconstructSkeletonFromOrientations(
+        person, skeleton, 
+        _fk_bone_geometry_cache['bone_lengths'], 
+        _fk_bone_geometry_cache['bone_directions']
+    )
+    
+    # BODY34 skeleton hierarchy
+    BODY34_PARENTS = [
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 3, 11, 12, 13, 14, 15, 15,
+        0, 18, 19, 20, 0, 22, 23, 24, 3, 26, 27, 28, 27, 30, 20, 24
+    ]
+    
+    # Draw FK bones
+    glLineWidth(bone_width)
+    glColor3f(*bone_color)
+    glBegin(GL_LINES)
+    for child_idx, parent_idx in enumerate(BODY34_PARENTS):
+        if parent_idx >= 0 and child_idx in fk_positions and parent_idx in fk_positions:
+            c = fk_positions[child_idx]
+            p = fk_positions[parent_idx]
+            glVertex3f(p.x(), p.y(), p.z())
+            glVertex3f(c.x(), c.y(), c.z())
+    glEnd()
+    
+    # Draw FK joints
+    glPointSize(8.0)
+    glBegin(GL_POINTS)
+    for pos in fk_positions.values():
+        glVertex3f(pos.x(), pos.y(), pos.z())
+    glEnd()
+    
+    # Draw orientation axes at each joint
+    glLineWidth(axis_width)
+    glEnable(GL_POLYGON_OFFSET_LINE)
+    glPolygonOffset(1.0, 1.0)
+    
+    for joint_idx, quat in fk_rotations.items():
+        if joint_idx not in fk_positions:
+            continue
+        
+        pos = fk_positions[joint_idx]
+        
+        # Extract rotation axes from quaternion
+        x_axis = quat.rotatedVector(QVector3D(1, 0, 0))
+        y_axis = quat.rotatedVector(QVector3D(0, 1, 0))
+        z_axis = quat.rotatedVector(QVector3D(0, 0, 1))
+        
+        px, py, pz = pos.x(), pos.y(), pos.z()
+        
+        # X axis (red)
+        glBegin(GL_LINES)
+        glColor3f(1.0, 0.0, 0.0)
+        glVertex3f(px, py, pz)
+        glVertex3f(px + x_axis.x() * axis_length, py + x_axis.y() * axis_length, pz + x_axis.z() * axis_length)
+        glEnd()
+        
+        # Y axis (green - bone direction!)
+        glBegin(GL_LINES)
+        glColor3f(0.0, 1.0, 0.0)
+        glVertex3f(px, py, pz)
+        glVertex3f(px + y_axis.x() * axis_length, py + y_axis.y() * axis_length, pz + y_axis.z() * axis_length)
+        glEnd()
+        
+        # Z axis (blue)
+        glBegin(GL_LINES)
+        glColor3f(0.0, 0.0, 1.0)
+        glVertex3f(px, py, pz)
+        glVertex3f(px + z_axis.x() * axis_length, py + z_axis.y() * axis_length, pz + z_axis.z() * axis_length)
+        glEnd()
+    
+    # Restore defaults
+    glDisable(GL_POLYGON_OFFSET_LINE)
+    glLineWidth(1.0)
+    glPointSize(1.0)
+    
+    return fk_positions, fk_rotations
+
+
 def stabilize_sdk_orientations(skeleton, previous_orientations=None):
     """
     Stabilize raw SDK orientations to prevent flipping.
