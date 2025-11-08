@@ -83,8 +83,8 @@ class OrientationWidget(SkeletonGLWidget):
         # Enable orientation visualization by default
         self.show_joint_orientation = True
         self.show_orientation = True  # Also set the base class flag
-        # Store T-pose reference (captured with 'T' key)
-        self.tpose_reference = None
+        # Store T-pose reference - ALWAYS use perfect mathematical T-pose
+        self.tpose_reference = self._get_perfect_tpose()
         
         # Quaternion filter for bone-aligned orientations
         self.orientation_filter = SkeletonOrientationFilter(smoothing=0.3, num_joints=34)
@@ -94,7 +94,7 @@ class OrientationWidget(SkeletonGLWidget):
         self.geometric_reconstructor = GeometricOrientationReconstructor(blend_factor=0.0)
         
         # Visualization mode: 0=bone-aligned (neon), 1=SDK local accumulated, 2=raw SDK, 3=hierarchical with offsets, 4=FK reconstruction
-        self.vis_mode = 2  # Default to bone-aligned with neon
+        self.vis_mode = 4  # Default to bone-aligned with neon
         
         # Cache for filtered orientations (computed each frame)
         self.filtered_orientations = {}
@@ -106,6 +106,10 @@ class OrientationWidget(SkeletonGLWidget):
         self.fk_bone_lengths = {}
         self.fk_bone_directions = {}
         self.fk_initialized = False
+        
+        # Cache for best person (highest confidence)
+        self.best_person_idx = -1
+        self.best_person = None
     
     def _quat_multiply(self, q1, q2):
         """Multiply two quaternions: q1 * q2"""
@@ -123,52 +127,130 @@ class OrientationWidget(SkeletonGLWidget):
         x, y, z, w = q
         return [-x, -y, -z, w]
     
+    def _get_perfect_tpose(self):
+        """Get perfect mathematical T-pose (identity rotations for all joints)
+        
+        Returns:
+            dict: {joint_idx: [x, y, z, w]} - Identity quaternions for all joints
+        """
+        from PyQt5.QtGui import QQuaternion
+        
+        # Create identity quaternions for all joints
+        tpose_reference = {}
+        
+        # All joints that exist in BODY34 skeleton
+        all_joints = [0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 18, 19, 20, 22, 23, 24, 26]
+        
+        identity_quat = QQuaternion()  # Identity quaternion (0,0,0,1)
+        for joint_idx in all_joints:
+            # Store as [x, y, z, w]
+            tpose_reference[joint_idx] = [
+                identity_quat.x(), 
+                identity_quat.y(), 
+                identity_quat.z(), 
+                identity_quat.scalar()
+            ]
+        
+        return tpose_reference
+    
     def keyPressEvent(self, event):
         """Handle keyboard input"""
         if event.key() == Qt.Key_Space:
-            # TOUCHDESIGNER OUTPUT: Bone-aligned orientations as Euler angles
+            # BLENDER EXPORT: FK orientations with 180° Y-rotation for non-legs
             if hasattr(self, 'latest_frame') and self.latest_frame and hasattr(self.latest_frame, 'people'):
                 print("\n" + "="*80)
-                print("TOUCHDESIGNER OUTPUT - Bone-Aligned Orientations (Euler XYZ)")
+                print("BLENDER EXPORT - FK Orientations (Matching Visualization)")
                 print("="*80)
-                print("\nBone-aligned = Y-axis points along bone direction")
-                print("Using geometric reconstruction for clavicles/shoulders/elbows to prevent flipping")
+                print("\nQuaternions [x, y, z, w] and Euler angles (XYZ)")
+                print("180° Y-rotation applied to non-leg joints for Blender compatibility")
                 print()
                 
+                # Joint names for readable output
+                JOINT_NAMES = {
+                    0: "PELVIS", 1: "NAVAL_SPINE", 2: "CHEST_SPINE", 3: "NECK",
+                    4: "LEFT_CLAVICLE", 5: "LEFT_SHOULDER", 6: "LEFT_ELBOW", 7: "LEFT_WRIST",
+                    8: "LEFT_HAND", 9: "LEFT_HANDTIP", 10: "LEFT_THUMB",
+                    11: "RIGHT_CLAVICLE", 12: "RIGHT_SHOULDER", 13: "RIGHT_ELBOW", 14: "RIGHT_WRIST",
+                    15: "RIGHT_HAND", 16: "RIGHT_HANDTIP", 17: "RIGHT_THUMB",
+                    18: "LEFT_HIP", 19: "LEFT_KNEE", 20: "LEFT_ANKLE", 21: "LEFT_FOOT",
+                    22: "RIGHT_HIP", 23: "RIGHT_KNEE", 24: "RIGHT_ANKLE", 25: "RIGHT_FOOT",
+                    26: "HEAD", 27: "NOSE", 28: "LEFT_EYE", 29: "LEFT_EAR",
+                    30: "RIGHT_EYE", 31: "RIGHT_EAR", 32: "LEFT_HEEL", 33: "RIGHT_HEEL"
+                }
+                
+                # Find person with highest confidence
+                max_confidence = 0
+                best_person_idx = -1
+                for idx, person in enumerate(self.latest_frame.people):
+                    conf = person.confidence if hasattr(person, 'confidence') else person.get('confidence', 0)
+                    if conf > max_confidence:
+                        max_confidence = conf
+                        best_person_idx = idx
+                
+                # Only process the best person
                 for person_idx, person in enumerate(self.latest_frame.people):
-                    confidence = person.confidence if hasattr(person, 'confidence') else person.get('confidence', 0)
-                    if confidence <= 50:
-                        continue
+                    if person_idx != best_person_idx:
+                        continue  # Skip all except highest confidence
                     
+                    confidence = person.confidence if hasattr(person, 'confidence') else person.get('confidence', 0)
                     print(f"Person {person_idx} (confidence: {confidence:.1f}):")
                     skeleton = person.skeleton if hasattr(person, 'skeleton') else person.get('skeleton')
                     if not skeleton:
                         print("  No skeleton data")
                         continue
                     
-                    # Get ALL bone-aligned orientations (computed from bone directions)
-                    all_bone_aligned = compute_bone_aligned_local_orientations(skeleton)
+                    # Get LOCAL (parent-relative) orientations WITHOUT Blender rotation first
+                    # (for delta calculation in consistent coordinate system)
+                    local_orientations_raw = self.export_local_orientations_for_rig(
+                        person, skeleton, apply_blender_rotation=False
+                    )
                     
-                    # Override clavicles/shoulders/elbows with stable geometric reconstruction
-                    reconstructed = self.geometric_reconstructor.reconstruct_skeleton_orientations(skeleton)
-                    for joint_idx, quat in reconstructed.items():
-                        all_bone_aligned[joint_idx] = quat.tolist() if hasattr(quat, 'tolist') else quat
+                    # If T-pose reference exists, compute RELATIVE rotations
+                    if self.tpose_reference:
+                        print("\n🎯 LOCAL ROTATIONS - RELATIVE TO T-POSE (For Rig Control):")
+                        print("   Each bone's rotation relative to its PARENT bone")
+                        print("   These should be ~0° in T-pose, change when you move")
+                        print("   Apply these to your rigged character's bones!")
+                        print()
+                    else:
+                        print("\n⚠️  NO T-POSE REFERENCE - Showing absolute local rotations")
+                        print("   Press 'T' in T-pose to capture reference for relative rotations")
+                        print()
                     
-                    # Convert to Euler angles for TouchDesigner
-                    for joint_idx in sorted(all_bone_aligned.keys()):
-                        quat = all_bone_aligned[joint_idx]
-                        euler = quaternion_to_euler(quat, order='XYZ')
+                    # Convert to Euler angles and print
+                    for joint_idx in sorted(local_orientations_raw.keys()):
+                        quat = local_orientations_raw[joint_idx]  # [x, y, z, w]
+                        joint_name = JOINT_NAMES.get(joint_idx, f"JOINT_{joint_idx}")
                         
-                        # Format for TouchDesigner (joint index, euler angles)
-                        print(f"  Joint {joint_idx:2d}: rx={euler[0]:7.2f}°, ry={euler[1]:7.2f}°, rz={euler[2]:7.2f}°")
+                        # Compute relative rotation if T-pose exists
+                        if self.tpose_reference and joint_idx in self.tpose_reference:
+                            tpose_quat = self.tpose_reference[joint_idx]
+                            
+                            # Delta = inverse(T-pose) × current
+                            # inverse(q) = conjugate for unit quaternions = [-x, -y, -z, w]
+                            tpose_inv = [-tpose_quat[0], -tpose_quat[1], -tpose_quat[2], tpose_quat[3]]
+                            delta_quat = self._quat_multiply(tpose_inv, quat)
+                            
+                            # Convert delta to Euler angles (XYZ order)
+                            delta_euler = quaternion_to_euler(delta_quat, order='XYZ')
+                            
+                            # Format output with DELTA (relative rotation)
+                            print(f"  {joint_idx:2d} {joint_name:20s}: "
+                                  f"euler=[{delta_euler[0]:7.2f}°, {delta_euler[1]:7.2f}°, {delta_euler[2]:7.2f}°]")
+                        else:
+                            # No T-pose reference, show absolute local rotations
+                            euler = quaternion_to_euler(quat, order='XYZ')
+                            
+                            # Format output
+                            print(f"  {joint_idx:2d} {joint_name:20s}: "
+                                  f"euler=[{euler[0]:7.2f}°, {euler[1]:7.2f}°, {euler[2]:7.2f}°]")
                 
                 print("\n" + "="*80)
-                print("TOUCHDESIGNER INTEGRATION:")
-                print("- ALL joints have bone-aligned orientations (Y-axis along bone)")
-                print("- Clavicles: Geometric reconstruction with ±90° rotation correction")
-                print("- Shoulders/elbows: Geometric reconstruction (won't flip)")
-                print("- Other joints: Bone-aligned (computed from positions)")
-                print("- Send: joint_index, euler_x, euler_y, euler_z")
+                print("RIG CONTROL MODE (DELTA FROM PERFECT T-POSE):")
+                print("- Shows LOCAL rotations (each bone relative to its parent)")
+                print("- Delta from perfect T-pose = how much to rotate from rest pose")
+                print("- T-pose shows 0° for all joints")
+                print("- Apply these Euler angles directly to your rig's bones!")
                 print("="*80 + "\n")
             else:
                 print("[WARNING] No skeleton data available")
@@ -349,6 +431,18 @@ class OrientationWidget(SkeletonGLWidget):
             self.orientation_filter.set_smoothing(new_smoothing)
             print(f"\n[INFO] Smoothing decreased to {new_smoothing:.2f}")
         
+        elif event.key() == Qt.Key_T:
+            # Reset to perfect mathematical T-pose (in case user wants to refresh)
+            self.tpose_reference = self._get_perfect_tpose()
+            
+            print("\n" + "="*80)
+            print("✓ PERFECT T-POSE REFERENCE RESET")
+            print("="*80)
+            print(f"Using mathematical T-pose with {len(self.tpose_reference)} identity rotations")
+            print("All joints at 0° - perfect bone-aligned coordinate system")
+            print("Press SPACE to see rotations relative to perfect T-pose")
+            print("="*80 + "\n")
+        
         elif event.key() == Qt.Key_B:
             # Cycle blend factor for geometric reconstruction
             blend_factors = [0.0, 0.3, 0.5, 0.7, 1.0]
@@ -410,59 +504,58 @@ class OrientationWidget(SkeletonGLWidget):
         
         from senseSpaceLib.senseSpace.visualization import draw_skeletons_with_bones
         
-        # Filter people by confidence > 50
-        high_confidence_people = []
+        # Find person with highest confidence (only show ONE person)
+        max_confidence = 0
+        best_person = None
         for person in frame.people:
             confidence = person.confidence if hasattr(person, 'confidence') else person.get('confidence', 0)
-            if confidence > 50:
-                high_confidence_people.append(person)
+            if confidence > max_confidence:
+                max_confidence = confidence
+                best_person = person
         
-        if not high_confidence_people:
+        if not best_person:
             return
         
         # In FK mode (mode 4), don't draw the original skeleton
         if self.vis_mode != 4:
-            # Draw skeleton (joints and bones) only for high confidence people
+            # Draw skeleton (joints and bones) only for highest confidence person
             draw_skeletons_with_bones(
-                high_confidence_people, 
+                [best_person],  # Only the best person
                 joint_color=(0.2, 0.8, 1.0), 
                 bone_color=(0.8, 0.2, 0.2),
                 show_orientation=False  # We'll draw custom orientations
             )
         
-        # Draw orientation axes based on mode
-        if self.show_orientation and hasattr(frame, 'people'):
-            for person_idx, person in enumerate(frame.people):
-                # Check confidence
-                confidence = person.confidence if hasattr(person, 'confidence') else person.get('confidence', 0)
-                if confidence <= 50:
-                    continue
-                
-                skeleton = person.skeleton if hasattr(person, 'skeleton') else person.get('skeleton')
-                if not skeleton:
-                    continue
-                
-                if self.vis_mode == 0:
-                    # Mode 0: BONE-ALIGNED orientations with geometric reconstruction (NEON)
-                    self._draw_bone_aligned_orientations(skeleton, axis_length=150.0)
-                elif self.vis_mode == 1:
-                    # Mode 1: PURE SDK local orientations accumulated through hierarchy
-                    if person_idx in self.filtered_orientations:
-                        self._draw_filtered_joint_orientations(
-                            person,
-                            skeleton, 
-                            self.filtered_orientations[person_idx], 
-                            axis_length=150.0
-                        )
-                elif self.vis_mode == 2:
-                    # Mode 2: Placeholder - removed
-                    pass
-                elif self.vis_mode == 3:
-                    # Mode 3: HIERARCHICAL with branch offsets
-                    self._draw_hierarchical_orientations(person, skeleton, axis_length=100.0)
-                elif self.vis_mode == 4:
-                    # Mode 4: FK RECONSTRUCTION from orientations only
-                    self._draw_fk_reconstruction(person, skeleton, axis_length=150.0)
+        # Draw orientation axes only for the best person
+        if self.show_orientation:
+            skeleton = best_person.skeleton if hasattr(best_person, 'skeleton') else best_person.get('skeleton')
+            if not skeleton:
+                return
+            
+            # Get person index for orientation lookup
+            person_idx = frame.people.index(best_person)
+            
+            if self.vis_mode == 0:
+                # Mode 0: BONE-ALIGNED orientations with geometric reconstruction (NEON)
+                self._draw_bone_aligned_orientations(skeleton, axis_length=150.0)
+            elif self.vis_mode == 1:
+                # Mode 1: PURE SDK local orientations accumulated through hierarchy
+                if person_idx in self.filtered_orientations:
+                    self._draw_filtered_joint_orientations(
+                        best_person,
+                        skeleton, 
+                        self.filtered_orientations[person_idx], 
+                        axis_length=150.0
+                    )
+            elif self.vis_mode == 2:
+                # Mode 2: Placeholder - removed
+                pass
+            elif self.vis_mode == 3:
+                # Mode 3: HIERARCHICAL with branch offsets
+                self._draw_hierarchical_orientations(best_person, skeleton, axis_length=100.0)
+            elif self.vis_mode == 4:
+                # Mode 4: FK RECONSTRUCTION from orientations only
+                self._draw_fk_reconstruction(best_person, skeleton, axis_length=150.0)
     
     def _draw_filtered_joint_orientations(self, person, skeleton, local_orientations, axis_length=150.0):
         """Draw RGB axes showing the filtered/reconstructed orientations
@@ -1432,6 +1525,134 @@ class OrientationWidget(SkeletonGLWidget):
         # Use Qt's renderText for OpenGL rendering
         self.qglColor(QColor(255, 255, 0))  # Bright yellow
         self.renderText(10, 80, mode_names[self.vis_mode])
+    
+    def export_fk_orientations_for_blender(self, person, skeleton):
+        """Export FK orientations - WORLD rotations with Blender-compatible coordinate system
+        
+        Returns WORLD orientations as quaternions [x, y, z, w] with 180° Y-rotation
+        applied for non-leg joints to match the visualization.
+        
+        Args:
+            person: Person object with global_root_orientation
+            skeleton: List of joints
+            
+        Returns:
+            dict: {joint_idx: [x, y, z, w]} - World orientations matching visualization
+        """
+        from senseSpaceLib.senseSpace.visualization import reconstructSkeletonFromOrientations
+        
+        # Get FK rotations (these are bone-aligned world rotations)
+        if not self.fk_initialized:
+            _, _, self.fk_bone_lengths, self.fk_bone_directions = reconstructSkeletonFromOrientations(
+                person, skeleton
+            )
+            self.fk_initialized = True
+        
+        _, fk_rotations, _, _ = reconstructSkeletonFromOrientations(
+            person, skeleton, 
+            self.fk_bone_lengths, 
+            self.fk_bone_directions
+        )
+        
+        # Apply 180° rotation around Y for non-leg joints (same as visualization)
+        blender_rotations = {}
+        rot_180_y = QQuaternion(0, 0, 1, 0)  # 180° around Y
+        
+        for joint_idx, quat in fk_rotations.items():
+            # Exclude legs/hips (18-25: left/right hip, knee, ankle, foot, heel)
+            is_leg_or_hip = 18 <= joint_idx <= 25 or joint_idx == 32 or joint_idx == 33
+            
+            if not is_leg_or_hip:
+                # Apply 180° rotation around Y
+                quat = quat * rot_180_y
+            
+            # Convert to list [x, y, z, w]
+            blender_rotations[joint_idx] = [quat.x(), quat.y(), quat.z(), quat.scalar()]
+        
+        return blender_rotations
+    
+    def export_local_orientations_for_rig(self, person, skeleton, apply_blender_rotation=False):
+        """Export FK bone-aligned LOCAL orientations for character rig control
+        
+        Uses the same FK reconstruction as visualization to get bone-aligned rotations
+        where Y-axis points along each bone. Then converts world rotations to local
+        (parent-relative) rotations for rig control.
+        
+        This matches what you see in the visualization!
+        
+        Args:
+            person: Person object with global_root_orientation
+            skeleton: List of joints
+            apply_blender_rotation: If True, applies 180° Y-rotation to non-leg joints
+                                   for Blender coordinate system compatibility.
+                                   Should be False for T-pose capture!
+            
+        Returns:
+            dict: {joint_idx: [x, y, z, w]} - Local (parent-relative) orientations
+        """
+        from PyQt5.QtGui import QQuaternion
+        from senseSpaceLib.senseSpace.visualization import reconstructSkeletonFromOrientations
+        
+        # Initialize FK if needed
+        if not self.fk_initialized:
+            _, _, self.fk_bone_lengths, self.fk_bone_directions = reconstructSkeletonFromOrientations(
+                person, skeleton
+            )
+            self.fk_initialized = True
+        
+        # Get FK bone-aligned WORLD rotations
+        _, fk_world_rotations, _, _ = reconstructSkeletonFromOrientations(
+            person, skeleton, 
+            self.fk_bone_lengths, 
+            self.fk_bone_directions
+        )
+        
+        # Parent hierarchy
+        BODY34_PARENTS = [
+            -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 3, 11, 12, 13, 14, 15, 15,
+            0, 18, 19, 20, 0, 22, 23, 24, 3, 26, 27, 28, 27, 30, 20, 24
+        ]
+        
+        # Convert world rotations to local (parent-relative)
+        local_rotations = {}
+        
+        for joint_idx in sorted(fk_world_rotations.keys()):
+            parent_idx = BODY34_PARENTS[joint_idx]
+            
+            if parent_idx < 0:
+                # Root (pelvis) - world rotation IS local rotation
+                local_rotations[joint_idx] = fk_world_rotations[joint_idx]
+            elif parent_idx in fk_world_rotations:
+                # local = parent_world^-1 * child_world
+                parent_world = fk_world_rotations[parent_idx]
+                child_world = fk_world_rotations[joint_idx]
+                local_rotations[joint_idx] = parent_world.conjugated() * child_world
+            else:
+                # No parent rotation available - use world as-is
+                local_rotations[joint_idx] = fk_world_rotations[joint_idx]
+        
+        # Apply Blender rotation if requested (for export, not for T-pose!)
+        if apply_blender_rotation:
+            rot_180_y = QQuaternion(0, 0, 1, 0)  # 180° around Y
+            
+            blender_local_rotations = {}
+            for joint_idx, quat in local_rotations.items():
+                is_leg_or_hip = 18 <= joint_idx <= 25 or joint_idx == 32 or joint_idx == 33
+                
+                if not is_leg_or_hip:
+                    # Apply 180° Y-rotation to local orientation
+                    quat = rot_180_y * quat * rot_180_y.conjugated()
+                
+                blender_local_rotations[joint_idx] = quat
+            
+            local_rotations = blender_local_rotations
+        
+        # Convert to list format [x, y, z, w]
+        local_rotations_list = {}
+        for joint_idx, quat in local_rotations.items():
+            local_rotations_list[joint_idx] = [quat.x(), quat.y(), quat.z(), quat.scalar()]
+        
+        return local_rotations_list
 
 
 def main():
