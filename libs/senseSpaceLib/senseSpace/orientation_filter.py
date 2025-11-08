@@ -4,10 +4,12 @@ Quaternion Orientation Filter for Skeleton Tracking
 
 Eliminates orientation flipping and jitter in skeleton joint rotations.
 Based on spherical linear interpolation (SLERP) with flip correction.
+
+Also includes utilities for computing T-pose delta orientations for rig control.
 """
 
 import math
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Any
 
 
 class QuaternionFilter:
@@ -221,6 +223,196 @@ class SkeletonOrientationFilter:
             self.smoothing = smoothing
             for filter_obj in self.joint_filters.values():
                 filter_obj.smoothing = smoothing
+
+
+def get_tpose_delta_orientations(skeleton: Any, person: Optional[Any] = None, 
+                                bone_lengths: Optional[Dict] = None,
+                                bone_directions: Optional[Dict] = None) -> Dict[int, List[float]]:
+    """
+    Compute delta rotations from perfect T-pose for rig control.
+    
+    This function:
+    1. Generates a perfect mathematical T-pose (identity quaternions)
+    2. Uses forward kinematics to reconstruct bone-aligned orientations from current pose
+    3. Extracts local (parent-relative) orientations
+    4. Computes delta quaternions: delta = tpose_inv * current
+    5. Returns delta rotations for each joint
+    
+    Use Case:
+    - Export to TouchDesigner/Blender for character rigging
+    - T-pose should show 0° rotations (identity quaternions)
+    - Any pose deviation shows as rotation delta from T-pose
+    - Apply these deltas to your rigged character's bones
+    
+    Args:
+        skeleton: List of joints from ZED SDK (must have .pos and .ori attributes)
+        person: Optional Person object (for global_root_orientation). If None, uses skeleton[0].ori
+        bone_lengths: Optional cached bone lengths dict from first frame (for consistency)
+        bone_directions: Optional cached bone directions dict from first frame (for consistency)
+    
+    Returns:
+        Dict[int, List[float]]: {joint_idx: [x, y, z, w]} delta quaternions from T-pose
+        
+    Example:
+        >>> from senseSpace import get_tpose_delta_orientations
+        >>> deltas = get_tpose_delta_orientations(person.skeleton, person)
+        >>> # deltas[5] = LEFT_SHOULDER delta rotation from T-pose
+        >>> # In perfect T-pose: deltas[5] ≈ [0.0, 0.0, 0.0, 1.0]
+    """
+    from .visualization import reconstructSkeletonFromOrientations
+    from PyQt5.QtGui import QQuaternion
+    
+    # Skeleton hierarchy (parent index for each joint)
+    BODY34_PARENTS = [
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 3, 11, 12, 13, 14, 15, 15,
+        0, 18, 19, 20, 0, 22, 23, 24, 3, 26, 26, 26, 26, 26, 20, 24
+    ]
+    
+    # Generate perfect T-pose (identity quaternions for all joints)
+    all_joints = [0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 18, 19, 20, 22, 23, 24, 26]
+    tpose_reference = {}
+    identity_quat = QQuaternion()  # (0, 0, 0, 1)
+    for joint_idx in all_joints:
+        tpose_reference[joint_idx] = [
+            identity_quat.x(), 
+            identity_quat.y(), 
+            identity_quat.z(), 
+            identity_quat.scalar()
+        ]
+    
+    # Use FK reconstruction to get bone-aligned world rotations
+    # Use cached bone_lengths/directions if provided for consistency across frames
+    _, fk_world_rotations, _, _ = reconstructSkeletonFromOrientations(
+        person if person else skeleton[0], 
+        skeleton, 
+        bone_lengths=bone_lengths, 
+        bone_directions=bone_directions
+    )
+    
+    # Extract local (parent-relative) orientations
+    local_orientations = {}
+    for child_idx, parent_idx in enumerate(BODY34_PARENTS):
+        if child_idx not in fk_world_rotations:
+            continue
+            
+        child_world = fk_world_rotations[child_idx]
+        
+        if parent_idx < 0:
+            # Root joint (pelvis) - use world orientation directly
+            local_orientations[child_idx] = [
+                child_world.x(),
+                child_world.y(),
+                child_world.z(),
+                child_world.scalar()
+            ]
+        elif parent_idx in fk_world_rotations:
+            # Compute local rotation: local = parent_world^-1 * child_world
+            parent_world = fk_world_rotations[parent_idx]
+            local_quat = parent_world.conjugated() * child_world
+            local_orientations[child_idx] = [
+                local_quat.x(),
+                local_quat.y(),
+                local_quat.z(),
+                local_quat.scalar()
+            ]
+    
+    # Compute delta from T-pose: delta = tpose_inv * current
+    delta_orientations = {}
+    for joint_idx in sorted(local_orientations.keys()):
+        if joint_idx not in tpose_reference:
+            continue
+            
+        current_quat = local_orientations[joint_idx]  # [x, y, z, w]
+        tpose_quat = tpose_reference[joint_idx]       # [x, y, z, w]
+        
+        # Quaternion inverse (conjugate for unit quaternions): [-x, -y, -z, w]
+        tpose_inv = [-tpose_quat[0], -tpose_quat[1], -tpose_quat[2], tpose_quat[3]]
+        
+        # Quaternion multiplication: delta = tpose_inv * current
+        x1, y1, z1, w1 = tpose_inv
+        x2, y2, z2, w2 = current_quat
+        delta_orientations[joint_idx] = [
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,  # x
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,  # y
+            w1*z2 + x1*y2 - y1*x2 + z1*w2,  # z
+            w1*w2 - x1*x2 - y1*y2 - z1*z2   # w
+        ]
+    
+    return delta_orientations
+
+
+# Global cache for bone geometry (initialized on first call per person/session)
+_bone_geometry_cache = {
+    'bone_lengths': None,
+    'bone_directions': None,
+    'initialized': False
+}
+
+
+def get_tpose_delta_orientations_ext(person: Any, reset_cache: bool = False) -> Dict[int, List[float]]:
+    """
+    Simplified version: Compute T-pose delta orientations from person object only.
+    
+    This is a convenience wrapper around get_tpose_delta_orientations() that:
+    - Automatically extracts skeleton from person
+    - Manages bone geometry cache internally (initialized on first call)
+    - Provides consistent results across frames (same as cached version)
+    - Simple API: just pass person object!
+    
+    The bone geometry is cached on the FIRST call and reused for subsequent calls.
+    This ensures frame-to-frame consistency. Call with reset_cache=True to reinitialize.
+    
+    Args:
+        person: Person object with skeleton and global_root_orientation
+        reset_cache: If True, clears and reinitializes the bone geometry cache
+    
+    Returns:
+        Dict[int, List[float]]: {joint_idx: [x, y, z, w]} delta quaternions from T-pose
+        
+    Example:
+        >>> from senseSpace import get_tpose_delta_orientations_ext
+        >>> deltas = get_tpose_delta_orientations_ext(person)
+        >>> # deltas[5] = LEFT_SHOULDER delta rotation from T-pose
+        >>> 
+        >>> # To reset cache (e.g., new person or session):
+        >>> deltas = get_tpose_delta_orientations_ext(person, reset_cache=True)
+    """
+    global _bone_geometry_cache
+    
+    # Extract skeleton from person
+    skeleton = person.skeleton if hasattr(person, 'skeleton') else person.get('skeleton')
+    
+    if not skeleton:
+        raise ValueError("Person object has no skeleton data")
+    
+    # Reset cache if requested
+    if reset_cache:
+        _bone_geometry_cache['initialized'] = False
+        _bone_geometry_cache['bone_lengths'] = None
+        _bone_geometry_cache['bone_directions'] = None
+    
+    # Initialize cache on first call
+    if not _bone_geometry_cache['initialized']:
+        from .visualization import reconstructSkeletonFromOrientations
+        
+        # Compute bone geometry from first frame
+        _, _, bone_lengths, bone_directions = reconstructSkeletonFromOrientations(
+            person, skeleton, 
+            bone_lengths=None, 
+            bone_directions=None
+        )
+        
+        _bone_geometry_cache['bone_lengths'] = bone_lengths
+        _bone_geometry_cache['bone_directions'] = bone_directions
+        _bone_geometry_cache['initialized'] = True
+    
+    # Call the full version WITH cached bone geometry
+    return get_tpose_delta_orientations(
+        skeleton=skeleton,
+        person=person,
+        bone_lengths=_bone_geometry_cache['bone_lengths'],
+        bone_directions=_bone_geometry_cache['bone_directions']
+    )
 
 
 class AdaptiveSkeletonOrientationFilter(SkeletonOrientationFilter):

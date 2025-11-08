@@ -156,104 +156,139 @@ class OrientationWidget(SkeletonGLWidget):
     def keyPressEvent(self, event):
         """Handle keyboard input"""
         if event.key() == Qt.Key_Space:
-            # BLENDER EXPORT: FK orientations with 180° Y-rotation for non-legs
-            if hasattr(self, 'latest_frame') and self.latest_frame and hasattr(self.latest_frame, 'people'):
-                print("\n" + "="*80)
-                print("BLENDER EXPORT - FK Orientations (Matching Visualization)")
-                print("="*80)
-                print("\nQuaternions [x, y, z, w] and Euler angles (XYZ)")
-                print("180° Y-rotation applied to non-leg joints for Blender compatibility")
-                print()
+            # Print T-pose delta orientations using library function
+            if not self.best_person or self.best_person_idx < 0:
+                print("[WARNING] No person detected")
+                return
+            
+            print("\n" + "="*80)
+            print("T-POSE DELTA ORIENTATIONS (Library Function)")
+            print("="*80)
+            print("\nLocal rotations relative to T-pose - ready for rig control")
+            print("Euler angles (XYZ order) in degrees")
+            print()
+            
+            # Joint names for readable output
+            JOINT_NAMES = {
+                0: "PELVIS", 1: "NAVAL_SPINE", 2: "CHEST_SPINE", 3: "NECK",
+                4: "LEFT_CLAVICLE", 5: "LEFT_SHOULDER", 6: "LEFT_ELBOW", 7: "LEFT_WRIST",
+                8: "LEFT_HAND", 9: "LEFT_HANDTIP", 10: "LEFT_THUMB",
+                11: "RIGHT_CLAVICLE", 12: "RIGHT_SHOULDER", 13: "RIGHT_ELBOW", 14: "RIGHT_WRIST",
+                15: "RIGHT_HAND", 16: "RIGHT_HANDTIP", 17: "RIGHT_THUMB",
+                18: "LEFT_HIP", 19: "LEFT_KNEE", 20: "LEFT_ANKLE", 21: "LEFT_FOOT",
+                22: "RIGHT_HIP", 23: "RIGHT_KNEE", 24: "RIGHT_ANKLE", 25: "RIGHT_FOOT",
+                26: "HEAD", 27: "NOSE", 28: "LEFT_EYE", 29: "LEFT_EAR",
+                30: "RIGHT_EYE", 31: "RIGHT_EAR", 32: "LEFT_HEEL", 33: "RIGHT_HEEL"
+            }
+            
+            person = self.best_person
+            confidence = person.confidence if hasattr(person, 'confidence') else person.get('confidence', 0)
+            print(f"Person {self.best_person_idx} (confidence: {confidence:.1f}):")
+            print()
+            
+            skeleton = person.skeleton if hasattr(person, 'skeleton') else person.get('skeleton')
+            if not skeleton:
+                print("  No skeleton data")
+                return
+            
+            print("🎯 LOCAL ROTATIONS - RELATIVE TO T-POSE (For Rig Control):")
+            print("   Each bone's rotation relative to its PARENT bone")
+            print("   These should be ~0° in T-pose, change when you move")
+            print("   Apply these to your rigged character's bones!")
+            print()
+            
+            
+            # Use library function to get T-pose delta orientations
+            try:
+                from senseSpaceLib.senseSpace import get_tpose_delta_orientations, get_tpose_delta_orientations_ext
                 
-                # Joint names for readable output
-                JOINT_NAMES = {
-                    0: "PELVIS", 1: "NAVAL_SPINE", 2: "CHEST_SPINE", 3: "NECK",
-                    4: "LEFT_CLAVICLE", 5: "LEFT_SHOULDER", 6: "LEFT_ELBOW", 7: "LEFT_WRIST",
-                    8: "LEFT_HAND", 9: "LEFT_HANDTIP", 10: "LEFT_THUMB",
-                    11: "RIGHT_CLAVICLE", 12: "RIGHT_SHOULDER", 13: "RIGHT_ELBOW", 14: "RIGHT_WRIST",
-                    15: "RIGHT_HAND", 16: "RIGHT_HANDTIP", 17: "RIGHT_THUMB",
-                    18: "LEFT_HIP", 19: "LEFT_KNEE", 20: "LEFT_ANKLE", 21: "LEFT_FOOT",
-                    22: "RIGHT_HIP", 23: "RIGHT_KNEE", 24: "RIGHT_ANKLE", 25: "RIGHT_FOOT",
-                    26: "HEAD", 27: "NOSE", 28: "LEFT_EYE", 29: "LEFT_EAR",
-                    30: "RIGHT_EYE", 31: "RIGHT_EAR", 32: "LEFT_HEEL", 33: "RIGHT_HEEL"
-                }
+                # VERSION 1: Full version WITH cached bone lengths/directions for consistency
+                delta_orientations_cached = get_tpose_delta_orientations(
+                    skeleton, person,
+                    bone_lengths=self.fk_bone_lengths if self.fk_initialized else None,
+                    bone_directions=self.fk_bone_directions if self.fk_initialized else None
+                )
                 
-                # Find person with highest confidence
-                max_confidence = 0
-                best_person_idx = -1
-                for idx, person in enumerate(self.latest_frame.people):
-                    conf = person.confidence if hasattr(person, 'confidence') else person.get('confidence', 0)
-                    if conf > max_confidence:
-                        max_confidence = conf
-                        best_person_idx = idx
-                
-                # Only process the best person
-                for person_idx, person in enumerate(self.latest_frame.people):
-                    if person_idx != best_person_idx:
-                        continue  # Skip all except highest confidence
+                print("📦 VERSION 1: get_tpose_delta_orientations() with cached bone geometry:")
+                for joint_idx in sorted(delta_orientations_cached.keys()):
+                    delta_quat = delta_orientations_cached[joint_idx]
+                    joint_name = JOINT_NAMES.get(joint_idx, f"JOINT_{joint_idx}")
                     
-                    confidence = person.confidence if hasattr(person, 'confidence') else person.get('confidence', 0)
-                    print(f"Person {person_idx} (confidence: {confidence:.1f}):")
-                    skeleton = person.skeleton if hasattr(person, 'skeleton') else person.get('skeleton')
-                    if not skeleton:
-                        print("  No skeleton data")
+                    # Convert to Euler angles
+                    delta_euler = quaternion_to_euler(delta_quat, order='XYZ')
+                    print(f"  {joint_idx:2d} {joint_name:20s}: "
+                          f"euler=[{delta_euler[0]:7.2f}°, {delta_euler[1]:7.2f}°, {delta_euler[2]:7.2f}°]")
+                
+                print("\n" + "-"*80)
+                print("🚀 VERSION 2: get_tpose_delta_orientations_ext() - simplified (person only):")
+                
+                # VERSION 2: Simplified version - initialize cache from VERSION 1's bone geometry!
+                # This ensures both versions use the SAME bone geometry for fair comparison
+                if self.fk_initialized and not hasattr(self, '_ext_cache_synced'):
+                    # Sync VERSION 2's cache with VERSION 1's cache
+                    from senseSpaceLib.senseSpace.orientation_filter import _bone_geometry_cache
+                    _bone_geometry_cache['bone_lengths'] = self.fk_bone_lengths
+                    _bone_geometry_cache['bone_directions'] = self.fk_bone_directions
+                    _bone_geometry_cache['initialized'] = True
+                    self._ext_cache_synced = True
+                    print("  (Synced with VERSION 1's bone geometry cache)")
+                
+                delta_orientations_simple = get_tpose_delta_orientations_ext(person)
+                
+                for joint_idx in sorted(delta_orientations_simple.keys()):
+                    delta_quat = delta_orientations_simple[joint_idx]
+                    joint_name = JOINT_NAMES.get(joint_idx, f"JOINT_{joint_idx}")
+                    
+                    # Convert to Euler angles
+                    delta_euler = quaternion_to_euler(delta_quat, order='XYZ')
+                    print(f"  {joint_idx:2d} {joint_name:20s}: "
+                          f"euler=[{delta_euler[0]:7.2f}°, {delta_euler[1]:7.2f}°, {delta_euler[2]:7.2f}°]")
+                
+                # Compare results
+                print("\n" + "-"*80)
+                print("🔍 COMPARISON:")
+                max_diff = 0.0
+                diff_joint = -1
+                for joint_idx in delta_orientations_cached.keys():
+                    if joint_idx not in delta_orientations_simple:
                         continue
                     
-                    # Get LOCAL (parent-relative) orientations WITHOUT Blender rotation first
-                    # (for delta calculation in consistent coordinate system)
-                    local_orientations_raw = self.export_local_orientations_for_rig(
-                        person, skeleton, apply_blender_rotation=False
-                    )
+                    cached = delta_orientations_cached[joint_idx]
+                    simple = delta_orientations_simple[joint_idx]
                     
-                    # If T-pose reference exists, compute RELATIVE rotations
-                    if self.tpose_reference:
-                        print("\n🎯 LOCAL ROTATIONS - RELATIVE TO T-POSE (For Rig Control):")
-                        print("   Each bone's rotation relative to its PARENT bone")
-                        print("   These should be ~0° in T-pose, change when you move")
-                        print("   Apply these to your rigged character's bones!")
-                        print()
-                    else:
-                        print("\n⚠️  NO T-POSE REFERENCE - Showing absolute local rotations")
-                        print("   Press 'T' in T-pose to capture reference for relative rotations")
-                        print()
+                    # Calculate difference in Euler angles
+                    cached_euler = quaternion_to_euler(cached, order='XYZ')
+                    simple_euler = quaternion_to_euler(simple, order='XYZ')
                     
-                    # Convert to Euler angles and print
-                    for joint_idx in sorted(local_orientations_raw.keys()):
-                        quat = local_orientations_raw[joint_idx]  # [x, y, z, w]
-                        joint_name = JOINT_NAMES.get(joint_idx, f"JOINT_{joint_idx}")
-                        
-                        # Compute relative rotation if T-pose exists
-                        if self.tpose_reference and joint_idx in self.tpose_reference:
-                            tpose_quat = self.tpose_reference[joint_idx]
-                            
-                            # Delta = inverse(T-pose) × current
-                            # inverse(q) = conjugate for unit quaternions = [-x, -y, -z, w]
-                            tpose_inv = [-tpose_quat[0], -tpose_quat[1], -tpose_quat[2], tpose_quat[3]]
-                            delta_quat = self._quat_multiply(tpose_inv, quat)
-                            
-                            # Convert delta to Euler angles (XYZ order)
-                            delta_euler = quaternion_to_euler(delta_quat, order='XYZ')
-                            
-                            # Format output with DELTA (relative rotation)
-                            print(f"  {joint_idx:2d} {joint_name:20s}: "
-                                  f"euler=[{delta_euler[0]:7.2f}°, {delta_euler[1]:7.2f}°, {delta_euler[2]:7.2f}°]")
-                        else:
-                            # No T-pose reference, show absolute local rotations
-                            euler = quaternion_to_euler(quat, order='XYZ')
-                            
-                            # Format output
-                            print(f"  {joint_idx:2d} {joint_name:20s}: "
-                                  f"euler=[{euler[0]:7.2f}°, {euler[1]:7.2f}°, {euler[2]:7.2f}°]")
+                    diff = max(abs(cached_euler[i] - simple_euler[i]) for i in range(3))
+                    if diff > max_diff:
+                        max_diff = diff
+                        diff_joint = joint_idx
+                
+                if max_diff < 0.01:
+                    print(f"✅ Results are IDENTICAL! (max diff: {max_diff:.4f}°)")
+                    print(f"   Both versions use the same cached bone geometry.")
+                elif max_diff < 1.0:
+                    print(f"✅ Results match very closely (max diff: {max_diff:.2f}° at joint {diff_joint})")
+                    print(f"   Tiny differences due to floating point precision.")
+                else:
+                    print(f"⚠️  Results differ (max diff: {max_diff:.2f}° at joint {diff_joint}: {JOINT_NAMES.get(diff_joint, 'UNKNOWN')})")
+                    print(f"   NOTE: This should only happen on the FIRST frame.")
+                    print(f"   Press SPACE again - subsequent frames should match perfectly!")
                 
                 print("\n" + "="*80)
-                print("RIG CONTROL MODE (DELTA FROM PERFECT T-POSE):")
-                print("- Shows LOCAL rotations (each bone relative to its parent)")
-                print("- Delta from perfect T-pose = how much to rotate from rest pose")
-                print("- T-pose shows 0° for all joints")
-                print("- Apply these Euler angles directly to your rig's bones!")
+                print("USAGE NOTES:")
+                print("- VERSION 1: Explicit cache management (full control)")
+                print("- VERSION 2: Automatic cache management (simpler API)")
+                print("- Both versions produce IDENTICAL results after cache sync!")
+                print("- Use VERSION 2 for simplicity: get_tpose_delta_orientations_ext(person)")
                 print("="*80 + "\n")
-            else:
-                print("[WARNING] No skeleton data available")
+                
+            except Exception as e:
+                print(f"\n❌ Error computing T-pose delta orientations: {e}")
+                import traceback
+                traceback.print_exc()
+                print("="*80 + "\n")
         
         elif event.key() == Qt.Key_Q:
             # Press 'Q': Show raw SDK quaternions (local_orientation_per_joint)
@@ -500,6 +535,8 @@ class OrientationWidget(SkeletonGLWidget):
     def draw_skeletons(self, frame: Frame):
         """Override to draw skeletons with our custom orientations"""
         if not hasattr(frame, 'people') or not frame.people:
+            self.best_person = None
+            self.best_person_idx = -1
             return
         
         from senseSpaceLib.senseSpace.visualization import draw_skeletons_with_bones
@@ -507,11 +544,18 @@ class OrientationWidget(SkeletonGLWidget):
         # Find person with highest confidence (only show ONE person)
         max_confidence = 0
         best_person = None
-        for person in frame.people:
+        best_person_idx = -1
+        
+        for idx, person in enumerate(frame.people):
             confidence = person.confidence if hasattr(person, 'confidence') else person.get('confidence', 0)
             if confidence > max_confidence:
                 max_confidence = confidence
                 best_person = person
+                best_person_idx = idx
+        
+        # Cache the best person for use in key handlers
+        self.best_person = best_person
+        self.best_person_idx = best_person_idx
         
         if not best_person:
             return
@@ -532,19 +576,16 @@ class OrientationWidget(SkeletonGLWidget):
             if not skeleton:
                 return
             
-            # Get person index for orientation lookup
-            person_idx = frame.people.index(best_person)
-            
             if self.vis_mode == 0:
                 # Mode 0: BONE-ALIGNED orientations with geometric reconstruction (NEON)
                 self._draw_bone_aligned_orientations(skeleton, axis_length=150.0)
             elif self.vis_mode == 1:
                 # Mode 1: PURE SDK local orientations accumulated through hierarchy
-                if person_idx in self.filtered_orientations:
+                if best_person_idx in self.filtered_orientations:
                     self._draw_filtered_joint_orientations(
                         best_person,
                         skeleton, 
-                        self.filtered_orientations[person_idx], 
+                        self.filtered_orientations[best_person_idx], 
                         axis_length=150.0
                     )
             elif self.vis_mode == 2:

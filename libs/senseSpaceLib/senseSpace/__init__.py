@@ -12,18 +12,16 @@ so that the package can be imported in environments where those are not installe
 visualization, communication, and server modules lazily from application entrypoints.
 """
 
-from .protocol import Frame, Person, Joint
-from .enums import Body18Joint, Body34Joint
-from .recorder import FrameRecorder, FramePlayer
-
-__all__ = [
-	'Frame', 'Person', 'Joint',
-	'Body18Joint', 'Body34Joint',
-	'FrameRecorder', 'FramePlayer'
-]
+# Lightweight relative imports are replaced by absolute imports at bottom
+# (kept here for reference but not actually used)
+# from .protocol import Frame, Person, Joint
+# from .enums import Body18Joint, Body34Joint
+# from .recorder import FrameRecorder, FramePlayer
+# from .orientation_filter import get_tpose_delta_orientations
 
 
 """SenseSpace library initialization and path setup"""
+
 
 import os
 import sys
@@ -52,5 +50,6 @@ def setup_paths():
 from senseSpaceLib.senseSpace.protocol import Frame
 from senseSpaceLib.senseSpace.interpretation import interpret_pose_from_angles
 from senseSpaceLib.senseSpace.minimalClient import MinimalClient
+from senseSpaceLib.senseSpace.orientation_filter import get_tpose_delta_orientations, get_tpose_delta_orientations_ext
 
-__all__ = ['setup_paths', 'Frame', 'interpret_pose_from_angles', 'MinimalClient']
+__all__ = ['setup_paths', 'Frame', 'interpret_pose_from_angles', 'MinimalClient', 'get_tpose_delta_orientations', 'get_tpose_delta_orientations_ext']
