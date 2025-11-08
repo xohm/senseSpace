@@ -1761,7 +1761,7 @@ def reconstructSkeletonFromOrientations(person, skeleton, bone_lengths=None, bon
         else:
             world_rotations[0] = QQuaternion()
     
-    bone_aligned_rotations[0] = world_rotations[0]  # Pelvis same for both
+    bone_aligned_rotations[0] = world_rotations[0]  # Pelvis - will fix later
     
     # Pelvis position - use SDK tracked position
     pelvis_pos = get_position(0)
@@ -1826,6 +1826,10 @@ def reconstructSkeletonFromOrientations(person, skeleton, bone_lengths=None, bon
                 x_axis = QVector3D.crossProduct(y_axis, z_axis).normalized()
                 z_axis = QVector3D.crossProduct(x_axis, y_axis).normalized()
                 
+                # Clean bone-aligned orientation - no custom rotations
+                # Y-axis always points along the bone
+                # X and Z are perpendicular, derived from parent's SDK orientation
+                
                 # Build bone-aligned quaternion for PARENT joint
                 from PyQt5.QtGui import QMatrix3x3
                 m = QMatrix3x3([
@@ -1844,12 +1848,63 @@ def reconstructSkeletonFromOrientations(person, skeleton, bone_lengths=None, bon
                 
                 # For joints without children, use their SDK orientation
                 if child_idx not in bone_aligned_rotations:
-                    bone_aligned_rotations[child_idx] = world_rotations[child_idx]
+                    # Special handling for HEAD (index 26)
+                    # Head should have Z forward, X right, Y up when looking straight
+                    if child_idx == 26:  # HEAD
+                        # Get SDK world rotation for head
+                        head_rot = world_rotations[child_idx]
+                        # Extract the forward direction (Z-axis in SDK space)
+                        z_axis = head_rot.rotatedVector(QVector3D(0, 0, 1))
+                        # Extract the right direction (X-axis in SDK space)
+                        x_axis = head_rot.rotatedVector(QVector3D(1, 0, 0))
+                        # Y-axis (up) from cross product
+                        y_axis = QVector3D.crossProduct(z_axis, x_axis).normalized()
+                        # Recompute X to ensure orthogonality
+                        x_axis = QVector3D.crossProduct(y_axis, z_axis).normalized()
+                        
+                        from PyQt5.QtGui import QMatrix3x3
+                        m = QMatrix3x3([
+                            x_axis.x(), y_axis.x(), z_axis.x(),
+                            x_axis.y(), y_axis.y(), z_axis.y(),
+                            x_axis.z(), y_axis.z(), z_axis.z()
+                        ])
+                        bone_aligned_rotations[child_idx] = QQuaternion.fromRotationMatrix(m)
+                    else:
+                        bone_aligned_rotations[child_idx] = world_rotations[child_idx]
             
             # Recurse to children
             fk_recurse(child_idx)
     
     # Start recursion from pelvis
     fk_recurse(0)
+    
+    # Post-process: PELVIS - Just use SDK orientation directly to see what it is
+    if 0 in world_rotations:
+        # Show the raw SDK pelvis orientation - no modifications
+        bone_aligned_rotations[0] = world_rotations[0]
+    
+    # Post-process: Fix HEAD orientation to show head looking direction
+    # HEAD (26) should have Z forward (looking direction), X right, Y up
+    # 
+    # Let's try using the ACCUMULATED head rotation (world_rotations[26])
+    # which should already include neck + head rotations
+    if 26 in world_rotations and 26 in world_positions:  # HEAD exists
+        head_rot = world_rotations[26]  # Use accumulated world rotation
+        
+        # The SDK rotation should already be in world space
+        # Extract axes directly from the quaternion
+        # Standard convention: X=right, Y=up, Z=forward
+        x_axis = head_rot.rotatedVector(QVector3D(1, 0, 0))  # Right
+        y_axis = head_rot.rotatedVector(QVector3D(0, 1, 0))  # Up  
+        z_axis = head_rot.rotatedVector(QVector3D(0, 0, 1))  # Forward
+        
+        # Build orientation matrix directly from SDK axes
+        from PyQt5.QtGui import QMatrix3x3
+        m = QMatrix3x3([
+            x_axis.x(), y_axis.x(), z_axis.x(),
+            x_axis.y(), y_axis.y(), z_axis.y(),
+            x_axis.z(), y_axis.z(), z_axis.z()
+        ])
+        bone_aligned_rotations[26] = QQuaternion.fromRotationMatrix(m)
     
     return world_positions, bone_aligned_rotations, bone_lengths, bone_directions

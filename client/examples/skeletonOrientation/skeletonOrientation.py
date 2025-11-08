@@ -1304,10 +1304,14 @@ class OrientationWidget(SkeletonGLWidget):
         fk_axis_length = axis_length * 0.5
         
         # Skeleton hierarchy (parent index for each joint)
+        # Modified for facial features: NOSE→EYE→EAR connections
         BODY34_PARENTS = [
             -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 3, 11, 12, 13, 14, 15, 15,
-            0, 18, 19, 20, 0, 22, 23, 24, 3, 26, 26, 26, 26, 26, 20, 24
+            0, 18, 19, 20, 0, 22, 23, 24, 3, 26, 27, 28, 27, 30, 20, 24
         ]
+        # Facial connections: 27-NOSE→26-HEAD, 
+        #                     28-LEFT_EYE→27-NOSE, 29-LEFT_EAR→28-LEFT_EYE
+        #                     30-RIGHT_EYE→27-NOSE, 31-RIGHT_EAR→30-RIGHT_EYE
         
         # Draw FK-reconstructed bones (purple)
         glLineWidth(3.0)
