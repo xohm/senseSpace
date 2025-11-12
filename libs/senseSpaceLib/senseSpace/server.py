@@ -96,7 +96,8 @@ class SenseSpaceServer:
                  camera_resolution: int = 2,  # 0=HD720, 1=HD1080, 2=VGA (default)
                  camera_fps: int = 60,  # 60fps default for smooth tracking
                  tracking_accuracy: int = 1,  # 0=FAST, 1=ACCURATE (default)
-                 max_detection_range: float = 5.0):  # Maximum detection range in meters
+                 max_detection_range: float = 5.0,  # Maximum detection range in meters
+                 enable_body_fitting: bool = True):  # Body mesh fitting (default: enabled for BODY_34)
         self.host = host
         self.port = port
         self.local_ip = get_local_ip()
@@ -117,6 +118,7 @@ class SenseSpaceServer:
         }
         self.body_tracking_model = accuracy_map.get(tracking_accuracy, sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE)
         self.max_detection_range = max_detection_range
+        self.enable_body_fitting = enable_body_fitting
         
         # Print configuration
         resolution_names = {0: "HD720 (1280x720)", 1: "HD1080 (1920x1080)", 2: "VGA (672x376)"}
@@ -125,8 +127,8 @@ class SenseSpaceServer:
         print(f"[INFO]   Resolution: {resolution_names.get(camera_resolution, 'VGA')}")
         print(f"[INFO]   FPS: {camera_fps}")
         print(f"[INFO]   Tracking accuracy: {accuracy_names.get(tracking_accuracy, 'ACCURATE')}")
-        print(f"[INFO]   Body filter: {'enabled' if enable_body_filter else 'disabled'}")
         print(f"[INFO]   Max detection range: {max_detection_range}m")
+        print(f"[INFO]   Body fitting (mesh): {'enabled' if enable_body_fitting else 'disabled (--no-body-fitting)'}")
         
         # Video streaming configuration
         self.enable_streaming = enable_streaming
@@ -1009,7 +1011,7 @@ class SenseSpaceServer:
                 body_params = sl.BodyTrackingParameters()
                 body_params.detection_model = self.body_tracking_model  # Use runtime-configured model
                 body_params.body_format = sl.BODY_FORMAT.BODY_34
-                body_params.enable_body_fitting = True
+                body_params.enable_body_fitting = self.enable_body_fitting  # Enabled by default for BODY_34 mesh data
                 body_params.enable_tracking = True
                 # Note: prediction_timeout_s and max_range can cause issues in single camera mode
 
@@ -1493,7 +1495,7 @@ class SenseSpaceServer:
             body_tracking_parameters = sl.BodyTrackingParameters()
             body_tracking_parameters.detection_model = self.body_tracking_model  # Use runtime-configured model
             body_tracking_parameters.body_format = sl.BODY_FORMAT.BODY_34
-            body_tracking_parameters.enable_body_fitting = True  # Enable to get local_orientation_per_joint
+            body_tracking_parameters.enable_body_fitting = self.enable_body_fitting  # Enabled by default for BODY_34 mesh data
             body_tracking_parameters.enable_tracking = True
             body_tracking_parameters.prediction_timeout_s = 0.3  # Reduced to 0.3s for faster updates at 60fps
             body_tracking_parameters.max_range = self.max_detection_range  # Use runtime-configured range
@@ -1600,7 +1602,7 @@ class SenseSpaceServer:
             if enable_body_tracking:
                 body_tracking_fusion_params = sl.BodyTrackingFusionParameters()
                 body_tracking_fusion_params.enable_tracking = True
-                body_tracking_fusion_params.enable_body_fitting = True  # Enable to get local_orientation_per_joint
+                body_tracking_fusion_params.enable_body_fitting = self.enable_body_fitting  # Enabled by default for BODY_34 mesh data
 
                 status = self.fusion.enable_body_tracking(body_tracking_fusion_params)
                 if status != sl.FUSION_ERROR_CODE.SUCCESS:
