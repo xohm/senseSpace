@@ -990,9 +990,10 @@ class SenseSpaceServer:
             init_params = sl.InitParameters()
             init_params.camera_resolution = self.CAMERA_RESOLUTION
             init_params.camera_fps = self.CAMERA_FPS
-            init_params.depth_mode = sl.DEPTH_MODE.NEURAL  # Neural depth for better quality (replaces deprecated PERFORMANCE)
+            init_params.depth_mode = sl.DEPTH_MODE.PERFORMANCE  # PERFORMANCE mode for stability
             init_params.coordinate_units = sl.UNIT.MILLIMETER
             init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
+            init_params.depth_stabilization = True  # Enable depth stabilization
 
             # Open camera
             status = self.camera.open(init_params)
@@ -1485,9 +1486,10 @@ class SenseSpaceServer:
             init_params = sl.InitParameters()
             init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
             init_params.coordinate_units = sl.UNIT.MILLIMETER
-            init_params.depth_mode = sl.DEPTH_MODE.NEURAL  # Neural depth for better quality (replaces deprecated PERFORMANCE)
+            init_params.depth_mode = sl.DEPTH_MODE.PERFORMANCE  # PERFORMANCE mode for fusion (faster, more stable)
             init_params.camera_resolution = self.CAMERA_RESOLUTION
             init_params.camera_fps = self.CAMERA_FPS
+            init_params.depth_stabilization = True  # Enable depth stabilization for smoother tracking
 
             communication_parameters = sl.CommunicationParameters()
             communication_parameters.set_for_shared_memory()
@@ -1502,7 +1504,7 @@ class SenseSpaceServer:
             body_tracking_parameters.enable_tracking = True
             body_tracking_parameters.prediction_timeout_s = self.prediction_timeout  # Use runtime-configured timeout
             body_tracking_parameters.max_range = self.max_detection_range  # Use runtime-configured range
-            body_tracking_parameters.allow_reduced_precision_inference = True  # Allow optimization for better performance
+            # Removed allow_reduced_precision_inference - let SDK use defaults for stability
 
             # Start local senders
             senders = {}
