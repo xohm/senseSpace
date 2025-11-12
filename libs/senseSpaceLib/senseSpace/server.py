@@ -136,9 +136,8 @@ class SenseSpaceServer:
         print(f"[INFO]   Body fitting (mesh): {'enabled' if enable_body_fitting else 'disabled (--no-body-fitting)'}")
         
         # Skeleton ID continuity filter - prevents duplicate skeletons
-        self.skeleton_tracker = {}  # {sdk_id: {'first_seen': timestamp, 'last_seen': timestamp, 'stable_id': int}}
-        self.next_stable_id = 1
-        self.skeleton_history = {}  # {stable_id: {'position': [x,y,z], 'keypoints': [...], 'last_update': timestamp}}
+        self.skeleton_id_aliases = {}  # {new_sdk_id: old_sdk_id} - map new IDs to old IDs we're keeping
+        self.skeleton_first_seen = {}  # {sdk_id: timestamp} - track when each ID first appeared
         print(f"[INFO] Skeleton ID continuity filter: enabled (prevents ghost duplicates)")
         
         # Video streaming configuration
@@ -1985,6 +1984,9 @@ class SenseSpaceServer:
 
             fusion_status = self.fusion.process()
             if fusion_status == sl.FUSION_ERROR_CODE.SUCCESS:
+                # Clear bodies list before retrieving (SDK appends, doesn't replace!)
+                bodies.body_list.clear()
+                
                 # Retrieve bodies
                 try:
                     if hasattr(sl, 'BodyTrackingFusionRuntimeParameters'):
@@ -2006,7 +2008,7 @@ class SenseSpaceServer:
                 # Apply skeleton continuity filter to prevent ghost duplicates
                 bodies = self._apply_skeleton_continuity_filter(bodies)
                 
-                # Process bodies
+                # Process bodies (filter will be applied inside _process_bodies_fusion)
                 frame = self._process_bodies_fusion(bodies)
                 if frame:
                     frame.floor_height = self.detected_floor_height
@@ -2187,158 +2189,106 @@ class SenseSpaceServer:
         return None
 
     def _apply_skeleton_continuity_filter(self, bodies):
-        """Filter to prevent ghost skeletons and maintain ID continuity.
-        
-        Logic:
-        1. Track age of each skeleton ID
-        2. Compare new skeletons with existing ones (position + pose similarity)
-        3. If new skeleton matches old one, remove old and assign its stable ID to new
+        """
+        Simple duplicate filter using ID aliasing:
+        1. When we see 2 bodies at same position, keep OLDER ID, alias NEWER ID to it
+        2. Remove skeletons with aliased (newer) IDs from output
+        3. Cleanup aliases when SDK stops reporting the newer ID
+        4. Handle alias chains (if aliased ID gets re-aliased)
         """
         current_time = time.time()
-        MAX_POSITION_DIFF = 1500  # 1.5m - max distance to consider same person
-        MAX_AGE_DIFF = 3.0  # Only compare skeletons created within 3 seconds
-        POSE_SIMILARITY_THRESHOLD = 0.3  # 30% joint similarity required (lowered - people move!)
-        
-        # Debug: Log input
-        num_input = len(bodies.body_list)
-        if num_input > 1:
-            print(f"[FILTER] Input: {num_input} bodies, IDs: {[p.id for p in bodies.body_list]}")
+        MAX_POSITION_DIFF = 1500  # 1.5m
+        POSE_SIMILARITY_THRESHOLD = 0.3  # 30% joint similarity
         
         # Get current SDK IDs
         current_sdk_ids = set(person.id for person in bodies.body_list)
         
-        # Clean up old tracker entries (not seen for >5 seconds)
-        ids_to_remove = [sid for sid, data in self.skeleton_tracker.items() 
-                         if current_time - data['last_seen'] > 5.0]
-        for sid in ids_to_remove:
-            if sid in self.skeleton_tracker:
-                stable_id = self.skeleton_tracker[sid].get('stable_id')
-                if stable_id and stable_id in self.skeleton_history:
-                    del self.skeleton_history[stable_id]
-                del self.skeleton_tracker[sid]
+        # Cleanup: Remove aliases where the NEW ID is no longer reported by SDK
+        aliases_to_remove = [new_id for new_id in self.skeleton_id_aliases.keys() 
+                            if new_id not in current_sdk_ids]
+        for new_id in aliases_to_remove:
+            del self.skeleton_id_aliases[new_id]
+            if new_id in self.skeleton_first_seen:
+                del self.skeleton_first_seen[new_id]
         
-        # Process each skeleton
-        filtered_bodies = []
-        skeletons_by_age = []  # [(person, age, sdk_id), ...]
-        
+        # Track first appearance time for each skeleton
         for person in bodies.body_list:
-            sdk_id = person.id
+            if person.id not in self.skeleton_first_seen:
+                self.skeleton_first_seen[person.id] = current_time
+        
+        # Build list of skeletons with their ages
+        skeletons = []
+        for person in bodies.body_list:
+            age = current_time - self.skeleton_first_seen.get(person.id, current_time)
+            skeletons.append((person, age, person.id))
+        
+        # Sort by age (oldest first)
+        skeletons.sort(key=lambda x: x[1], reverse=True)
+        
+        # Find duplicates: compare each pair
+        new_aliases = {}
+        for i in range(len(skeletons)):
+            person_a, age_a, id_a = skeletons[i]
             
-            # Track this skeleton
-            if sdk_id not in self.skeleton_tracker:
-                self.skeleton_tracker[sdk_id] = {
-                    'first_seen': current_time,
-                    'last_seen': current_time,
-                    'stable_id': None
-                }
-            else:
-                self.skeleton_tracker[sdk_id]['last_seen'] = current_time
-            
-            age = current_time - self.skeleton_tracker[sdk_id]['first_seen']
-            skeletons_by_age.append((person, age, sdk_id))
-        
-        # Sort by age (newest first - process new skeletons before old ones)
-        skeletons_by_age.sort(key=lambda x: x[1])
-        
-        # Track which skeletons to skip (duplicates)
-        skip_ids = set()
-        id_replacements = {}  # Maps old_sdk_id -> new_sdk_id
-        
-        # First pass: identify duplicates (new skeletons matching old ones)
-        for i, (person_new, age_new, sdk_id_new) in enumerate(skeletons_by_age):
-            if sdk_id_new in skip_ids:
+            # Skip if already aliased
+            if id_a in self.skeleton_id_aliases:
                 continue
             
-            # Get keypoints for new skeleton
-            kp_new = getattr(person_new, 'keypoint', None)
-            if kp_new is None:
-                kp_new = getattr(person_new, 'keypoints', None)
-            if kp_new is None or len(kp_new) == 0:
-                continue
-            
-            pelvis_new = kp_new[0]
-            
-            # Look for older skeletons that might be the same person
-            for j, (person_old, age_old, sdk_id_old) in enumerate(skeletons_by_age):
-                if i == j or sdk_id_old in skip_ids:
+            for j in range(i + 1, len(skeletons)):
+                person_b, age_b, id_b = skeletons[j]
+                
+                # Skip if already aliased
+                if id_b in self.skeleton_id_aliases:
                     continue
                 
-                # Only compare if old skeleton is significantly older
-                if age_old - age_new < 0.3:  # Old must be at least 0.3s older than new
-                    continue
-                    
-                # Get keypoints for old skeleton
-                kp_old = getattr(person_old, 'keypoint', None)
-                if kp_old is None:
-                    kp_old = getattr(person_old, 'keypoints', None)
-                if kp_old is None or len(kp_old) == 0:
+                # Get keypoints
+                kp_a = getattr(person_a, 'keypoint', None)
+                if kp_a is None:
+                    kp_a = getattr(person_a, 'keypoints', None)
+                kp_b = getattr(person_b, 'keypoint', None)
+                if kp_b is None:
+                    kp_b = getattr(person_b, 'keypoints', None)
+                
+                if kp_a is None or kp_b is None or len(kp_a) == 0 or len(kp_b) == 0:
                     continue
                 
-                pelvis_old = kp_old[0]
-                
-                # Check position proximity
-                dx = pelvis_new[0] - pelvis_old[0]
-                dy = pelvis_new[1] - pelvis_old[1]
-                dz = pelvis_new[2] - pelvis_old[2]
+                # Check distance
+                pelvis_a, pelvis_b = kp_a[0], kp_b[0]
+                dx = pelvis_a[0] - pelvis_b[0]
+                dy = pelvis_a[1] - pelvis_b[1]
+                dz = pelvis_a[2] - pelvis_b[2]
                 distance = (dx*dx + dy*dy + dz*dz) ** 0.5
                 
                 if distance > MAX_POSITION_DIFF:
-                    if num_input > 1:
-                        print(f"[FILTER] IDs {sdk_id_new} and {sdk_id_old}: distance {distance:.0f}mm > {MAX_POSITION_DIFF}mm (too far)")
-                    continue  # Too far apart
+                    continue
                 
-                # Check pose similarity (compare joint positions)
-                num_joints = min(len(kp_new), len(kp_old))
+                # Check pose similarity
+                num_joints = min(len(kp_a), len(kp_b))
                 similar_joints = 0
                 for k in range(num_joints):
-                    jdx = kp_new[k][0] - kp_old[k][0]
-                    jdy = kp_new[k][1] - kp_old[k][1]
-                    jdz = kp_new[k][2] - kp_old[k][2]
+                    jdx = kp_a[k][0] - kp_b[k][0]
+                    jdy = kp_a[k][1] - kp_b[k][1]
+                    jdz = kp_a[k][2] - kp_b[k][2]
                     joint_dist = (jdx*jdx + jdy*jdy + jdz*jdz) ** 0.5
-                    if joint_dist < 300:  # Joints within 30cm
+                    if joint_dist < 300:  # Within 30cm
                         similar_joints += 1
                 
                 pose_similarity = similar_joints / num_joints if num_joints > 0 else 0
                 
-                if num_input > 1:
-                    print(f"[FILTER] IDs {sdk_id_new} (age {age_new:.1f}s) vs {sdk_id_old} (age {age_old:.1f}s): distance={distance:.0f}mm, pose_sim={pose_similarity:.2f}")
-                
                 if pose_similarity >= POSE_SIMILARITY_THRESHOLD:
-                    # Found a match! New skeleton is same person as old one
-                    print(f"[FILTER] MATCH! Removing old ID {sdk_id_old}, transferring stable ID to new ID {sdk_id_new}")
-                    # Transfer the stable ID from old to new
-                    stable_id_old = self.skeleton_tracker[sdk_id_old].get('stable_id')
-                    if stable_id_old:
-                        self.skeleton_tracker[sdk_id_new]['stable_id'] = stable_id_old
-                    
-                    # Mark old skeleton to be removed
-                    skip_ids.add(sdk_id_old)
-                    id_replacements[sdk_id_old] = sdk_id_new
+                    # Found duplicate! id_a is OLDER, id_b is NEWER
+                    # Keep old ID (id_a), suppress new ID (id_b)
+                    # Check if id_a is itself an alias - if so, use the root
+                    root_id = self.skeleton_id_aliases.get(id_a, id_a)
+                    new_aliases[id_b] = root_id
+                    print(f"[FILTER] Duplicate: suppressing new ID {id_b}, aliasing to old ID {root_id}")
                     break
         
-        # Second pass: build output list, excluding duplicates
-        for person, age, sdk_id in skeletons_by_age:
-            if sdk_id in skip_ids:
-                continue  # Skip duplicates
-            
-            # Assign stable ID if not yet assigned
-            if self.skeleton_tracker[sdk_id]['stable_id'] is None:
-                self.skeleton_tracker[sdk_id]['stable_id'] = self.next_stable_id
-                self.next_stable_id += 1
-            
-            # Override SDK ID with stable ID
-            stable_id = self.skeleton_tracker[sdk_id]['stable_id']
-            person.id = stable_id
-            filtered_bodies.append(person)
+        # Update aliases
+        self.skeleton_id_aliases.update(new_aliases)
         
-        # Update the original bodies list instead of creating new object
-        bodies.body_list = filtered_bodies
-        
-        # Debug: Log output
-        num_output = len(filtered_bodies)
-        if num_input > 1 or num_output != num_input:
-            print(f"[FILTER] Output: {num_output} bodies (filtered from {num_input})")
-        
+        # Don't modify bodies.body_list here - ZED SDK doesn't support it properly
+        # Filtering will happen in _process_bodies_fusion
         return bodies
 
     def _process_bodies_fusion(self, bodies) -> Optional[Frame]:
@@ -2346,6 +2296,9 @@ class SenseSpaceServer:
         people = []
 
         for person in bodies.body_list:
+            # Skip if this ID is suppressed (aliased to an older ID)
+            if person.id in self.skeleton_id_aliases:
+                continue
             # Handle different SDK versions for keypoints
             kp_attr = getattr(person, 'keypoint', None)
             if kp_attr is None:
