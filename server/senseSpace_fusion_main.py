@@ -114,11 +114,11 @@ def main():
                        help="Body tracking accuracy: 0=FAST, 1=MEDIUM, 2=ACCURATE (default, highest quality)")
     parser.add_argument("--no-body-fitting", action="store_true",
                        help="Disable body fitting (reduces GPU load but loses mesh orientation data)")
-    parser.add_argument("--prediction-timeout", type=float, default=1.0,
-                       help="Tracking prediction timeout in seconds (default: 1.0 for stable tracking)")
+    parser.add_argument("--prediction-timeout", type=float, default=5.0,
+                       help="Tracking prediction timeout in seconds (default: 5.0 for stable ID tracking)")
     # Note: --filter parameter removed - filter causes tracking issues and is permanently disabled
-    parser.add_argument("--max-range", type=float, default=5.0,
-                       help="Maximum detection range in meters (default: 5.0)")
+    parser.add_argument("--max-range", type=float, default=10.0,
+                       help="Maximum detection range in meters (default: 10.0)")
     
     args = parser.parse_args()
     

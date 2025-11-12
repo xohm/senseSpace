@@ -96,9 +96,9 @@ class SenseSpaceServer:
                  camera_resolution: int = 2,  # 0=HD720, 1=HD1080, 2=VGA (default)
                  camera_fps: int = 60,  # 60fps default for smooth tracking
                  tracking_accuracy: int = 2,  # 0=FAST, 1=MEDIUM, 2=ACCURATE (default)
-                 max_detection_range: float = 5.0,  # Maximum detection range in meters
+                 max_detection_range: float = 10.0,  # Maximum detection range in meters (increased for better tracking)
                  enable_body_fitting: bool = True,  # Body mesh fitting (default: enabled for BODY_34)
-                 prediction_timeout: float = 1.0):  # Tracking prediction timeout (default: 1.0s for stable tracking)
+                 prediction_timeout: float = 5.0):  # Tracking prediction timeout (increased to 5.0s for stable ID tracking)
         self.host = host
         self.port = port
         self.local_ip = get_local_ip()
@@ -1019,7 +1019,8 @@ class SenseSpaceServer:
                 body_params.body_format = sl.BODY_FORMAT.BODY_34
                 body_params.enable_body_fitting = self.enable_body_fitting  # Enabled by default for BODY_34 mesh data
                 body_params.enable_tracking = True
-                # Note: prediction_timeout_s and max_range can cause issues in single camera mode
+                body_params.prediction_timeout_s = self.prediction_timeout  # Use runtime-configured timeout
+                body_params.max_range = self.max_detection_range  # Use runtime-configured range
 
                 status = self.camera.enable_body_tracking(body_params)
                 if status != sl.ERROR_CODE.SUCCESS:
@@ -1798,7 +1799,7 @@ class SenseSpaceServer:
         """Body tracking loop for fusion mode"""
         bodies = sl.Bodies()
 
-        MAX_FPS = 60  # Match camera FPS
+        MAX_FPS = 30  # Fusion at 30fps is more stable than 60fps
         FRAME_INTERVAL = 1.0 / MAX_FPS
         last_time = time.time()
 
@@ -1976,6 +1977,9 @@ class SenseSpaceServer:
                 except Exception as e:
                     print(f"[WARNING] Failed to stream v1 video frames: {e}")
 
+            # Update fusion timestamp before processing (critical for stable tracking)
+            self.fusion.update_timestamp()
+            
             fusion_status = self.fusion.process()
             if fusion_status == sl.FUSION_ERROR_CODE.SUCCESS:
                 # Retrieve bodies
