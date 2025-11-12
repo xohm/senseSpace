@@ -1613,17 +1613,6 @@ class SenseSpaceServer:
                 body_tracking_fusion_params.enable_tracking = True
                 body_tracking_fusion_params.enable_body_fitting = self.enable_body_fitting  # Enabled by default for BODY_34 mesh data
                 
-                # Set minimum cameras required - if set to 2, only outputs bodies seen by both cameras
-                # This eliminates duplicates but requires both cameras to see the person
-                # Default is 1 (output bodies seen by at least 1 camera)
-                # Try setting to 2 to force fusion to merge
-                try:
-                    body_tracking_fusion_params.skeleton_minimum_allowed_camera = 2
-                    print("[INFO] Fusion set to require detection from both cameras (eliminates duplicates)")
-                except AttributeError:
-                    # Older SDK version doesn't have this parameter
-                    pass
-                
                 status = self.fusion.enable_body_tracking(body_tracking_fusion_params)
                 if status != sl.FUSION_ERROR_CODE.SUCCESS:
                     print(f"[ERROR] Failed to enable fusion body tracking: {status}")
