@@ -2197,7 +2197,12 @@ class SenseSpaceServer:
         current_time = time.time()
         MAX_POSITION_DIFF = 1500  # 1.5m - max distance to consider same person
         MAX_AGE_DIFF = 3.0  # Only compare skeletons created within 3 seconds
-        POSE_SIMILARITY_THRESHOLD = 0.7  # 70% joint similarity required
+        POSE_SIMILARITY_THRESHOLD = 0.3  # 30% joint similarity required (lowered - people move!)
+        
+        # Debug: Log input
+        num_input = len(bodies.body_list)
+        if num_input > 1:
+            print(f"[FILTER] Input: {num_input} bodies, IDs: {[p.id for p in bodies.body_list]}")
         
         # Get current SDK IDs
         current_sdk_ids = set(person.id for person in bodies.body_list)
@@ -2232,21 +2237,23 @@ class SenseSpaceServer:
             age = current_time - self.skeleton_tracker[sdk_id]['first_seen']
             skeletons_by_age.append((person, age, sdk_id))
         
-        # Sort by age (oldest first)
-        skeletons_by_age.sort(key=lambda x: x[1], reverse=True)
+        # Sort by age (newest first - process new skeletons before old ones)
+        skeletons_by_age.sort(key=lambda x: x[1])
         
         # Track which skeletons to skip (duplicates)
         skip_ids = set()
+        id_replacements = {}  # Maps old_sdk_id -> new_sdk_id
         
-        # Compare skeletons: check if new ones match old ones
+        # First pass: identify duplicates (new skeletons matching old ones)
         for i, (person_new, age_new, sdk_id_new) in enumerate(skeletons_by_age):
             if sdk_id_new in skip_ids:
                 continue
             
             # Get keypoints for new skeleton
-            kp_new = getattr(person_new, 'keypoint', None) or getattr(person_new, 'keypoints', None)
+            kp_new = getattr(person_new, 'keypoint', None)
+            if kp_new is None:
+                kp_new = getattr(person_new, 'keypoints', None)
             if kp_new is None or len(kp_new) == 0:
-                filtered_bodies.append(person_new)
                 continue
             
             pelvis_new = kp_new[0]
@@ -2256,15 +2263,14 @@ class SenseSpaceServer:
                 if i == j or sdk_id_old in skip_ids:
                     continue
                 
-                # Only compare if age difference suggests one is "new" and one is "old"
-                if abs(age_new - age_old) < 0.5:  # Both similar age, not a replacement
-                    continue
-                
-                if age_old - age_new < 0:  # New is actually older
+                # Only compare if old skeleton is significantly older
+                if age_old - age_new < 0.3:  # Old must be at least 0.3s older than new
                     continue
                     
                 # Get keypoints for old skeleton
-                kp_old = getattr(person_old, 'keypoint', None) or getattr(person_old, 'keypoints', None)
+                kp_old = getattr(person_old, 'keypoint', None)
+                if kp_old is None:
+                    kp_old = getattr(person_old, 'keypoints', None)
                 if kp_old is None or len(kp_old) == 0:
                     continue
                 
@@ -2277,6 +2283,8 @@ class SenseSpaceServer:
                 distance = (dx*dx + dy*dy + dz*dz) ** 0.5
                 
                 if distance > MAX_POSITION_DIFF:
+                    if num_input > 1:
+                        print(f"[FILTER] IDs {sdk_id_new} and {sdk_id_old}: distance {distance:.0f}mm > {MAX_POSITION_DIFF}mm (too far)")
                     continue  # Too far apart
                 
                 # Check pose similarity (compare joint positions)
@@ -2292,34 +2300,46 @@ class SenseSpaceServer:
                 
                 pose_similarity = similar_joints / num_joints if num_joints > 0 else 0
                 
+                if num_input > 1:
+                    print(f"[FILTER] IDs {sdk_id_new} (age {age_new:.1f}s) vs {sdk_id_old} (age {age_old:.1f}s): distance={distance:.0f}mm, pose_sim={pose_similarity:.2f}")
+                
                 if pose_similarity >= POSE_SIMILARITY_THRESHOLD:
                     # Found a match! New skeleton is same person as old one
+                    print(f"[FILTER] MATCH! Removing old ID {sdk_id_old}, transferring stable ID to new ID {sdk_id_new}")
                     # Transfer the stable ID from old to new
                     stable_id_old = self.skeleton_tracker[sdk_id_old].get('stable_id')
                     if stable_id_old:
                         self.skeleton_tracker[sdk_id_new]['stable_id'] = stable_id_old
                     
-                    # Mark old skeleton to be skipped (removed)
+                    # Mark old skeleton to be removed
                     skip_ids.add(sdk_id_old)
+                    id_replacements[sdk_id_old] = sdk_id_new
                     break
-            
-            # Keep this skeleton
-            if sdk_id_new not in skip_ids:
-                # Assign stable ID if not yet assigned
-                if self.skeleton_tracker[sdk_id_new]['stable_id'] is None:
-                    self.skeleton_tracker[sdk_id_new]['stable_id'] = self.next_stable_id
-                    self.next_stable_id += 1
-                
-                # Override SDK ID with stable ID
-                stable_id = self.skeleton_tracker[sdk_id_new]['stable_id']
-                person_new.id = stable_id
-                filtered_bodies.append(person_new)
         
-        # Create new Bodies object with filtered list
-        result = sl.Bodies()
-        result.body_list = filtered_bodies
-        result.timestamp = bodies.timestamp
-        return result
+        # Second pass: build output list, excluding duplicates
+        for person, age, sdk_id in skeletons_by_age:
+            if sdk_id in skip_ids:
+                continue  # Skip duplicates
+            
+            # Assign stable ID if not yet assigned
+            if self.skeleton_tracker[sdk_id]['stable_id'] is None:
+                self.skeleton_tracker[sdk_id]['stable_id'] = self.next_stable_id
+                self.next_stable_id += 1
+            
+            # Override SDK ID with stable ID
+            stable_id = self.skeleton_tracker[sdk_id]['stable_id']
+            person.id = stable_id
+            filtered_bodies.append(person)
+        
+        # Update the original bodies list instead of creating new object
+        bodies.body_list = filtered_bodies
+        
+        # Debug: Log output
+        num_output = len(filtered_bodies)
+        if num_input > 1 or num_output != num_input:
+            print(f"[FILTER] Output: {num_output} bodies (filtered from {num_input})")
+        
+        return bodies
 
     def _process_bodies_fusion(self, bodies) -> Optional[Frame]:
         """Process bodies from fusion and create Frame object"""
