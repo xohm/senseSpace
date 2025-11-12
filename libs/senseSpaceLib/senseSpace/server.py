@@ -1977,9 +1977,6 @@ class SenseSpaceServer:
                 except Exception as e:
                     print(f"[WARNING] Failed to stream v1 video frames: {e}")
 
-            # Update fusion timestamp before processing (critical for stable tracking)
-            self.fusion.update_timestamp()
-            
             fusion_status = self.fusion.process()
             if fusion_status == sl.FUSION_ERROR_CODE.SUCCESS:
                 # Retrieve bodies
