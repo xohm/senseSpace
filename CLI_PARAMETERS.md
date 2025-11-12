@@ -7,16 +7,16 @@ The SenseSpace fusion server now supports runtime configuration through command-
 
 ### 1. Resolution (`--resolution`)
 **Type**: Integer choice (0, 1, or 2)  
-**Default**: 0 (HD720)
+**Default**: 2 (VGA)
 
 Controls the ZED camera resolution:
-- `0` = HD720 (1280x720) - **Default, recommended for 60fps**
+- `0` = HD720 (1280x720) - Higher quality, good for 60fps
 - `1` = HD1080 (1920x1080) - Limited to 30fps
-- `2` = VGA (672x376) - Lower resolution
+- `2` = VGA (672x376) - **Default, best performance at 60fps**
 
 **Example**:
 ```bash
-python senseSpace_fusion_main.py --resolution 0
+python senseSpace_fusion_main.py --resolution 2
 ```
 
 ### 2. Frame Rate (`--fps`)
@@ -36,15 +36,15 @@ python senseSpace_fusion_main.py --fps 60
 
 ### 3. Tracking Accuracy (`--accuracy`)
 **Type**: Integer choice (0 or 1)  
-**Default**: 0 (FAST)
+**Default**: 1 (ACCURATE)
 
 Controls the body tracking model:
-- `0` = FAST - **Default, better performance, recommended for 60fps**
-- `1` = ACCURATE - Higher quality but slower
+- `0` = FAST - Better performance, lower quality
+- `1` = ACCURATE - **Default, higher quality tracking**
 
 **Example**:
 ```bash
-python senseSpace_fusion_main.py --accuracy 0
+python senseSpace_fusion_main.py --accuracy 1
 ```
 
 ### 4. Body Tracking Filter (`--filter`)
@@ -59,6 +59,25 @@ Controls the duplicate body tracking filter:
 ```bash
 python senseSpace_fusion_main.py --filter 0
 ```
+
+### 5. Maximum Detection Range (`--max-range`)
+**Type**: Float  
+**Default**: 5.0
+
+Controls the maximum distance (in meters) at which bodies will be detected and tracked. Bodies beyond this distance will be ignored.
+
+**Range**: Typically 1.0 to 10.0 meters  
+**Recommended**: 5.0 meters for most indoor scenarios
+
+**Example**:
+```bash
+python senseSpace_fusion_main.py --max-range 5.0
+```
+
+**Use cases**:
+- Reduce to 3.0-4.0m for close-range interactions
+- Increase to 7.0-8.0m for larger spaces
+- Lower values may improve performance and reduce false detections
 
 ## Validation
 
@@ -81,7 +100,7 @@ python server/senseSpace_fusion_main.py
 
 Run with custom configuration:
 ```bash
-python server/senseSpace_fusion_main.py --resolution 0 --fps 60 --accuracy 0 --filter 0
+python server/senseSpace_fusion_main.py --resolution 0 --fps 60 --accuracy 0 --filter 0 --max-range 5.0
 ```
 
 Run in HD1080 mode (automatically adjusts to 30fps):
@@ -95,15 +114,21 @@ Run with ACCURATE tracking model:
 python server/senseSpace_fusion_main.py --accuracy 1
 ```
 
+Run with shorter detection range for close interactions:
+```bash
+python server/senseSpace_fusion_main.py --max-range 3.0
+```
+
 ## System Output
 
 When starting the server, you'll see configuration information:
 ```
 [INFO] Camera configuration:
-[INFO]   Resolution: HD720 (1280x720)
+[INFO]   Resolution: VGA (672x376)
 [INFO]   FPS: 60
-[INFO]   Tracking accuracy: FAST
+[INFO]   Tracking accuracy: ACCURATE
 [INFO]   Body filter: disabled
+[INFO]   Max detection range: 5.0m
 ```
 
 ## Existing Parameters
@@ -133,18 +158,43 @@ These new parameters work alongside existing server parameters:
 ```bash
 python server/senseSpace_fusion_main.py
 # Equivalent to:
-# --resolution 0 --fps 60 --accuracy 0 --filter 0
+# --resolution 2 --fps 60 --accuracy 1 --filter 0 --max-range 5.0
 ```
 
-### For High Quality (Slower)
+### For High Quality (Default)
 ```bash
 python server/senseSpace_fusion_main.py --resolution 1 --accuracy 1
 # Note: HD1080 forces 30fps automatically
 ```
 
+### For Maximum Performance
+```bash
+python server/senseSpace_fusion_main.py --accuracy 0
+# Uses FAST model for better FPS
+```
+
 ### For Performance Testing
 ```bash
 python server/senseSpace_fusion_main.py --resolution 2 --fps 60 --accuracy 0 --filter 0
+# Same as default - VGA already optimized for performance
+```
+
+### For Higher Quality
+```bash
+python server/senseSpace_fusion_main.py --resolution 0
+# Uses HD720 for better image quality
+```
+
+### For Close-Range Interactions
+```bash
+python server/senseSpace_fusion_main.py --max-range 3.0
+# Detects bodies only within 3 meters
+```
+
+### For Large Spaces
+```bash
+python server/senseSpace_fusion_main.py --max-range 8.0
+# Extends detection to 8 meters
 ```
 
 ## Implementation Details

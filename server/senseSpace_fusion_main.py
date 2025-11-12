@@ -106,14 +106,16 @@ def main():
                        help="Disable body tracking duplicate filter (use raw ZED SDK output)")
     
     # Camera and tracking parameters
-    parser.add_argument("--resolution", type=int, choices=[0, 1, 2], default=0,
-                       help="Camera resolution: 0=HD720 (1280x720, default), 1=HD1080 (1920x1080), 2=VGA (672x376)")
+    parser.add_argument("--resolution", type=int, choices=[0, 1, 2], default=2,
+                       help="Camera resolution: 0=HD720 (1280x720), 1=HD1080 (1920x1080), 2=VGA (672x376, default)")
     parser.add_argument("--fps", type=int, choices=[30, 60], default=60,
                        help="Camera frame rate: 30 or 60 fps (default: 60). Note: HD1080 only supports 30fps")
-    parser.add_argument("--accuracy", type=int, choices=[0, 1], default=0,
-                       help="Body tracking accuracy: 0=FAST (default, better performance), 1=ACCURATE (higher quality)")
+    parser.add_argument("--accuracy", type=int, choices=[0, 1], default=1,
+                       help="Body tracking accuracy: 0=FAST, 1=ACCURATE (default, higher quality)")
     parser.add_argument("--filter", type=int, choices=[0, 1], default=0,
                        help="Body tracking filter: 0=disabled (default), 1=enabled (may cause flakiness)")
+    parser.add_argument("--max-range", type=float, default=5.0,
+                       help="Maximum detection range in meters (default: 5.0)")
     
     args = parser.parse_args()
     
@@ -142,7 +144,8 @@ def main():
         enable_body_filter=enable_filter,
         camera_resolution=args.resolution,
         camera_fps=args.fps,
-        tracking_accuracy=args.accuracy
+        tracking_accuracy=args.accuracy,
+        max_detection_range=args.max_range
     )
     
     try:
