@@ -95,10 +95,10 @@ class SenseSpaceServer:
                  enable_body_filter: bool = False,  # Changed to False - filter can cause tracking instability
                  camera_resolution: int = 2,  # 0=HD720, 1=HD1080, 2=VGA (default)
                  camera_fps: int = 60,  # 60fps default for smooth tracking
-                 tracking_accuracy: int = 1,  # 0=FAST, 1=ACCURATE (default)
+                 tracking_accuracy: int = 2,  # 0=FAST, 1=MEDIUM, 2=ACCURATE (default)
                  max_detection_range: float = 5.0,  # Maximum detection range in meters
                  enable_body_fitting: bool = True,  # Body mesh fitting (default: enabled for BODY_34)
-                 prediction_timeout: float = 2.0):  # Tracking prediction timeout in seconds
+                 prediction_timeout: float = 1.0):  # Tracking prediction timeout (default: 1.0s for stable tracking)
         self.host = host
         self.port = port
         self.local_ip = get_local_ip()
@@ -115,19 +115,21 @@ class SenseSpaceServer:
         
         accuracy_map = {
             0: sl.BODY_TRACKING_MODEL.HUMAN_BODY_FAST,
-            1: sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE
+            1: sl.BODY_TRACKING_MODEL.HUMAN_BODY_MEDIUM,
+            2: sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE
         }
-        self.body_tracking_model = accuracy_map.get(tracking_accuracy, sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE)
+        self.body_tracking_model = accuracy_map.get(tracking_accuracy, sl.BODY_TRACKING_MODEL.HUMAN_BODY_MEDIUM)
         self.max_detection_range = max_detection_range
         self.enable_body_fitting = enable_body_fitting
         self.prediction_timeout = prediction_timeout
         
         # Print configuration
         resolution_names = {0: "HD720 (1280x720)", 1: "HD1080 (1920x1080)", 2: "VGA (672x376)"}
-        accuracy_names = {0: "FAST", 1: "ACCURATE"}
+        accuracy_names = {0: "FAST", 1: "MEDIUM", 2: "ACCURATE"}
         print(f"[INFO] Camera configuration:")
         print(f"[INFO]   Resolution: {resolution_names.get(camera_resolution, 'VGA')}")
         print(f"[INFO]   FPS: {camera_fps}")
+        print(f"[INFO]   Depth mode: NEURAL")
         print(f"[INFO]   Tracking accuracy: {accuracy_names.get(tracking_accuracy, 'ACCURATE')}")
         print(f"[INFO]   Max detection range: {max_detection_range}m")
         print(f"[INFO]   Prediction timeout: {prediction_timeout}s")
@@ -990,10 +992,10 @@ class SenseSpaceServer:
             init_params = sl.InitParameters()
             init_params.camera_resolution = self.CAMERA_RESOLUTION
             init_params.camera_fps = self.CAMERA_FPS
-            init_params.depth_mode = sl.DEPTH_MODE.PERFORMANCE  # PERFORMANCE mode for stability
+            init_params.depth_mode = sl.DEPTH_MODE.NEURAL  # NEURAL mode (recommended by ZED SDK)
             init_params.coordinate_units = sl.UNIT.MILLIMETER
             init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
-            init_params.depth_stabilization = True  # Enable depth stabilization
+            init_params.depth_stabilization = 1  # Enable depth stabilization (int: 0=off, 1=on)
 
             # Open camera
             status = self.camera.open(init_params)
@@ -1486,10 +1488,10 @@ class SenseSpaceServer:
             init_params = sl.InitParameters()
             init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
             init_params.coordinate_units = sl.UNIT.MILLIMETER
-            init_params.depth_mode = sl.DEPTH_MODE.PERFORMANCE  # PERFORMANCE mode for fusion (faster, more stable)
+            init_params.depth_mode = sl.DEPTH_MODE.NEURAL  # NEURAL mode (recommended by ZED SDK)
             init_params.camera_resolution = self.CAMERA_RESOLUTION
             init_params.camera_fps = self.CAMERA_FPS
-            init_params.depth_stabilization = True  # Enable depth stabilization for smoother tracking
+            init_params.depth_stabilization = 1  # Enable depth stabilization (int: 0=off, 1=on)
 
             communication_parameters = sl.CommunicationParameters()
             communication_parameters.set_for_shared_memory()
@@ -1534,7 +1536,8 @@ class SenseSpaceServer:
                     cam.close()
                     continue
 
-                # Enable body tracking
+                # Enable body tracking on each camera (required for fusion)
+                # Fusion merges body detections from all cameras
                 status = cam.enable_body_tracking(body_tracking_parameters)
                 if status != sl.ERROR_CODE.SUCCESS:
                     print(f"[WARNING] Error enabling body tracking for {serial}")
@@ -1609,6 +1612,17 @@ class SenseSpaceServer:
                 body_tracking_fusion_params = sl.BodyTrackingFusionParameters()
                 body_tracking_fusion_params.enable_tracking = True
                 body_tracking_fusion_params.enable_body_fitting = self.enable_body_fitting  # Enabled by default for BODY_34 mesh data
+                
+                # Set minimum cameras required - if set to 2, only outputs bodies seen by both cameras
+                # This eliminates duplicates but requires both cameras to see the person
+                # Default is 1 (output bodies seen by at least 1 camera)
+                # Try setting to 2 to force fusion to merge
+                try:
+                    body_tracking_fusion_params.skeleton_minimum_allowed_camera = 2
+                    print("[INFO] Fusion set to require detection from both cameras (eliminates duplicates)")
+                except AttributeError:
+                    # Older SDK version doesn't have this parameter
+                    pass
                 
                 status = self.fusion.enable_body_tracking(body_tracking_fusion_params)
                 if status != sl.FUSION_ERROR_CODE.SUCCESS:
@@ -1981,6 +1995,14 @@ class SenseSpaceServer:
                         self.fusion.retrieve_bodies(bodies, sl.BodyTrackingFusionRuntimeParameters())
                     else:
                         self.fusion.retrieve_bodies(bodies)
+                    
+                    # Debug: Log number of bodies detected
+                    if not hasattr(self, '_fusion_body_log_counter'):
+                        self._fusion_body_log_counter = 0
+                    self._fusion_body_log_counter += 1
+                    if self._fusion_body_log_counter % 30 == 0:  # Log every 30 frames (~1 second)
+                        print(f"[DEBUG] Fusion detected {len(bodies.body_list)} bodies")
+                        
                 except Exception as e:
                     print(f'[WARNING] Fusion retrieve_bodies failed: {e}')
                     continue
