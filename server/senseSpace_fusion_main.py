@@ -110,12 +110,12 @@ def main():
                        help="Camera resolution: 0=HD720 (1280x720), 1=HD1080 (1920x1080), 2=VGA (672x376, default)")
     parser.add_argument("--fps", type=int, choices=[30, 60], default=60,
                        help="Camera frame rate: 30 or 60 fps (default: 60). Note: HD1080 only supports 30fps")
-    parser.add_argument("--accuracy", type=int, choices=[0, 1, 2], default=2,
-                       help="Body tracking accuracy: 0=FAST, 1=MEDIUM, 2=ACCURATE (default, highest quality)")
+    parser.add_argument("--accuracy", type=int, choices=[0, 1, 2], default=1,
+                       help="Body tracking accuracy: 0=FAST, 1=MEDIUM (default, balanced), 2=ACCURATE (highest quality)")
     parser.add_argument("--no-body-fitting", action="store_true",
                        help="Disable body fitting (reduces GPU load but loses mesh orientation data)")
-    parser.add_argument("--prediction-timeout", type=float, default=5.0,
-                       help="Tracking prediction timeout in seconds (default: 5.0 for stable ID tracking)")
+    parser.add_argument("--prediction-timeout", type=float, default=2.0,
+                       help="Tracking prediction timeout in seconds (default: 2.0 for stable ID tracking)")
     # Note: --filter parameter removed - filter causes tracking issues and is permanently disabled
     parser.add_argument("--max-range", type=float, default=10.0,
                        help="Maximum detection range in meters (default: 10.0)")

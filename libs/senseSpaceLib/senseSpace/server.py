@@ -95,10 +95,10 @@ class SenseSpaceServer:
                  enable_body_filter: bool = False,  # Changed to False - filter can cause tracking instability
                  camera_resolution: int = 2,  # 0=HD720, 1=HD1080, 2=VGA (default)
                  camera_fps: int = 60,  # 60fps default for smooth tracking
-                 tracking_accuracy: int = 2,  # 0=FAST, 1=MEDIUM, 2=ACCURATE (default)
+                 tracking_accuracy: int = 1,  # 0=FAST, 1=MEDIUM (default), 2=ACCURATE
                  max_detection_range: float = 10.0,  # Maximum detection range in meters (increased for better tracking)
                  enable_body_fitting: bool = True,  # Body mesh fitting (default: enabled for BODY_34)
-                 prediction_timeout: float = 5.0):  # Tracking prediction timeout (increased to 5.0s for stable ID tracking)
+                 prediction_timeout: float = 2.0):  # Tracking prediction timeout (2.0s - balance between stability and ghost reduction)
         self.host = host
         self.port = port
         self.local_ip = get_local_ip()
@@ -130,10 +130,16 @@ class SenseSpaceServer:
         print(f"[INFO]   Resolution: {resolution_names.get(camera_resolution, 'VGA')}")
         print(f"[INFO]   FPS: {camera_fps}")
         print(f"[INFO]   Depth mode: NEURAL")
-        print(f"[INFO]   Tracking accuracy: {accuracy_names.get(tracking_accuracy, 'ACCURATE')}")
+        print(f"[INFO]   Tracking accuracy: {accuracy_names.get(tracking_accuracy, 'MEDIUM')}")
         print(f"[INFO]   Max detection range: {max_detection_range}m")
         print(f"[INFO]   Prediction timeout: {prediction_timeout}s")
         print(f"[INFO]   Body fitting (mesh): {'enabled' if enable_body_fitting else 'disabled (--no-body-fitting)'}")
+        
+        # Skeleton ID continuity filter - prevents duplicate skeletons
+        self.skeleton_tracker = {}  # {sdk_id: {'first_seen': timestamp, 'last_seen': timestamp, 'stable_id': int}}
+        self.next_stable_id = 1
+        self.skeleton_history = {}  # {stable_id: {'position': [x,y,z], 'keypoints': [...], 'last_update': timestamp}}
+        print(f"[INFO] Skeleton ID continuity filter: enabled (prevents ghost duplicates)")
         
         # Video streaming configuration
         self.enable_streaming = enable_streaming
@@ -1997,7 +2003,9 @@ class SenseSpaceServer:
                     print(f'[WARNING] Fusion retrieve_bodies failed: {e}')
                     continue
 
-                # Use raw ZED SDK output (filter disabled - causes tracking issues)
+                # Apply skeleton continuity filter to prevent ghost duplicates
+                bodies = self._apply_skeleton_continuity_filter(bodies)
+                
                 # Process bodies
                 frame = self._process_bodies_fusion(bodies)
                 if frame:
@@ -2177,6 +2185,141 @@ class SenseSpaceServer:
             )
 
         return None
+
+    def _apply_skeleton_continuity_filter(self, bodies):
+        """Filter to prevent ghost skeletons and maintain ID continuity.
+        
+        Logic:
+        1. Track age of each skeleton ID
+        2. Compare new skeletons with existing ones (position + pose similarity)
+        3. If new skeleton matches old one, remove old and assign its stable ID to new
+        """
+        current_time = time.time()
+        MAX_POSITION_DIFF = 1500  # 1.5m - max distance to consider same person
+        MAX_AGE_DIFF = 3.0  # Only compare skeletons created within 3 seconds
+        POSE_SIMILARITY_THRESHOLD = 0.7  # 70% joint similarity required
+        
+        # Get current SDK IDs
+        current_sdk_ids = set(person.id for person in bodies.body_list)
+        
+        # Clean up old tracker entries (not seen for >5 seconds)
+        ids_to_remove = [sid for sid, data in self.skeleton_tracker.items() 
+                         if current_time - data['last_seen'] > 5.0]
+        for sid in ids_to_remove:
+            if sid in self.skeleton_tracker:
+                stable_id = self.skeleton_tracker[sid].get('stable_id')
+                if stable_id and stable_id in self.skeleton_history:
+                    del self.skeleton_history[stable_id]
+                del self.skeleton_tracker[sid]
+        
+        # Process each skeleton
+        filtered_bodies = []
+        skeletons_by_age = []  # [(person, age, sdk_id), ...]
+        
+        for person in bodies.body_list:
+            sdk_id = person.id
+            
+            # Track this skeleton
+            if sdk_id not in self.skeleton_tracker:
+                self.skeleton_tracker[sdk_id] = {
+                    'first_seen': current_time,
+                    'last_seen': current_time,
+                    'stable_id': None
+                }
+            else:
+                self.skeleton_tracker[sdk_id]['last_seen'] = current_time
+            
+            age = current_time - self.skeleton_tracker[sdk_id]['first_seen']
+            skeletons_by_age.append((person, age, sdk_id))
+        
+        # Sort by age (oldest first)
+        skeletons_by_age.sort(key=lambda x: x[1], reverse=True)
+        
+        # Track which skeletons to skip (duplicates)
+        skip_ids = set()
+        
+        # Compare skeletons: check if new ones match old ones
+        for i, (person_new, age_new, sdk_id_new) in enumerate(skeletons_by_age):
+            if sdk_id_new in skip_ids:
+                continue
+            
+            # Get keypoints for new skeleton
+            kp_new = getattr(person_new, 'keypoint', None) or getattr(person_new, 'keypoints', None)
+            if kp_new is None or len(kp_new) == 0:
+                filtered_bodies.append(person_new)
+                continue
+            
+            pelvis_new = kp_new[0]
+            
+            # Look for older skeletons that might be the same person
+            for j, (person_old, age_old, sdk_id_old) in enumerate(skeletons_by_age):
+                if i == j or sdk_id_old in skip_ids:
+                    continue
+                
+                # Only compare if age difference suggests one is "new" and one is "old"
+                if abs(age_new - age_old) < 0.5:  # Both similar age, not a replacement
+                    continue
+                
+                if age_old - age_new < 0:  # New is actually older
+                    continue
+                    
+                # Get keypoints for old skeleton
+                kp_old = getattr(person_old, 'keypoint', None) or getattr(person_old, 'keypoints', None)
+                if kp_old is None or len(kp_old) == 0:
+                    continue
+                
+                pelvis_old = kp_old[0]
+                
+                # Check position proximity
+                dx = pelvis_new[0] - pelvis_old[0]
+                dy = pelvis_new[1] - pelvis_old[1]
+                dz = pelvis_new[2] - pelvis_old[2]
+                distance = (dx*dx + dy*dy + dz*dz) ** 0.5
+                
+                if distance > MAX_POSITION_DIFF:
+                    continue  # Too far apart
+                
+                # Check pose similarity (compare joint positions)
+                num_joints = min(len(kp_new), len(kp_old))
+                similar_joints = 0
+                for k in range(num_joints):
+                    jdx = kp_new[k][0] - kp_old[k][0]
+                    jdy = kp_new[k][1] - kp_old[k][1]
+                    jdz = kp_new[k][2] - kp_old[k][2]
+                    joint_dist = (jdx*jdx + jdy*jdy + jdz*jdz) ** 0.5
+                    if joint_dist < 300:  # Joints within 30cm
+                        similar_joints += 1
+                
+                pose_similarity = similar_joints / num_joints if num_joints > 0 else 0
+                
+                if pose_similarity >= POSE_SIMILARITY_THRESHOLD:
+                    # Found a match! New skeleton is same person as old one
+                    # Transfer the stable ID from old to new
+                    stable_id_old = self.skeleton_tracker[sdk_id_old].get('stable_id')
+                    if stable_id_old:
+                        self.skeleton_tracker[sdk_id_new]['stable_id'] = stable_id_old
+                    
+                    # Mark old skeleton to be skipped (removed)
+                    skip_ids.add(sdk_id_old)
+                    break
+            
+            # Keep this skeleton
+            if sdk_id_new not in skip_ids:
+                # Assign stable ID if not yet assigned
+                if self.skeleton_tracker[sdk_id_new]['stable_id'] is None:
+                    self.skeleton_tracker[sdk_id_new]['stable_id'] = self.next_stable_id
+                    self.next_stable_id += 1
+                
+                # Override SDK ID with stable ID
+                stable_id = self.skeleton_tracker[sdk_id_new]['stable_id']
+                person_new.id = stable_id
+                filtered_bodies.append(person_new)
+        
+        # Create new Bodies object with filtered list
+        result = sl.Bodies()
+        result.body_list = filtered_bodies
+        result.timestamp = bodies.timestamp
+        return result
 
     def _process_bodies_fusion(self, bodies) -> Optional[Frame]:
         """Process bodies from fusion and create Frame object"""
