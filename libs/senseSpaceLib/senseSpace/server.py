@@ -187,12 +187,12 @@ class SenseSpaceServer:
         self.enable_body_filter = enable_body_filter
         if enable_body_filter:
             self.body_filter = BodyTrackingFilter(
-                duplicate_distance_threshold=0.25,   # Reduced from 0.4m to 0.25m - more conservative
-                height_similarity_threshold=0.10,    # Reduced from 0.15 to 0.10 - stricter height matching
-                memory_duration=1.0,                 # Reduced from 2.0s to 1.0s - shorter memory
-                confidence_diff_threshold=20.0       # Reduced from 30 to 20 - easier to prefer one over another
+                duplicate_distance_threshold=0.5,    # 50cm - more lenient for better tracking continuity
+                height_similarity_threshold=0.20,    # 20% - more lenient for natural body movement
+                memory_duration=3.0,                 # 3s - longer memory for ID persistence
+                confidence_diff_threshold=20.0       # Lower threshold for easier merging
             )
-            print("[INFO] Body tracking filter enabled (conservative settings)")
+            print("[INFO] Body tracking filter enabled (tracking continuity optimized)")
         else:
             self.body_filter = None
             print("[INFO] Body tracking filter disabled")

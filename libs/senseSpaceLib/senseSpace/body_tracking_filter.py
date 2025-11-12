@@ -74,10 +74,10 @@ class BodyTrackingFilter:
     """
     
     def __init__(self, 
-                 duplicate_distance_threshold: float = 0.4,  # meters
-                 height_similarity_threshold: float = 0.15,   # 15% difference
-                 memory_duration: float = 2.0,                # seconds
-                 confidence_diff_threshold: float = 30.0):
+                 duplicate_distance_threshold: float = 0.5,  # meters - increased for better merging
+                 height_similarity_threshold: float = 0.20,   # 20% difference - more lenient
+                 memory_duration: float = 3.0,                # seconds - longer memory
+                 confidence_diff_threshold: float = 20.0):    # Lower threshold for easier merging
         """
         Initialize body tracking filter.
         
@@ -145,7 +145,6 @@ class BodyTrackingFilter:
         
         # FIRST: Check if any current persons match recently lost tracks
         # This handles the case where ZED assigns a new ID to the same person
-        # BUT: Be very conservative - only reassign if very close and very recent
         for person_id in person_ids:
             if person_id in ids_to_remove:
                 continue
@@ -153,13 +152,16 @@ class BodyTrackingFilter:
             person = current_persons[person_id]
             
             # Check against recently lost tracks
+            best_match_id = None
+            best_match_distance = float('inf')
+            
             for lost_id, lost_track in self.lost_tracks.items():
                 if lost_id == person_id:
                     continue  # Same ID
                 
-                # Only consider very recently lost tracks (< 0.5s)
+                # Consider recently lost tracks (within memory duration)
                 time_since_lost = current_time - lost_track.last_seen
-                if time_since_lost > 0.5:
+                if time_since_lost > self.memory_duration:
                     continue
                 
                 # Calculate distance to lost track's last known position
@@ -167,25 +169,25 @@ class BodyTrackingFilter:
                     last_pos = lost_track.position_history[-1]
                     distance = np.linalg.norm(person['position'] - last_pos)
                     
-                    # Require very close proximity for reassignment
-                    if distance < self.duplicate_distance_threshold * 0.6:  # Even stricter for reassignment
-                        # Height check if available - REQUIRED for reassignment
-                        height_matches = False
+                    # Check if within duplicate threshold
+                    if distance < self.duplicate_distance_threshold:
+                        # Height check if available
+                        height_matches = True
                         if person['height'] and lost_track.height:
                             height_diff = abs(person['height'] - lost_track.height) / max(person['height'], lost_track.height)
                             height_matches = height_diff < self.height_similarity_threshold
-                        elif not person['height'] or not lost_track.height:
-                            # If height not available for both, skip reassignment (too risky)
-                            continue
                         
-                        if height_matches:
-                            # This new person is likely the lost track with a new ID
-                            # Keep the OLD ID (lost_id), remove the NEW ID (person_id)
-                            ids_to_remove.add(person_id)
-                            id_remapping[person_id] = lost_id
-                            print(f"[FILTER] Reassigned new ID {person_id} -> old ID {lost_id} "
-                                  f"(dist:{distance:.2f}m, lost {time_since_lost:.1f}s ago)")
-                            break
+                        if height_matches and distance < best_match_distance:
+                            best_match_id = lost_id
+                            best_match_distance = distance
+            
+            # If we found a good match, reassign to the old ID
+            if best_match_id is not None:
+                ids_to_remove.add(person_id)
+                id_remapping[person_id] = best_match_id
+                time_since_lost = current_time - self.lost_tracks[best_match_id].last_seen
+                print(f"[FILTER] Reassigned new ID {person_id} -> old ID {best_match_id} "
+                      f"(dist:{best_match_distance:.2f}m, lost {time_since_lost:.1f}s ago)")
         
         # SECOND: Check current persons against each other for duplicates
         for i, id1 in enumerate(person_ids):
@@ -293,29 +295,24 @@ class BodyTrackingFilter:
         if distance > self.duplicate_distance_threshold:
             return False
         
-        # Height similarity check - REQUIRED if available
+        # Height similarity check if available
         if p1['height'] is not None and p2['height'] is not None:
             height_diff = abs(p1['height'] - p2['height']) / max(p1['height'], p2['height'])
             if height_diff > self.height_similarity_threshold:
                 return False
-        else:
-            # If height not available for both, be much more conservative with distance
-            if distance > self.duplicate_distance_threshold * 0.5:
-                return False
         
-        # Require at least one to have weak tracking (prevents merging two stable tracks)
+        # If both are extremely confident and stable, require very close proximity
         both_very_stable = (
             p1['tracking_state'] == sl.OBJECT_TRACKING_STATE.OK and 
             p2['tracking_state'] == sl.OBJECT_TRACKING_STATE.OK and
-            p1['confidence'] > 80 and p2['confidence'] > 80
+            p1['confidence'] > 85 and p2['confidence'] > 85
         )
         
         if both_very_stable:
-            # If both are very confident and stable, this is likely two different people
-            # Only merge if EXTREMELY close (< 15cm)
-            return distance < 0.15
+            # If both are very confident and stable, only merge if very close (< 20cm)
+            return distance < 0.20
         
-        # One has weak tracking - more likely to be a duplicate
+        # Otherwise, they're duplicates if within threshold
         return True
     
     def _choose_better_id(self, id1: int, p1: dict, id2: int, p2: dict) -> Tuple[int, int]:
