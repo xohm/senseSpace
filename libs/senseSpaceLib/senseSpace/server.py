@@ -97,7 +97,8 @@ class SenseSpaceServer:
                  camera_fps: int = 60,  # 60fps default for smooth tracking
                  tracking_accuracy: int = 1,  # 0=FAST, 1=ACCURATE (default)
                  max_detection_range: float = 5.0,  # Maximum detection range in meters
-                 enable_body_fitting: bool = True):  # Body mesh fitting (default: enabled for BODY_34)
+                 enable_body_fitting: bool = True,  # Body mesh fitting (default: enabled for BODY_34)
+                 prediction_timeout: float = 2.0):  # Tracking prediction timeout in seconds
         self.host = host
         self.port = port
         self.local_ip = get_local_ip()
@@ -119,6 +120,7 @@ class SenseSpaceServer:
         self.body_tracking_model = accuracy_map.get(tracking_accuracy, sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE)
         self.max_detection_range = max_detection_range
         self.enable_body_fitting = enable_body_fitting
+        self.prediction_timeout = prediction_timeout
         
         # Print configuration
         resolution_names = {0: "HD720 (1280x720)", 1: "HD1080 (1920x1080)", 2: "VGA (672x376)"}
@@ -128,6 +130,7 @@ class SenseSpaceServer:
         print(f"[INFO]   FPS: {camera_fps}")
         print(f"[INFO]   Tracking accuracy: {accuracy_names.get(tracking_accuracy, 'ACCURATE')}")
         print(f"[INFO]   Max detection range: {max_detection_range}m")
+        print(f"[INFO]   Prediction timeout: {prediction_timeout}s")
         print(f"[INFO]   Body fitting (mesh): {'enabled' if enable_body_fitting else 'disabled (--no-body-fitting)'}")
         
         # Video streaming configuration
@@ -1497,7 +1500,7 @@ class SenseSpaceServer:
             body_tracking_parameters.body_format = sl.BODY_FORMAT.BODY_34
             body_tracking_parameters.enable_body_fitting = self.enable_body_fitting  # Enabled by default for BODY_34 mesh data
             body_tracking_parameters.enable_tracking = True
-            body_tracking_parameters.prediction_timeout_s = 0.5  # Increased to 0.5s - too low causes new skeleton creation
+            body_tracking_parameters.prediction_timeout_s = self.prediction_timeout  # Use runtime-configured timeout
             body_tracking_parameters.max_range = self.max_detection_range  # Use runtime-configured range
             body_tracking_parameters.allow_reduced_precision_inference = True  # Allow optimization for better performance
 

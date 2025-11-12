@@ -114,6 +114,8 @@ def main():
                        help="Body tracking accuracy: 0=FAST, 1=ACCURATE (default, higher quality)")
     parser.add_argument("--no-body-fitting", action="store_true",
                        help="Disable body fitting (reduces GPU load but loses mesh orientation data)")
+    parser.add_argument("--prediction-timeout", type=float, default=2.0,
+                       help="Tracking prediction timeout in seconds (default: 2.0, higher = more stable IDs)")
     # Note: --filter parameter removed - filter causes tracking issues and is permanently disabled
     parser.add_argument("--max-range", type=float, default=5.0,
                        help="Maximum detection range in meters (default: 5.0)")
@@ -146,7 +148,8 @@ def main():
         camera_fps=args.fps,
         tracking_accuracy=args.accuracy,
         max_detection_range=args.max_range,
-        enable_body_fitting=not args.no_body_fitting  # Enabled by default (needed for BODY_34 mesh data)
+        enable_body_fitting=not args.no_body_fitting,  # Enabled by default (needed for BODY_34 mesh data)
+        prediction_timeout=args.prediction_timeout
     )
     
     try:
