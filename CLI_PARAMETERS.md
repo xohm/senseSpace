@@ -47,20 +47,7 @@ Controls the body tracking model:
 python senseSpace_fusion_main.py --accuracy 1
 ```
 
-### 4. Body Tracking Filter (`--filter`)
-**Type**: Integer choice (0 or 1)  
-**Default**: 0 (disabled)
-
-Controls the duplicate body tracking filter:
-- `0` = Disabled - **Default, recommended for stable tracking**
-- `1` = Enabled - May cause flaky tracking behavior
-
-**Example**:
-```bash
-python senseSpace_fusion_main.py --filter 0
-```
-
-### 5. Maximum Detection Range (`--max-range`)
+### 4. Maximum Detection Range (`--max-range`)
 **Type**: Float  
 **Default**: 5.0
 
@@ -127,8 +114,8 @@ When starting the server, you'll see configuration information:
 [INFO]   Resolution: VGA (672x376)
 [INFO]   FPS: 60
 [INFO]   Tracking accuracy: ACCURATE
-[INFO]   Body filter: disabled
 [INFO]   Max detection range: 5.0m
+[INFO] Body tracking filter: disabled (using ZED SDK raw output)
 ```
 
 ## Existing Parameters
@@ -158,7 +145,7 @@ These new parameters work alongside existing server parameters:
 ```bash
 python server/senseSpace_fusion_main.py
 # Equivalent to:
-# --resolution 2 --fps 60 --accuracy 1 --filter 0 --max-range 5.0
+# --resolution 2 --fps 60 --accuracy 1 --max-range 5.0
 ```
 
 ### For High Quality (Default)

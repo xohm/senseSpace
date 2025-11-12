@@ -101,9 +101,9 @@ def main():
     parser.add_argument("--stream-port", type=int, default=5000,
                        help="Single multiplexed stream UDP port (default: 5000)")
     
-    # Body tracking filter
+    # Body tracking filter (legacy - disabled, not recommended)
     parser.add_argument("--no-filter", action="store_true",
-                       help="Disable body tracking duplicate filter (use raw ZED SDK output)")
+                       help="Legacy parameter (filter is already disabled by default)")
     
     # Camera and tracking parameters
     parser.add_argument("--resolution", type=int, choices=[0, 1, 2], default=2,
@@ -112,8 +112,7 @@ def main():
                        help="Camera frame rate: 30 or 60 fps (default: 60). Note: HD1080 only supports 30fps")
     parser.add_argument("--accuracy", type=int, choices=[0, 1], default=1,
                        help="Body tracking accuracy: 0=FAST, 1=ACCURATE (default, higher quality)")
-    parser.add_argument("--filter", type=int, choices=[0, 1], default=0,
-                       help="Body tracking filter: 0=disabled (default), 1=enabled (may cause flakiness)")
+    # Note: --filter parameter removed - filter causes tracking issues and is permanently disabled
     parser.add_argument("--max-range", type=float, default=5.0,
                        help="Maximum detection range in meters (default: 5.0)")
     
@@ -131,8 +130,7 @@ def main():
     # Create server instance (TCP by default, UDP if --udp flag is set)
     # Pass streaming configuration if --stream flag is used
     # Note: V2 per-camera streaming is always available (client-activated)
-    # Handle filter parameter: --filter overrides --no-filter if both specified
-    enable_filter = bool(args.filter) if hasattr(args, 'filter') else not args.no_filter
+    # Note: Body tracking filter is permanently disabled (causes more issues than it solves)
     
     server = SenseSpaceServer(
         host=args.host, 
@@ -141,7 +139,7 @@ def main():
         enable_streaming=args.stream,
         stream_host=args.stream_host if args.stream else None,
         stream_rgb_port=args.stream_port if args.stream else None,  # Use single stream port
-        enable_body_filter=enable_filter,
+        enable_body_filter=False,  # Always disabled - filter causes tracking problems
         camera_resolution=args.resolution,
         camera_fps=args.fps,
         tracking_accuracy=args.accuracy,

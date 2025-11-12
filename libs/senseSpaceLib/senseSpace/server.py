@@ -183,19 +183,11 @@ class SenseSpaceServer:
         self.fusion = None
         self.is_fusion_mode = False
         
-        # Body tracking filter (can be disabled)
-        self.enable_body_filter = enable_body_filter
-        if enable_body_filter:
-            self.body_filter = BodyTrackingFilter(
-                duplicate_distance_threshold=0.5,    # 50cm - more lenient for better tracking continuity
-                height_similarity_threshold=0.20,    # 20% - more lenient for natural body movement
-                memory_duration=3.0,                 # 3s - longer memory for ID persistence
-                confidence_diff_threshold=20.0       # Lower threshold for easier merging
-            )
-            print("[INFO] Body tracking filter enabled (tracking continuity optimized)")
-        else:
-            self.body_filter = None
-            print("[INFO] Body tracking filter disabled")
+        # Body tracking filter - DISABLED (causes more problems than it solves)
+        # The ZED SDK's own tracking is more reliable
+        self.enable_body_filter = False
+        self.body_filter = None
+        print("[INFO] Body tracking filter: disabled (using ZED SDK raw output)")
         
         # Floor detection
         self.detected_floor_height = None
@@ -1775,10 +1767,7 @@ class SenseSpaceServer:
                     print(f'[WARNING] retrieve_bodies failed: {e}')
                     continue
                 
-                # Apply body tracking filter to remove duplicates (if enabled)
-                if self.enable_body_filter:
-                    bodies = self.body_filter.filter_bodies(bodies)
-
+                # Use raw ZED SDK output (filter disabled - causes tracking issues)
                 # Process bodies - use helper function only
                 frame = self._process_bodies_single_camera(bodies)
                 if frame:
@@ -1988,10 +1977,7 @@ class SenseSpaceServer:
                     print(f'[WARNING] Fusion retrieve_bodies failed: {e}')
                     continue
 
-                # Apply body tracking filter to remove duplicates (if enabled)
-                if self.enable_body_filter:
-                    bodies = self.body_filter.filter_bodies(bodies)
-
+                # Use raw ZED SDK output (filter disabled - causes tracking issues)
                 # Process bodies
                 frame = self._process_bodies_fusion(bodies)
                 if frame:
