@@ -1497,8 +1497,9 @@ class SenseSpaceServer:
             body_tracking_parameters.body_format = sl.BODY_FORMAT.BODY_34
             body_tracking_parameters.enable_body_fitting = self.enable_body_fitting  # Enabled by default for BODY_34 mesh data
             body_tracking_parameters.enable_tracking = True
-            body_tracking_parameters.prediction_timeout_s = 0.3  # Reduced to 0.3s for faster updates at 60fps
+            body_tracking_parameters.prediction_timeout_s = 0.5  # Increased to 0.5s - too low causes new skeleton creation
             body_tracking_parameters.max_range = self.max_detection_range  # Use runtime-configured range
+            body_tracking_parameters.allow_reduced_precision_inference = True  # Allow optimization for better performance
 
             # Start local senders
             senders = {}
@@ -1603,7 +1604,13 @@ class SenseSpaceServer:
                 body_tracking_fusion_params = sl.BodyTrackingFusionParameters()
                 body_tracking_fusion_params.enable_tracking = True
                 body_tracking_fusion_params.enable_body_fitting = self.enable_body_fitting  # Enabled by default for BODY_34 mesh data
-
+                
+                # CRITICAL: Configure fusion tracking stability parameters
+                # These affect how fusion merges skeletons from multiple cameras
+                # Lower values = more stable tracking, fewer new skeleton IDs
+                body_tracking_fusion_params.skeleton_minimum_allowed_keypoints = 7  # Require at least 7 keypoints (stricter = more stable)
+                body_tracking_fusion_params.skeleton_minimum_allowed_camera = 1  # Minimum cameras to see person (1 is fine for 2-camera setup)
+                
                 status = self.fusion.enable_body_tracking(body_tracking_fusion_params)
                 if status != sl.FUSION_ERROR_CODE.SUCCESS:
                     print(f"[ERROR] Failed to enable fusion body tracking: {status}")
