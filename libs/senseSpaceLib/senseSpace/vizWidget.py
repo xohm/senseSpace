@@ -430,17 +430,21 @@ class SkeletonGLWidget(QGLWidget):
         glMatrixMode(GL_MODELVIEW)
     
     def draw_playback_indicator(self):
-        """Draw green play triangle indicator when playing back recording"""
+        """Draw play/pause indicator when playing back recording"""
         # Check if we're in playback mode
         if not hasattr(self, 'client') or self.client is None:
             return
         
-        # Check if client has a player and is playing
-        is_playing = False
-        if hasattr(self.client, 'player') and self.client.player is not None:
-            is_playing = self.client.player.is_playing()
+        # Check if client has a player
+        if not hasattr(self.client, 'player') or self.client.player is None:
+            return
         
-        if not is_playing:
+        player = self.client.player
+        is_playing = player.is_playing()
+        is_paused = player.is_paused() if hasattr(player, 'is_paused') else False
+        
+        # Only show indicator if we're in playback mode (playing or paused)
+        if not is_playing and not is_paused:
             return
         
         # Switch to 2D overlay mode
@@ -457,25 +461,52 @@ class SkeletonGLWidget(QGLWidget):
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
-        # Draw green play triangle (top-right corner)
         center_x = self.width() - 30
         center_y = 30
         size = 20
         
-        glColor4f(0.0, 1.0, 0.0, 0.9)  # Green with slight transparency
-        glBegin(GL_TRIANGLES)
-        # Right-pointing triangle
-        glVertex2f(center_x - size/2, center_y - size/2)  # Top left
-        glVertex2f(center_x + size/2, center_y)           # Right middle
-        glVertex2f(center_x - size/2, center_y + size/2)  # Bottom left
-        glEnd()
-        
-        # Draw text "PLAY" next to the triangle
-        glColor4f(1.0, 1.0, 1.0, 1.0)
-        try:
-            self.renderText(self.width() - 85, 35, "PLAY")
-        except Exception:
-            pass
+        if is_paused:
+            # Draw orange pause icon (two vertical bars)
+            glColor4f(1.0, 0.6, 0.0, 0.9)  # Orange with slight transparency
+            bar_width = size / 5
+            bar_height = size
+            spacing = size / 4
+            
+            glBegin(GL_QUADS)
+            # Left bar
+            glVertex2f(center_x - spacing - bar_width, center_y - bar_height/2)
+            glVertex2f(center_x - spacing, center_y - bar_height/2)
+            glVertex2f(center_x - spacing, center_y + bar_height/2)
+            glVertex2f(center_x - spacing - bar_width, center_y + bar_height/2)
+            # Right bar
+            glVertex2f(center_x + spacing, center_y - bar_height/2)
+            glVertex2f(center_x + spacing + bar_width, center_y - bar_height/2)
+            glVertex2f(center_x + spacing + bar_width, center_y + bar_height/2)
+            glVertex2f(center_x + spacing, center_y + bar_height/2)
+            glEnd()
+            
+            # Draw text "PAUSE" next to the icon
+            glColor4f(1.0, 1.0, 1.0, 1.0)
+            try:
+                self.renderText(self.width() - 95, 35, "PAUSE")
+            except Exception:
+                pass
+        else:
+            # Draw green play triangle (right-pointing)
+            glColor4f(0.0, 1.0, 0.0, 0.9)  # Green with slight transparency
+            glBegin(GL_TRIANGLES)
+            # Right-pointing triangle
+            glVertex2f(center_x - size/2, center_y - size/2)  # Top left
+            glVertex2f(center_x + size/2, center_y)           # Right middle
+            glVertex2f(center_x - size/2, center_y + size/2)  # Bottom left
+            glEnd()
+            
+            # Draw text "PLAY" next to the triangle
+            glColor4f(1.0, 1.0, 1.0, 1.0)
+            try:
+                self.renderText(self.width() - 85, 35, "PLAY")
+            except Exception:
+                pass
         
         # Restore 3D mode
         glDisable(GL_BLEND)

@@ -263,6 +263,12 @@ class MultiCameraVideoStreamer:
         self._rgb_pts = [0] * self.num_cameras
         self._depth_pts = [0] * self.num_cameras
         
+        # Recording support
+        self.recorder = None  # FrameRecorder instance (set externally)
+        self.recording_enabled = False
+        self.rgb_appsinks = []  # appsink elements for recording
+        self.depth_appsinks = []
+        
         # Client detection
         self.active_clients = {}  # {(ip, port): last_seen_timestamp}
         self.client_lock = threading.Lock()
@@ -468,6 +474,49 @@ class MultiCameraVideoStreamer:
         
         logger.info("MultiCameraVideoStreamer shutdown complete")
     
+    def enable_recording(self, recorder):
+        """
+        Enable video recording.
+        
+        Args:
+            recorder: FrameRecorder instance to send video data to
+        """
+        if self.recording_enabled:
+            print("[WARNING] Recording already enabled")
+            return
+        
+        self.recorder = recorder
+        self.recording_enabled = True
+        
+        # Initialize video buffers
+        if not hasattr(self, '_video_buffers'):
+            self._video_buffers = {}
+        
+        # Register all cameras with the recorder
+        for camera_idx in range(len(self.camera_serials)):
+            self.recorder.register_video_camera(
+                camera_idx=camera_idx,
+                width=self.rgb_width,
+                height=self.rgb_height,
+                fps=self.framerate,
+                codec='h265'
+            )
+        
+        print(f"[INFO] Video recording enabled for {len(self.camera_serials)} cameras")
+        logger.info(f"Video recording enabled for {len(self.camera_serials)} cameras")
+    
+    def disable_recording(self):
+        """Disable video recording."""
+        if not self.recording_enabled:
+            return
+        
+        self.recording_enabled = False
+        self.recorder = None
+        self._video_buffers = {}
+        
+        print("[INFO] Video recording disabled")
+        logger.info("Video recording disabled")
+    
     def _on_server_bus_message(self, bus, message):
         """Handle GStreamer bus messages for server pipeline"""
         t = message.type
@@ -486,6 +535,64 @@ class MultiCameraVideoStreamer:
                 print(f"[DEBUG] Server pipeline state: {old.value_nick} -> {new.value_nick}")
         return True
     
+    def _on_rgb_sample(self, sink, camera_idx):
+        """
+        Callback when RGB H.265 data is available from appsink.
+        Captures NAL units and sends to recorder.
+        """
+        sample = sink.emit('pull-sample')
+        if sample and self.recorder and self.recorder.is_recording():
+            buffer = sample.get_buffer()
+            if buffer:
+                # Extract NAL units as bytes
+                success, map_info = buffer.map(Gst.MapFlags.READ)
+                if success:
+                    nal_units = bytes(map_info.data)
+                    buffer.unmap(map_info)
+                    
+                    # Store in temporary buffer (will be written with next frame)
+                    if not hasattr(self, '_video_buffers'):
+                        self._video_buffers = {}
+                    if camera_idx not in self._video_buffers:
+                        self._video_buffers[camera_idx] = {}
+                    self._video_buffers[camera_idx]['rgb'] = nal_units
+        
+        return Gst.FlowReturn.OK
+    
+    def _on_depth_sample(self, sink, camera_idx):
+        """
+        Callback when depth H.265 data is available from appsink.
+        Captures NAL units and sends to recorder.
+        """
+        sample = sink.emit('pull-sample')
+        if sample and self.recorder and self.recorder.is_recording():
+            buffer = sample.get_buffer()
+            if buffer:
+                # Extract NAL units as bytes
+                success, map_info = buffer.map(Gst.MapFlags.READ)
+                if success:
+                    nal_units = bytes(map_info.data)
+                    buffer.unmap(map_info)
+                    
+                    # Store in temporary buffer
+                    if not hasattr(self, '_video_buffers'):
+                        self._video_buffers = {}
+                    if camera_idx not in self._video_buffers:
+                        self._video_buffers[camera_idx] = {}
+                    self._video_buffers[camera_idx]['depth'] = nal_units
+                    
+                    # If we have both RGB and depth, send to recorder
+                    if 'rgb' in self._video_buffers[camera_idx]:
+                        self.recorder.record_video_data(
+                            camera_idx,
+                            self._video_buffers[camera_idx]['rgb'],
+                            self._video_buffers[camera_idx]['depth']
+                        )
+                        # Clear buffers
+                        self._video_buffers[camera_idx] = {}
+        
+        return Gst.FlowReturn.OK
+    
     def _create_simple_rgb_pipeline(self):
         """
         Create separate RGB pipelines for each camera, all sending to same port with different payload types.
@@ -499,6 +606,7 @@ class MultiCameraVideoStreamer:
             # Create list to hold all RGB pipelines (one per camera)
             self.rgb_pipelines = []
             self.rgb_appsrcs = []
+            self.rgb_appsinks = []
             
             # Determine if this is multicast or unicast
             is_multicast = self.host.startswith("239.") or self.host.startswith("224.")
@@ -513,21 +621,45 @@ class MultiCameraVideoStreamer:
             for cam_idx in range(self.num_cameras):
                 pt = 96 + (cam_idx * 2)  # PT: 96, 98, 100, ...
                 
-                pipeline_str = (
-                    f"appsrc name=src format=time is-live=true do-timestamp=true "
-                    f"caps=video/x-raw,format=BGR,width={self.camera_width},height={self.camera_height},"
-                    f"framerate={framerate_int}/1 ! "
-                    f"queue max-size-buffers=2 leaky=downstream ! "
-                    f"videoconvert ! video/x-raw,format=NV12 ! "
-                    f"{encoder_name} {props_str} ! "
-                    f"h265parse ! "
-                    f"rtph265pay config-interval=1 pt={pt} ! "
-                    f"udpsink host={self.host} port={self.stream_port} {udpsink_params}"
-                )
+                if self.recording_enabled:
+                    # Pipeline with tee for both streaming and recording
+                    pipeline_str = (
+                        f"appsrc name=src format=time is-live=true do-timestamp=true "
+                        f"caps=video/x-raw,format=BGR,width={self.camera_width},height={self.camera_height},"
+                        f"framerate={framerate_int}/1 ! "
+                        f"queue max-size-buffers=2 leaky=downstream ! "
+                        f"videoconvert ! video/x-raw,format=NV12 ! "
+                        f"{encoder_name} {props_str} ! "
+                        f"h265parse ! tee name=t_{cam_idx} "
+                        # Streaming branch
+                        f"t_{cam_idx}. ! queue ! rtph265pay config-interval=1 pt={pt} ! "
+                        f"udpsink host={self.host} port={self.stream_port} {udpsink_params} "
+                        # Recording branch
+                        f"t_{cam_idx}. ! queue ! appsink name=sink_{cam_idx} emit-signals=true max-buffers=1 drop=true"
+                    )
+                else:
+                    # Original streaming-only pipeline
+                    pipeline_str = (
+                        f"appsrc name=src format=time is-live=true do-timestamp=true "
+                        f"caps=video/x-raw,format=BGR,width={self.camera_width},height={self.camera_height},"
+                        f"framerate={framerate_int}/1 ! "
+                        f"queue max-size-buffers=2 leaky=downstream ! "
+                        f"videoconvert ! video/x-raw,format=NV12 ! "
+                        f"{encoder_name} {props_str} ! "
+                        f"h265parse ! "
+                        f"rtph265pay config-interval=1 pt={pt} ! "
+                        f"udpsink host={self.host} port={self.stream_port} {udpsink_params}"
+                    )
                 
                 pipeline = Gst.parse_launch(pipeline_str)
                 appsrc = pipeline.get_by_name('src')
                 appsrc.set_property('format', Gst.Format.TIME)
+                
+                # Connect appsink if recording
+                if self.recording_enabled:
+                    appsink = pipeline.get_by_name(f'sink_{cam_idx}')
+                    appsink.connect('new-sample', self._on_rgb_sample, cam_idx)
+                    self.rgb_appsinks.append(appsink)
                 
                 # Add bus handler
                 bus = pipeline.get_bus()
@@ -537,12 +669,13 @@ class MultiCameraVideoStreamer:
                 self.rgb_pipelines.append(pipeline)
                 self.rgb_appsrcs.append(appsrc)
                 
-                logger.info(f"RGB pipeline {cam_idx} created: PT={pt}, port={self.stream_port}")
+                logger.info(f"RGB pipeline {cam_idx} created: PT={pt}, port={self.stream_port}, recording={'enabled' if self.recording_enabled else 'disabled'}")
             
             # Keep first pipeline as main reference for compatibility
             self.rgb_pipeline = self.rgb_pipelines[0] if self.rgb_pipelines else None
             
-            print(f"[INFO] Created {len(self.rgb_pipelines)} RGB pipelines on port {self.stream_port} (PT 96, 98, 100...)")
+            mode = "with recording" if self.recording_enabled else "streaming only"
+            print(f"[INFO] Created {len(self.rgb_pipelines)} RGB pipelines on port {self.stream_port} (PT 96, 98, 100...) - {mode}")
             
         except Exception as e:
             logger.error(f"Failed to create RGB pipelines: {e}")
@@ -613,6 +746,7 @@ class MultiCameraVideoStreamer:
             # Create list to hold all depth pipelines (one per camera)
             self.depth_pipelines = []
             self.depth_appsrcs = []
+            self.depth_appsinks = []
             
             print(f"[INFO] Depth encoding mode: {quality_desc}")
             logger.info(f"Depth encoding: {depth_encoder_name} with {quality_desc}")
@@ -649,21 +783,45 @@ class MultiCameraVideoStreamer:
             for cam_idx in range(self.num_cameras):
                 pt = 97 + (cam_idx * 2)  # PT: 97, 99, 101, ...
                 
-                pipeline_str = (
-                    f"appsrc name=src format=time is-live=true do-timestamp=true "
-                    f"caps=video/x-raw,format=GRAY16_LE,width={self.camera_width},height={self.camera_height},"
-                    f"framerate={framerate_int}/1 ! "
-                    f"queue max-size-buffers=2 leaky=downstream ! "
-                    f"videoconvert dither=none ! video/x-raw,format={output_format} ! "
-                    f"{depth_encoder_name} {depth_encoder_props_str} {lossless_props} ! "
-                    f"h265parse ! "
-                    f"rtph265pay config-interval=1 mtu={mtu_size} pt={pt} ! "
-                    f"udpsink host={self.host} port={self.stream_port} {udpsink_params}"
-                )
+                if self.recording_enabled:
+                    # Pipeline with tee for both streaming and recording
+                    pipeline_str = (
+                        f"appsrc name=src format=time is-live=true do-timestamp=true "
+                        f"caps=video/x-raw,format=GRAY16_LE,width={self.camera_width},height={self.camera_height},"
+                        f"framerate={framerate_int}/1 ! "
+                        f"queue max-size-buffers=2 leaky=downstream ! "
+                        f"videoconvert dither=none ! video/x-raw,format={output_format} ! "
+                        f"{depth_encoder_name} {depth_encoder_props_str} {lossless_props} ! "
+                        f"h265parse ! tee name=t_{cam_idx} "
+                        # Streaming branch
+                        f"t_{cam_idx}. ! queue ! rtph265pay config-interval=1 mtu={mtu_size} pt={pt} ! "
+                        f"udpsink host={self.host} port={self.stream_port} {udpsink_params} "
+                        # Recording branch
+                        f"t_{cam_idx}. ! queue ! appsink name=sink_{cam_idx} emit-signals=true max-buffers=1 drop=true"
+                    )
+                else:
+                    # Original streaming-only pipeline
+                    pipeline_str = (
+                        f"appsrc name=src format=time is-live=true do-timestamp=true "
+                        f"caps=video/x-raw,format=GRAY16_LE,width={self.camera_width},height={self.camera_height},"
+                        f"framerate={framerate_int}/1 ! "
+                        f"queue max-size-buffers=2 leaky=downstream ! "
+                        f"videoconvert dither=none ! video/x-raw,format={output_format} ! "
+                        f"{depth_encoder_name} {depth_encoder_props_str} {lossless_props} ! "
+                        f"h265parse ! "
+                        f"rtph265pay config-interval=1 mtu={mtu_size} pt={pt} ! "
+                        f"udpsink host={self.host} port={self.stream_port} {udpsink_params}"
+                    )
                 
                 pipeline = Gst.parse_launch(pipeline_str)
                 appsrc = pipeline.get_by_name('src')
                 appsrc.set_property('format', Gst.Format.TIME)
+                
+                # Connect appsink if recording
+                if self.recording_enabled:
+                    appsink = pipeline.get_by_name(f'sink_{cam_idx}')
+                    appsink.connect('new-sample', self._on_depth_sample, cam_idx)
+                    self.depth_appsinks.append(appsink)
                 
                 # Add bus handler
                 bus = pipeline.get_bus()
@@ -673,12 +831,13 @@ class MultiCameraVideoStreamer:
                 self.depth_pipelines.append(pipeline)
                 self.depth_appsrcs.append(appsrc)
                 
-                logger.info(f"Depth pipeline {cam_idx} created: PT={pt}, port={self.stream_port} (lossless)")
+                logger.info(f"Depth pipeline {cam_idx} created: PT={pt}, port={self.stream_port} (lossless), recording={'enabled' if self.recording_enabled else 'disabled'}")
             
             # Keep first pipeline as main reference for compatibility
             self.depth_pipeline = self.depth_pipelines[0] if self.depth_pipelines else None
             
-            print(f"[INFO] Created {len(self.depth_pipelines)} lossless Depth pipelines on port {self.stream_port} (PT 97, 99, 101...)")
+            mode = "with recording" if self.recording_enabled else "streaming only"
+            print(f"[INFO] Created {len(self.depth_pipelines)} lossless Depth pipelines on port {self.stream_port} (PT 97, 99, 101...) - {mode}")
             
         except Exception as e:
             logger.error(f"Failed to create depth pipelines: {e}")

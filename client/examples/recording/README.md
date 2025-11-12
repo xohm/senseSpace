@@ -1,15 +1,59 @@
 # Frame Recording and Playback
 
-Record skeleton tracking frames for offline playback and testing.
+Record skeleton tracking frames, point clouds, and video for offline playback and testing.
 
 ## Features
 
 - **Compressed Storage**: Uses zstandard compression for efficient file sizes
+- **Video Recording**: Capture H.265 video streams with zero re-encoding overhead
+- **Point Cloud Support**: Record 3D point clouds alongside skeleton data
 - **Seamless Playback**: Replay recordings with original timing
 - **Loop Support**: Continuous playback for testing
 - **Easy Integration**: Works with all client examples
 
+## File Format
+
+### Version 1.0 (.ssrec)
+- Skeleton data (JSON)
+- Optional point cloud data (binary)
+
+### Version 2.0 (.ssrec) - NEW!
+- Skeleton data (JSON)
+- Optional point cloud data (binary)
+- **Optional video data (H.265 NAL units)**
+- Multiple camera support
+- Backward compatible with v1.0 readers
+
 ## Recording
+
+### Video Recording (NEW!)
+
+Record skeleton, point clouds, AND video streams:
+
+```bash
+# Record with video for 60 seconds
+python video_recording_example.py \
+    --server-ip 127.0.0.1 \
+    --cameras 33253574 34893077 \
+    --duration 60
+
+# Record manually (press 'r' to start, 's' to stop)
+python video_recording_example.py \
+    --server-ip 127.0.0.1 \
+    --cameras 33253574 34893077
+```
+
+**Requirements:**
+- GStreamer with H.265 support
+- Video streaming enabled on server
+- Camera serial numbers
+
+**Options:**
+- `--no-pointcloud`: Disable point cloud recording
+- `--no-video`: Disable video recording
+- `--rgb-width`, `--rgb-height`: RGB resolution (default: 1280x720)
+- `--depth-width`, `--depth-height`: Depth resolution (default: 640x480)
+- `--framerate`: Video framerate (default: 30)
 
 ### Interactive Recording (Keyboard)
 
@@ -47,6 +91,34 @@ client.stop_recording()
 
 ## Playback
 
+### Video Playback (NEW!)
+
+Play back recordings with video:
+
+```bash
+# Display video in OpenCV windows
+python video_playback_example.py recordings/my_session.ssrec --show-video
+
+# Export video to MP4 files
+python video_playback_example.py recordings/my_session.ssrec --export-video output/
+
+# Play at 2x speed
+python video_playback_example.py recordings/my_session.ssrec --speed 2.0
+
+# Loop playback
+python video_playback_example.py recordings/my_session.ssrec --show-video --loop
+```
+
+**Features:**
+- Decodes H.265 video in real-time using GStreamer
+- Displays RGB and depth streams
+- Export to MP4 format
+- Speed control and looping
+
+**Controls (when --show-video):**
+- Press `SPACE` to pause/resume
+- Press `q` to quit
+
 ### Command Line Playback
 
 ```bash
@@ -82,16 +154,53 @@ if player.load():
 ## File Format
 
 **.ssrec files** (SenseSpace Recording):
-- Newline-delimited JSON (NDJSON)
 - Zstandard compressed
-- Each line contains:
-  ```json
-  {
-    "timestamp": 1698588622.123,
-    "frame_number": 42,
-    "frame": { /* Frame data */ }
-  }
-  ```
+- Each frame contains:
+  - JSON skeleton data
+  - Binary point cloud data (optional)
+  - Binary H.265 video data (optional, v2.0+)
+
+### Version 1.0 Format
+```
+Header (JSON): {version, timestamp, framerate}
+---
+Frame 1: JSON skeleton + optional binary point cloud
+Frame 2: JSON skeleton + optional binary point cloud
+...
+```
+
+### Version 2.0 Format (with video)
+```
+Header (JSON): {version, timestamp, framerate, has_video, video_cameras}
+---
+Frame 1: JSON skeleton + optional binary point cloud + binary H.265 NAL units
+Frame 2: JSON skeleton + optional binary point cloud + binary H.265 NAL units
+...
+```
+
+**Video binary format:**
+```
+[num_cameras: uint32]
+For each camera:
+  [camera_idx: uint32]
+  [rgb_size: uint32]
+  [depth_size: uint32]
+  [rgb_nal_units: bytes]
+  [depth_nal_units: bytes]
+```
+
+### File Size Estimates
+
+| Configuration | Per Frame | 10 min @ 30fps |
+|--------------|-----------|----------------|
+| Skeleton only | ~1 KB | ~54 MB |
+| + Point clouds (3 cams) | ~100 KB | ~5.4 GB |
+| + Video (3 cams, RGB+Depth) | ~200 KB | ~10.8 GB |
+
+**Video overhead:**
+- H.265 encoding: ~2-4 MB/sec per camera (RGB + depth)
+- Zero re-encoding cost (uses existing stream)
+- File size ≈ streaming bandwidth × duration
 
 ## Use Cases
 

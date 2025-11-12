@@ -85,17 +85,45 @@ class SenseSpaceServer:
     """Main server class for ZED SDK body tracking and TCP broadcasting"""
     
     # Camera configuration - used for both single and fusion modes
-    CAMERA_RESOLUTION = sl.RESOLUTION.HD720  # 672x376 @ 60fps
-    CAMERA_FPS = 30
+    # HD720 @ 60fps provides best balance of resolution and frame rate for fusion tracking
+    CAMERA_RESOLUTION = sl.RESOLUTION.HD720  # 1280x720 @ 60fps
+    CAMERA_FPS = 60  # 60fps for smooth tracking
 
     def __init__(self, host: str = "0.0.0.0", port: int = 12345, use_udp: bool = False,
                  enable_streaming: bool = False, stream_host: str = None,
                  stream_rgb_port: int = 5000, stream_depth_port: int = 5001,
-                 enable_body_filter: bool = True):
+                 enable_body_filter: bool = False,  # Changed to False - filter can cause tracking instability
+                 camera_resolution: int = 0,  # 0=HD720 (default), 1=HD1080, 2=VGA
+                 camera_fps: int = 60,  # 60fps default for smooth tracking
+                 tracking_accuracy: int = 0):  # 0=FAST (default), 1=ACCURATE
         self.host = host
         self.port = port
         self.local_ip = get_local_ip()
         self.use_udp = use_udp
+        
+        # Apply camera and tracking parameters (override class defaults)
+        resolution_map = {
+            0: sl.RESOLUTION.HD720,   # 1280x720
+            1: sl.RESOLUTION.HD1080,  # 1920x1080
+            2: sl.RESOLUTION.VGA      # 672x376
+        }
+        self.CAMERA_RESOLUTION = resolution_map.get(camera_resolution, sl.RESOLUTION.HD720)
+        self.CAMERA_FPS = camera_fps
+        
+        accuracy_map = {
+            0: sl.BODY_TRACKING_MODEL.HUMAN_BODY_FAST,
+            1: sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE
+        }
+        self.body_tracking_model = accuracy_map.get(tracking_accuracy, sl.BODY_TRACKING_MODEL.HUMAN_BODY_FAST)
+        
+        # Print configuration
+        resolution_names = {0: "HD720 (1280x720)", 1: "HD1080 (1920x1080)", 2: "VGA (672x376)"}
+        accuracy_names = {0: "FAST", 1: "ACCURATE"}
+        print(f"[INFO] Camera configuration:")
+        print(f"[INFO]   Resolution: {resolution_names.get(camera_resolution, 'HD720')}")
+        print(f"[INFO]   FPS: {camera_fps}")
+        print(f"[INFO]   Tracking accuracy: {accuracy_names.get(tracking_accuracy, 'FAST')}")
+        print(f"[INFO]   Body filter: {'enabled' if enable_body_filter else 'disabled'}")
         
         # Video streaming configuration
         self.enable_streaming = enable_streaming
@@ -984,7 +1012,7 @@ class SenseSpaceServer:
             # Enable body tracking if requested
             if enable_body_tracking:
                 body_params = sl.BodyTrackingParameters()
-                body_params.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE
+                body_params.detection_model = self.body_tracking_model  # Use runtime-configured model
                 body_params.body_format = sl.BODY_FORMAT.BODY_34
                 body_params.enable_body_fitting = True
                 body_params.enable_tracking = True
@@ -1468,12 +1496,12 @@ class SenseSpaceServer:
             positional_tracking_parameters.set_as_static = True
 
             body_tracking_parameters = sl.BodyTrackingParameters()
-            body_tracking_parameters.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_ACCURATE  # Changed from FAST to ACCURATE for better stability
+            body_tracking_parameters.detection_model = self.body_tracking_model  # Use runtime-configured model
             body_tracking_parameters.body_format = sl.BODY_FORMAT.BODY_34
             body_tracking_parameters.enable_body_fitting = True  # Enable to get local_orientation_per_joint
             body_tracking_parameters.enable_tracking = True
-            body_tracking_parameters.prediction_timeout_s = 0.5  # Increased from default 0.2s - keep tracking longer during occlusions
-            body_tracking_parameters.max_range = 3.0  # Limit tracking range to 10m for better accuracy
+            body_tracking_parameters.prediction_timeout_s = 0.3  # Reduced to 0.3s for faster updates at 60fps
+            body_tracking_parameters.max_range = 5.0  # Increased to 5m for better coverage
 
             # Start local senders
             senders = {}

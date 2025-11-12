@@ -105,7 +105,22 @@ def main():
     parser.add_argument("--no-filter", action="store_true",
                        help="Disable body tracking duplicate filter (use raw ZED SDK output)")
     
+    # Camera and tracking parameters
+    parser.add_argument("--resolution", type=int, choices=[0, 1, 2], default=0,
+                       help="Camera resolution: 0=HD720 (1280x720, default), 1=HD1080 (1920x1080), 2=VGA (672x376)")
+    parser.add_argument("--fps", type=int, choices=[30, 60], default=60,
+                       help="Camera frame rate: 30 or 60 fps (default: 60). Note: HD1080 only supports 30fps")
+    parser.add_argument("--accuracy", type=int, choices=[0, 1], default=0,
+                       help="Body tracking accuracy: 0=FAST (default, better performance), 1=ACCURATE (higher quality)")
+    parser.add_argument("--filter", type=int, choices=[0, 1], default=0,
+                       help="Body tracking filter: 0=disabled (default), 1=enabled (may cause flakiness)")
+    
     args = parser.parse_args()
+    
+    # Validate resolution/fps compatibility
+    if args.resolution == 1 and args.fps == 60:
+        print("[WARNING] HD1080 resolution only supports 30fps. Adjusting fps to 30.")
+        args.fps = 30
     
     # Handle --viz flag as alternative to --mode viz
     if args.viz:
@@ -114,6 +129,9 @@ def main():
     # Create server instance (TCP by default, UDP if --udp flag is set)
     # Pass streaming configuration if --stream flag is used
     # Note: V2 per-camera streaming is always available (client-activated)
+    # Handle filter parameter: --filter overrides --no-filter if both specified
+    enable_filter = bool(args.filter) if hasattr(args, 'filter') else not args.no_filter
+    
     server = SenseSpaceServer(
         host=args.host, 
         port=args.port, 
@@ -121,7 +139,10 @@ def main():
         enable_streaming=args.stream,
         stream_host=args.stream_host if args.stream else None,
         stream_rgb_port=args.stream_port if args.stream else None,  # Use single stream port
-        enable_body_filter=not args.no_filter  # Disable filter if --no-filter flag
+        enable_body_filter=enable_filter,
+        camera_resolution=args.resolution,
+        camera_fps=args.fps,
+        tracking_accuracy=args.accuracy
     )
     
     try:
