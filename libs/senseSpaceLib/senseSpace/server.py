@@ -136,8 +136,20 @@ class SenseSpaceServer:
         print(f"[INFO]   Body fitting (mesh): {'enabled' if enable_body_fitting else 'disabled (--no-body-fitting)'}")
         
         # Skeleton ID continuity filter - prevents duplicate skeletons
-        self.skeleton_id_aliases = {}  # {new_sdk_id: old_sdk_id} - map new IDs to old IDs we're keeping
-        self.skeleton_first_seen = {}  # {sdk_id: timestamp} - track when each ID first appeared
+        # Track each unique person with a stable ID
+        # Tracker structure: {
+        #   'current_sdk_id': int or None,
+        #   'created': timestamp,
+        #   'last_seen': timestamp,
+        #   'sdk_id_start': timestamp,
+        #   'sdk_ids': [history of previous SDK IDs],
+        #   'last_position': [x, y, z] or None - pelvis position when went inactive
+        # }
+        self.tracked_skeletons = {}
+        self.next_stable_id = 0
+        # Persistent set of SDK IDs that were identified as ghosts
+        # Once an SDK ID is a ghost, it stays a ghost (prevents reactivation with ghost IDs)
+        self.ghost_sdk_ids = set()
         print(f"[INFO] Skeleton ID continuity filter: enabled (prevents ghost duplicates)")
         
         # Video streaming configuration
@@ -2190,115 +2202,284 @@ class SenseSpaceServer:
 
     def _apply_skeleton_continuity_filter(self, bodies):
         """
-        Simple duplicate filter using ID aliasing:
-        1. When we see 2 bodies at same position, keep OLDER ID, alias NEWER ID to it
-        2. Remove skeletons with aliased (newer) IDs from output
-        3. Cleanup aliases when SDK stops reporting the newer ID
-        4. Handle alias chains (if aliased ID gets re-aliased)
+        Maintains stable skeleton IDs across tracking interruptions.
+        
+        The ZED SDK may create new IDs when tracking is briefly lost, resulting in
+        duplicate skeletons for the same person. This filter:
+        1. Detects when a "new" skeleton is actually a duplicate of an existing one
+        2. Maintains a stable ID for each unique person
+        3. Tracks which SDK ID is currently active for each stable ID
+        4. Keeps history of all SDK IDs that represented the same person
+        
+        Strategy:
+        - Each person gets one stable_id that clients always see
+        - The stable_id tracks which current_sdk_id to use for skeleton data
+        - When SDK creates duplicate, we update current_sdk_id but keep stable_id
+        - Only output skeletons that have ACTIVE data in current frame
         """
         current_time = time.time()
-        MAX_POSITION_DIFF = 1500  # 1.5m
-        POSE_SIMILARITY_THRESHOLD = 0.3  # 30% joint similarity
+        current_sdk_ids = set()
         
-        # Get current SDK IDs
-        current_sdk_ids = set(person.id for person in bodies.body_list)
-        
-        # Cleanup: Remove aliases where the NEW ID is no longer reported by SDK
-        aliases_to_remove = [new_id for new_id in self.skeleton_id_aliases.keys() 
-                            if new_id not in current_sdk_ids]
-        for new_id in aliases_to_remove:
-            del self.skeleton_id_aliases[new_id]
-            if new_id in self.skeleton_first_seen:
-                del self.skeleton_first_seen[new_id]
-        
-        # Track first appearance time for each skeleton
+        # Build lookup dict for quick access to skeleton data by SDK ID
+        persons_by_sdk_id = {}
         for person in bodies.body_list:
-            if person.id not in self.skeleton_first_seen:
-                self.skeleton_first_seen[person.id] = current_time
+            sdk_id = person.id
+            current_sdk_ids.add(sdk_id)
+            persons_by_sdk_id[sdk_id] = person
         
-        # Build list of skeletons with their ages
-        skeletons = []
-        for person in bodies.body_list:
-            age = current_time - self.skeleton_first_seen.get(person.id, current_time)
-            skeletons.append((person, age, person.id))
+        # Build reverse lookup: which stable_id is currently using each sdk_id
+        sdk_to_stable = {}
+        for stable_id, tracker in self.tracked_skeletons.items():
+            if tracker['current_sdk_id'] is not None:
+                sdk_to_stable[tracker['current_sdk_id']] = stable_id
         
-        # Sort by age (oldest first)
-        skeletons.sort(key=lambda x: x[1], reverse=True)
+        # Process each SDK ID in current frame
+        # Keep track of which SDK IDs we've already assigned to trackers in THIS frame
+        processed_sdk_ids = set()
+        skipped_ghost_ids = set()  # Track SDK IDs that were identified as ghosts and skipped
         
-        # Find duplicates: compare each pair
-        new_aliases = {}
-        for i in range(len(skeletons)):
-            person_a, age_a, id_a = skeletons[i]
+        for sdk_id in current_sdk_ids:
+            person = persons_by_sdk_id[sdk_id]
             
-            # Skip if already aliased
-            if id_a in self.skeleton_id_aliases:
+            # Check if this SDK ID is already being tracked
+            if sdk_id in sdk_to_stable:
+                # Update timestamp for this tracked skeleton
+                stable_id = sdk_to_stable[sdk_id]
+                self.tracked_skeletons[stable_id]['last_seen'] = current_time
+                processed_sdk_ids.add(sdk_id)
                 continue
             
-            for j in range(i + 1, len(skeletons)):
-                person_b, age_b, id_b = skeletons[j]
-                
-                # Skip if already aliased
-                if id_b in self.skeleton_id_aliases:
+            # Skip if this SDK ID was already identified as a ghost (either in this frame or previously)
+            if sdk_id in skipped_ghost_ids or sdk_id in self.ghost_sdk_ids:
+                continue
+            
+            # New SDK ID - check if it's a ghost/duplicate of ANY tracker (active OR recently inactive)
+            is_duplicate = False
+            best_match_stable_id = None
+            REACTIVATION_WINDOW = 2.0  # Check inactive trackers for 2 seconds
+            
+            # FIRST: Check against OTHER SDK IDs we've already processed in THIS frame
+            # (This detects when SDK creates 2 IDs for same person in same frame)
+            for other_sdk_id in processed_sdk_ids:
+                if other_sdk_id == sdk_id:
                     continue
                 
-                # Get keypoints
-                kp_a = getattr(person_a, 'keypoint', None)
-                if kp_a is None:
-                    kp_a = getattr(person_a, 'keypoints', None)
-                kp_b = getattr(person_b, 'keypoint', None)
-                if kp_b is None:
-                    kp_b = getattr(person_b, 'keypoints', None)
+                other_person = persons_by_sdk_id[other_sdk_id]
                 
-                if kp_a is None or kp_b is None or len(kp_a) == 0 or len(kp_b) == 0:
+                # Check if this new SDK ID is a ghost of the already-processed one
+                if self._are_skeletons_same_person(person, other_person):
+                    # This is a ghost! Find which stable ID is tracking the other SDK ID
+                    if other_sdk_id in sdk_to_stable:
+                        best_match_stable_id = sdk_to_stable[other_sdk_id]
+                        is_duplicate = True
+                        print(f"[FILTER] Ghost in same frame: SDK ID {sdk_id} is duplicate of SDK ID {other_sdk_id} (stable ID {best_match_stable_id})")
+                        break
+            
+            # SECOND: If not a ghost in current frame, check existing trackers
+            if not is_duplicate:
+                for stable_id, tracker in self.tracked_skeletons.items():
+                    current_tracked_sdk_id = tracker['current_sdk_id']
+                    
+                    # For ACTIVE trackers: compare directly
+                    if current_tracked_sdk_id is not None and current_tracked_sdk_id in persons_by_sdk_id:
+                        tracked_person = persons_by_sdk_id[current_tracked_sdk_id]
+                        
+                        # Check if this new SDK ID is a ghost of the active tracker
+                        if self._are_skeletons_same_person(person, tracked_person):
+                            best_match_stable_id = stable_id
+                            is_duplicate = True
+                            break
+                    
+                    # For INACTIVE trackers: check if recently inactive (might be same person reappearing)
+                    elif current_tracked_sdk_id is None:
+                        time_inactive = current_time - tracker['last_seen']
+                        
+                        # Only consider very recently inactive trackers
+                        # BUT: don't reactivate with an SDK ID that was identified as a ghost
+                        if time_inactive < REACTIVATION_WINDOW and sdk_id not in skipped_ghost_ids and sdk_id not in self.ghost_sdk_ids:
+                            # This is likely the same person - reactivate the tracker
+                            # (We can't compare skeletons since tracker is inactive, but timing suggests it's the same)
+                            best_match_stable_id = stable_id
+                            is_duplicate = True
+                            break
+            
+            if is_duplicate and best_match_stable_id is not None:
+                tracker = self.tracked_skeletons[best_match_stable_id]
+                old_sdk_id = tracker['current_sdk_id']
+                
+                if old_sdk_id is not None and old_sdk_id in current_sdk_ids:
+                    # Both the tracker's current SDK ID and the new SDK ID exist in same frame
+                    # This means ZED SDK created a duplicate for the same person
+                    # The HIGHER SDK ID is usually the NEWER tracking (ZED SDK increments IDs)
+                    # So we should use whichever ID is higher
+                    
+                    if sdk_id > old_sdk_id:
+                        # New SDK ID is higher → it's the new tracking, replace the old one
+                        print(f"[FILTER] SDK upgrade: SDK ID {sdk_id} replaces SDK ID {old_sdk_id} for stable ID {best_match_stable_id} (newer tracking)")
+                        
+                        # Record the old SDK ID in history
+                        tracker['sdk_ids'].append({
+                            'sdk_id': old_sdk_id,
+                            'start': tracker.get('sdk_id_start', tracker['created']),
+                            'end': current_time
+                        })
+                        
+                        # Switch to using the new (higher) SDK ID
+                        tracker['current_sdk_id'] = sdk_id
+                        tracker['sdk_id_start'] = current_time
+                        tracker['last_seen'] = current_time
+                        processed_sdk_ids.add(sdk_id)
+                        
+                    else:
+                        # New SDK ID is lower → it's an old ghost, ignore it
+                        print(f"[FILTER] Ghost ignored: SDK ID {sdk_id} is old ghost of SDK ID {old_sdk_id} (stable ID {best_match_stable_id})")
+                        skipped_ghost_ids.add(sdk_id)
+                        self.ghost_sdk_ids.add(sdk_id)
+                        # Keep the higher (current) SDK ID active
+                        tracker['last_seen'] = current_time
+                        processed_sdk_ids.add(old_sdk_id)
+                    
                     continue
+                elif old_sdk_id is not None:
+                    # Old SDK ID is gone but new one appeared - this is a replacement
+                    tracker['sdk_ids'].append({
+                        'sdk_id': old_sdk_id,
+                        'start': tracker.get('sdk_id_start', tracker['created']),
+                        'end': current_time
+                    })
+                    tracker['current_sdk_id'] = sdk_id
+                    tracker['sdk_id_start'] = current_time
+                    tracker['last_seen'] = current_time
+                    processed_sdk_ids.add(sdk_id)
+                    print(f"[FILTER] Ghost replaced: SDK ID {sdk_id} replaces disappeared ghost {old_sdk_id} for stable ID {best_match_stable_id}")
+                else:
+                    # Reactivating inactive tracker
+                    tracker['current_sdk_id'] = sdk_id
+                    tracker['sdk_id_start'] = current_time
+                    tracker['last_seen'] = current_time
+                    processed_sdk_ids.add(sdk_id)
+                    print(f"[FILTER] Reactivated: stable ID {best_match_stable_id} with SDK ID {sdk_id} (was inactive {current_time - tracker['last_seen']:.2f}s)")
+            
+            if not is_duplicate:
+                # Truly new person - create a new tracker
+                stable_id = self.next_stable_id
+                self.next_stable_id += 1
                 
-                # Check distance
-                pelvis_a, pelvis_b = kp_a[0], kp_b[0]
-                dx = pelvis_a[0] - pelvis_b[0]
-                dy = pelvis_a[1] - pelvis_b[1]
-                dz = pelvis_a[2] - pelvis_b[2]
-                distance = (dx*dx + dy*dy + dz*dz) ** 0.5
-                
-                if distance > MAX_POSITION_DIFF:
-                    continue
-                
-                # Check pose similarity
-                num_joints = min(len(kp_a), len(kp_b))
-                similar_joints = 0
-                for k in range(num_joints):
-                    jdx = kp_a[k][0] - kp_b[k][0]
-                    jdy = kp_a[k][1] - kp_b[k][1]
-                    jdz = kp_a[k][2] - kp_b[k][2]
-                    joint_dist = (jdx*jdx + jdy*jdy + jdz*jdz) ** 0.5
-                    if joint_dist < 300:  # Within 30cm
-                        similar_joints += 1
-                
-                pose_similarity = similar_joints / num_joints if num_joints > 0 else 0
-                
-                if pose_similarity >= POSE_SIMILARITY_THRESHOLD:
-                    # Found duplicate! id_a is OLDER, id_b is NEWER
-                    # Keep old ID (id_a), suppress new ID (id_b)
-                    # Check if id_a is itself an alias - if so, use the root
-                    root_id = self.skeleton_id_aliases.get(id_a, id_a)
-                    new_aliases[id_b] = root_id
-                    print(f"[FILTER] Duplicate: suppressing new ID {id_b}, aliasing to old ID {root_id}")
-                    break
+                self.tracked_skeletons[stable_id] = {
+                    'current_sdk_id': sdk_id,
+                    'created': current_time,
+                    'last_seen': current_time,
+                    'sdk_id_start': current_time,
+                    'sdk_ids': []  # History of previous SDK IDs
+                }
+                print(f"[FILTER] New person: stable ID {stable_id} (SDK ID {sdk_id})")
+                processed_sdk_ids.add(sdk_id)
         
-        # Update aliases
-        self.skeleton_id_aliases.update(new_aliases)
+        # Cleanup: Mark trackers as inactive if their current SDK ID is gone
+        # But DON'T delete them - they might get a replacement in future frames
+        for stable_id, tracker in list(self.tracked_skeletons.items()):
+            current_sdk_id = tracker['current_sdk_id']
+            
+            if current_sdk_id is not None and current_sdk_id not in current_sdk_ids:
+                # This SDK ID is gone - record it in history and mark as inactive
+                tracker['sdk_ids'].append({
+                    'sdk_id': current_sdk_id,
+                    'start': tracker.get('sdk_id_start', tracker['created']),
+                    'end': current_time
+                })
+                tracker['current_sdk_id'] = None  # Mark as inactive
+                print(f"[FILTER] Stable ID {stable_id} lost SDK ID {current_sdk_id} (marked inactive)")
+        
+        # Optional: Clean up old inactive trackers after timeout (e.g., 10 seconds)
+        timeout = 10.0
+        for stable_id in list(self.tracked_skeletons.keys()):
+            tracker = self.tracked_skeletons[stable_id]
+            if tracker['current_sdk_id'] is None:
+                time_inactive = current_time - tracker['last_seen']
+                if time_inactive > timeout:
+                    print(f"[FILTER] Removing stable ID {stable_id} after {time_inactive:.1f}s inactive")
+                    del self.tracked_skeletons[stable_id]
         
         # Don't modify bodies.body_list here - ZED SDK doesn't support it properly
         # Filtering will happen in _process_bodies_fusion
         return bodies
 
-    def _process_bodies_fusion(self, bodies) -> Optional[Frame]:
-        """Process bodies from fusion and create Frame object"""
-        people = []
+    def _are_skeletons_same_person(self, person_a, person_b):
+        """Check if two skeletons represent the same person"""
+        MAX_POSITION_DIFF = 1500  # 1.5m
+        POSE_SIMILARITY_THRESHOLD = 0.3  # 30% joint similarity
+        
+        # Get keypoints
+        kp_a = getattr(person_a, 'keypoint', None)
+        if kp_a is None:
+            kp_a = getattr(person_a, 'keypoints', None)
+        kp_b = getattr(person_b, 'keypoint', None)
+        if kp_b is None:
+            kp_b = getattr(person_b, 'keypoints', None)
+        
+        if kp_a is None or kp_b is None or len(kp_a) == 0 or len(kp_b) == 0:
+            return False
+        
+        # Check distance between pelvis positions
+        pelvis_a, pelvis_b = kp_a[0], kp_b[0]
+        dx = pelvis_a[0] - pelvis_b[0]
+        dy = pelvis_a[1] - pelvis_b[1]
+        dz = pelvis_a[2] - pelvis_b[2]
+        distance = (dx*dx + dy*dy + dz*dz) ** 0.5
+        
+        if distance > MAX_POSITION_DIFF:
+            return False
+        
+        # Check pose similarity
+        num_joints = min(len(kp_a), len(kp_b))
+        similar_joints = 0
+        for k in range(num_joints):
+            jdx = kp_a[k][0] - kp_b[k][0]
+            jdy = kp_a[k][1] - kp_b[k][1]
+            jdz = kp_a[k][2] - kp_b[k][2]
+            joint_dist = (jdx*jdx + jdy*jdy + jdz*jdz) ** 0.5
+            if joint_dist < 300:  # Within 30cm
+                similar_joints += 1
+        
+        pose_similarity = similar_joints / num_joints if num_joints > 0 else 0
+        return pose_similarity >= POSE_SIMILARITY_THRESHOLD
 
-        for person in bodies.body_list:
-            # Skip if this ID is suppressed (aliased to an older ID)
-            if person.id in self.skeleton_id_aliases:
+    def _process_bodies_fusion(self, bodies) -> Optional[Frame]:
+        """
+        Process bodies from fusion and create Frame object.
+        
+        Uses tracked_skeletons to maintain stable IDs while using newest skeleton data:
+        - Only output skeletons that have ACTIVE skeleton data in current frame
+        - Use stable_id for client-facing ID
+        - Use current_sdk_id to fetch skeleton data from bodies.body_list
+        """
+        people = []
+        
+        # Build dict for quick person lookup by SDK ID
+        persons_by_sdk_id = {person.id: person for person in bodies.body_list}
+        
+        # Build set of SDK IDs that are currently being used by trackers
+        active_sdk_ids = set()
+        for tracker in self.tracked_skeletons.values():
+            if tracker['current_sdk_id'] is not None:
+                active_sdk_ids.add(tracker['current_sdk_id'])
+        
+        # Process each tracked skeleton
+        for stable_id, tracker in self.tracked_skeletons.items():
+            current_sdk_id = tracker['current_sdk_id']
+            
+            # Skip if this tracker has no active SDK ID
+            if current_sdk_id is None:
                 continue
+            
+            # Skip if the SDK ID doesn't have skeleton data in current frame
+            if current_sdk_id not in persons_by_sdk_id:
+                continue
+            
+            # Get skeleton data from current SDK ID
+            person = persons_by_sdk_id[current_sdk_id]
+            output_id = stable_id  # Use stable ID for clients
+            
             # Handle different SDK versions for keypoints
             kp_attr = getattr(person, 'keypoint', None)
             if kp_attr is None:
@@ -2358,7 +2539,7 @@ class SenseSpaceServer:
                     pass
 
             people.append(Person(
-                id=person.id,
+                id=output_id,  # Use stable old ID for client, not SDK's current ID
                 tracking_state=str(person.tracking_state),
                 confidence=float(person.confidence),
                 skeleton=joints,
