@@ -116,9 +116,10 @@ def main():
                        help="Disable body fitting (reduces GPU load but loses mesh orientation data)")
     parser.add_argument("--prediction-timeout", type=float, default=2.0,
                        help="Tracking prediction timeout in seconds (default: 2.0 for stable ID tracking)")
-    # Note: --filter parameter removed - filter causes tracking issues and is permanently disabled
     parser.add_argument("--max-range", type=float, default=10.0,
                        help="Maximum detection range in meters (default: 10.0)")
+    parser.add_argument("--no-skeleton-filter", action="store_true",
+                       help="Disable skeleton ID continuity filter (allows ZED SDK ghost duplicates, useful for debugging)")
     
     args = parser.parse_args()
     
@@ -149,7 +150,8 @@ def main():
         tracking_accuracy=args.accuracy,
         max_detection_range=args.max_range,
         enable_body_fitting=not args.no_body_fitting,  # Enabled by default (needed for BODY_34 mesh data)
-        prediction_timeout=args.prediction_timeout
+        prediction_timeout=args.prediction_timeout,
+        enable_skeleton_filter=not args.no_skeleton_filter  # Skeleton ID continuity filter (default: enabled)
     )
     
     try:

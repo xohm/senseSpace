@@ -98,7 +98,8 @@ class SenseSpaceServer:
                  tracking_accuracy: int = 1,  # 0=FAST, 1=MEDIUM (default), 2=ACCURATE
                  max_detection_range: float = 10.0,  # Maximum detection range in meters (increased for better tracking)
                  enable_body_fitting: bool = True,  # Body mesh fitting (default: enabled for BODY_34)
-                 prediction_timeout: float = 2.0):  # Tracking prediction timeout (2.0s - balance between stability and ghost reduction)
+                 prediction_timeout: float = 2.0,  # Tracking prediction timeout (2.0s - balance between stability and ghost reduction)
+                 enable_skeleton_filter: bool = True):  # Skeleton ID continuity filter (prevents ghost duplicates)
         self.host = host
         self.port = port
         self.local_ip = get_local_ip()
@@ -150,7 +151,11 @@ class SenseSpaceServer:
         # Persistent set of SDK IDs that were identified as ghosts
         # Once an SDK ID is a ghost, it stays a ghost (prevents reactivation with ghost IDs)
         self.ghost_sdk_ids = set()
-        print(f"[INFO] Skeleton ID continuity filter: enabled (prevents ghost duplicates)")
+        self.enable_skeleton_filter = enable_skeleton_filter
+        if enable_skeleton_filter:
+            print(f"[INFO] Skeleton ID continuity filter: enabled (prevents ghost duplicates)")
+        else:
+            print(f"[INFO] Skeleton ID continuity filter: DISABLED (raw ZED SDK output, may show duplicates)")
         
         # Video streaming configuration
         self.enable_streaming = enable_streaming
@@ -2017,10 +2022,11 @@ class SenseSpaceServer:
                     print(f'[WARNING] Fusion retrieve_bodies failed: {e}')
                     continue
 
-                # Apply skeleton continuity filter to prevent ghost duplicates
-                bodies = self._apply_skeleton_continuity_filter(bodies)
+                # Apply skeleton continuity filter to prevent ghost duplicates (if enabled)
+                if self.enable_skeleton_filter:
+                    bodies = self._apply_skeleton_continuity_filter(bodies)
                 
-                # Process bodies (filter will be applied inside _process_bodies_fusion)
+                # Process bodies
                 frame = self._process_bodies_fusion(bodies)
                 if frame:
                     frame.floor_height = self.detected_floor_height
